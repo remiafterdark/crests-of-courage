@@ -246,7 +246,12 @@ void merge_into_live_save(dSv_info_c* info, const uint8_t* blob) {
 void apply_snapshot() {
     dSv_info_c* info = dComIfGs_getSaveInfo();
     if (info == nullptr || s_pending.size() != kSaveSize) return;
-    write_backup(info);
+
+    if (!game_mode_is_coop()) {
+        write_backup(info);
+    } else {
+        coop_log::info("coop_mod: [JOIN] co-op save - taking the host's world without a backup");
+    }
     merge_into_live_save(info, s_pending.data());
     s_carryingJoinedWorld = true;
     s_joinerApplied = true;
@@ -255,7 +260,13 @@ void apply_snapshot() {
 
     const CoopPeer& peer = features_peer_of(kCoopHostId);
     features_toast(("Synced with " + (peer.present ? peer.name : std::string("the host"))).c_str(),
-        "You're using their progress now.");
+        game_mode_is_coop() ? "You're using their progress now."
+                            : "You're using their progress now. Your own save is backed up.");
+
+    {
+        const std::string address = coop_net_join_address();
+        game_mode_remember_host(peer.present ? peer.name.c_str() : nullptr, address.c_str());
+    }
     coop_log::info("coop_mod: [JOIN] applied the host's progress");
 }
 

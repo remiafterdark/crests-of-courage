@@ -187,6 +187,11 @@ void queue_particle(uint8_t flags, uint8_t type, u16 id, u32 key, const cXyz* po
     ++s_particleCount;
 }
 
+void on_local_sound_pre(ModContext*, void*, void*, void*) {
+    if (s_suppress > 0) return;
+    voices_begin_local();
+}
+
 void on_obj_sound(void* args, uint8_t kind) {
     if (!s_captureSounds || s_suppress > 0) return;
     Z2SoundObjBase* self = mods::arg<Z2SoundObjBase*>(args, 0);
@@ -488,6 +493,21 @@ void flush_queues() {
 void fx_init() {
     const ModResult a = mods::hook::add_post<CoopFxObjSound>(on_obj_sound_post);
     const ModResult b = mods::hook::add_post<CoopFxObjLevelSound>(on_obj_level_sound_post);
+    mods::hook::add_pre<CoopFxSeStart>(
+        [](ModContext* ctx, void* a, void* r, void* u) -> HookAction {
+            on_local_sound_pre(ctx, a, r, u);
+            return HOOK_CONTINUE;
+        });
+    mods::hook::add_pre<CoopFxSeStartLevel>(
+        [](ModContext* ctx, void* a, void* r, void* u) -> HookAction {
+            on_local_sound_pre(ctx, a, r, u);
+            return HOOK_CONTINUE;
+        });
+    mods::hook::add_pre<CoopFxObjSound>(
+        [](ModContext* ctx, void* a, void* r, void* u) -> HookAction {
+            on_local_sound_pre(ctx, a, r, u);
+            return HOOK_CONTINUE;
+        });
     const ModResult c = mods::hook::add_post<CoopFxSeStart>(on_se_start_post);
     const ModResult d = mods::hook::add_post<CoopFxSeStartLevel>(on_se_start_level_post);
     mods::hook::add_pre<CoopFxParticleKeyed>(on_particle_keyed_pre);
@@ -576,6 +596,15 @@ void fx_on_sounds(const uint8_t* payload, size_t size, uint8_t from) {
     const s8 reverb = peer.present && peer.inGame
                           ? dComIfGp_getReverb(static_cast<int>(peer.curRoom))
                           : 0;
+
+    if (peer.present) {
+
+        const char* voiceSkin = peer.skins.name[kSkinChoiceVoice];
+        if (voiceSkin[0] != '\0' &&
+            skins_have(voiceSkin, peer.skins.hash[kSkinChoiceVoice])) {
+            voices_begin(voiceSkin);
+        }
+    }
 
     ++s_suppress;
     for (size_t i = 0; i < count; ++i) {

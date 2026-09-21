@@ -134,6 +134,15 @@ bool in_gameplay() {
     return daAlink_getAlinkActorClass() != nullptr;
 }
 
+}
+
+void coop_toast(const char* title, const char* body) {
+    if (title == nullptr) return;
+    toast(title, body != nullptr ? body : "");
+}
+
+namespace {
+
 bool item_is_relayed(uint8_t item) {
     if (item >= dItemNo_SWORD_e && item <= dItemNo_WEAR_ZORA_e) return true;
     if (item >= dItemNo_WALLET_LV1_e && item <= dItemNo_WALLET_LV3_e) return true;
@@ -682,6 +691,7 @@ void send_presence() {
     daAlink_c* alink = daAlink_getAlinkActorClass();
     const char* stage = dComIfGp_getStartStageName();
     msg.inGame = (alink != nullptr && stage != nullptr && stage[0] != '\0') ? 1 : 0;
+    msg.skinStamp = local_skin_stamp();
     if (stage != nullptr) {
         std::memcpy(msg.stage, stage, strnlen(stage, sizeof(msg.stage)));
     }
@@ -747,6 +757,11 @@ void on_presence(const uint8_t* payload, size_t size, uint8_t from) {
     peer_slot(from).y = msg.y;
     peer_slot(from).z = msg.z;
     peer_slot(from).angleY = msg.angleY;
+
+    if (peer_slot(from).skinStamp != msg.skinStamp) {
+        peer_slot(from).skinStamp = msg.skinStamp;
+        coop_net_send_to(from, kMsgSkinRequest, nullptr, 0);
+    }
     peer_slot(from).lifeKnown = msg.inGame != 0 && msg.maxLife != 0;
     peer_slot(from).life = msg.life;
     peer_slot(from).maxLife = msg.maxLife;
@@ -861,9 +876,6 @@ void features_register_vars() {
 
     s_vars.debugMenu = register_var("debug_menu", CONFIG_VAR_BOOL, false, 0, nullptr);
     s_devLogging = cfg_bool(s_vars.debugMenu, false);
-    s_vars.puppetMidna = register_var("show_peer_midna", CONFIG_VAR_BOOL, true, 0, nullptr);
-    s_vars.puppetLanternLight =
-        register_var("puppet_lantern_light", CONFIG_VAR_BOOL, true, 0, nullptr);
 
     s_vars.debugAutowarp = register_var("debug_autowarp_ticks", CONFIG_VAR_INT, false, 0, nullptr);
 
@@ -944,8 +956,62 @@ static void run_debug_shift() {
     coop_log::info("coop_mod: [SHIFT] moved to ({:.0f}, {:.0f}, {:.0f})", pos.x, pos.y, pos.z);
 }
 
+void coop_remember_last_host(const char* name, const char* address) {
+    if (name == nullptr || name[0] == '\0') return;
+    std::string body = "Last played with " + std::string(name);
+    if (address != nullptr && address[0] != '\0') body += " at " + std::string(address);
+    features_toast("Co-op save", (body + ".").c_str());
+}
+
+uint32_t local_skin_stamp() {
+    SkinChoices choices;
+    skins_local_choices(&choices);
+    uint32_t stamp = 2166136261u;
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&choices);
+    for (size_t i = 0; i < sizeof(choices); ++i) {
+        stamp = (stamp ^ bytes[i]) * 16777619u;
+    }
+    return stamp;
+}
+
+void send_skin_choices() {
+    if (!coop_net_connected()) return;
+    SkinChoices choices;
+    skins_local_choices(&choices);
+    MsgSkinChoices msg{};
+    static_assert(sizeof(msg.name) == sizeof(choices.name), "slot count changed");
+    std::memcpy(msg.name, choices.name, sizeof(msg.name));
+    std::memcpy(msg.hash, choices.hash, sizeof(msg.hash));
+    coop_net_send(kMsgSkinChoices, &msg, sizeof(msg));
+}
+
+void on_skin_choices(const uint8_t* payload, size_t size, uint8_t from) {
+    if (size < sizeof(MsgSkinChoices) || from >= kCoopMaxPlayers) return;
+    MsgSkinChoices msg;
+    std::memcpy(&msg, payload, sizeof(msg));
+    SkinChoices& theirs = peer_slot(from).skins;
+    bool changed = false;
+    for (int i = 0; i < kSkinChoiceCount; ++i) {
+        if (std::strncmp(theirs.name[i], msg.name[i], kSkinNameMax - 1) != 0 ||
+            theirs.hash[i] != msg.hash[i]) {
+            changed = true;
+        }
+        std::memset(theirs.name[i], 0, kSkinNameMax);
+        std::strncpy(theirs.name[i], msg.name[i], kSkinNameMax - 1);
+        theirs.hash[i] = msg.hash[i];
+    }
+
+    if (changed) puppet_hook_peer_skin_changed(from);
+}
+
 void features_update() {
     s_devLogging = features_debug_menu();
+    voices_update();
+    local_skin_colors_update();
+    local_skin_equipment_update();
+    icons_update();
+    skins_cycle_update();
+    skins_outfit_cycle_update();
     send_session_settings();
 
     static bool s_devModeDone = false;
@@ -1045,6 +1111,7 @@ void features_on_connected() {
     send_hello();
     send_presence();
     colors_on_connected();
+    send_skin_choices();
     pvp_on_connected();
     spawns_on_connected();
     boss_on_connected();
@@ -1075,6 +1142,8 @@ void features_on_disconnected() {
     spawns_on_disconnected();
     enemies_on_disconnected();
     horse_reset();
+
+    horses_on_disconnected();
     grass_reset();
     s_haveHostSession = false;
 }
@@ -1105,6 +1174,8 @@ void features_on_message(uint8_t type, const uint8_t* payload, size_t size, uint
         break;
     }
     case kMsgHello: on_hello(payload, size, from); break;
+    case kMsgSkinChoices: on_skin_choices(payload, size, from); break;
+    case kMsgSkinRequest: send_skin_choices(); break;
     case kMsgPause:
         if (size >= sizeof(MsgPause)) coop_net_set_player_paused(from, payload[0] != 0);
         break;
@@ -1144,6 +1215,7 @@ void features_on_message(uint8_t type, const uint8_t* payload, size_t size, uint
     case kMsgEnemyHit:
     case kMsgObjectHit:
     case kMsgObjectMove:
+    case kMsgObjectPush:
     case kMsgRoomClaim:
     case kMsgRoomOwner:
     case kMsgEnemyTargets: enemies_on_message(type, payload, size, from); break;
@@ -1253,11 +1325,11 @@ void send_session_settings() {
 }
 
 bool features_puppet_midna() {
-    return cfg_bool(s_vars.puppetMidna, true);
+    return true;
 }
 
 bool features_puppet_lantern_light() {
-    return cfg_bool(s_vars.puppetLanternLight, true);
+    return true;
 }
 
 std::string features_local_name() {

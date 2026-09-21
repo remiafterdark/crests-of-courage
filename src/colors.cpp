@@ -39,6 +39,10 @@ enum ColorSlot : uint8_t {
     kSlotZoraTorso,
     kSlotZoraScales,
     kSlotZoraFlippers,
+    kSlotMagicArmor,
+    kSlotMagicTrim,
+    kSlotMagicBoots,
+    kSlotMagicTiara,
     kSlotHair,
     kSlotWolf,
     kSlotIronBoots,
@@ -65,6 +69,10 @@ const SlotInfo kSlots[kSlotCount] = {
     {"color_zora_torso", "Zora Armor", "Torso", "zoraArmorTorsoColor"},
     {"color_zora_scales", "Zora Armor", "Scales", "zoraArmorScalesColor"},
     {"color_zora_flippers", "Zora Armor", "Flippers", "zoraArmorFlippersColor"},
+    {"color_magic_armor", "Magic Armor", "Plate", "magicArmorPlateColor"},
+    {"color_magic_trim", "Magic Armor", "Trim", "magicArmorTrimColor"},
+    {"color_magic_boots", "Magic Armor", "Boots", "magicArmorBootsColor"},
+    {"color_magic_tiara", "Magic Armor", "Tiara", "magicArmorTiaraColor"},
     {"color_hair", "Link", "Hair", "linkHairColor"},
     {"color_wolf", "Wolf Link", "Fur", "wolfLinkColor"},
     {"color_iron_boots", "Equipment", "Iron Boots", "ironBootsColor"},
@@ -80,6 +88,10 @@ const TexSlot kTextureSlots[] = {
     {"al_cap", kSlotHeroCap},       {"al_upbody", kSlotHeroBody},  {"al_lowbody", kSlotHeroSkirt},
     {"zl_cap", kSlotZoraCap},       {"zl_helmet", kSlotZoraHelmet}, {"zl_armor", kSlotZoraTorso},
     {"zl_armL", kSlotZoraTorso},    {"zl_body", kSlotZoraScales},  {"zl_boots", kSlotZoraFlippers},
+
+    {"ml_armor", kSlotMagicArmor},  {"ml_body", kSlotMagicArmor},  {"ml_gauntlet", kSlotMagicTrim},
+    {"ml_belts", kSlotMagicTrim},   {"ml_accessory", kSlotMagicTrim},
+    {"ml_boots", kSlotMagicBoots},  {"ml_tiara", kSlotMagicTiara}, {"ml_cap", kSlotMagicTiara},
     {"bl_hair", kSlotHair},         {"al_hair", kSlotHair},        {"wl_body", kSlotWolf},
     {"wl_eye.1", kSlotWolf},        {"wl_eye.2", kSlotWolf},       {"wl_eye.3", kSlotWolf},
     {"wl_eye.4", kSlotWolf},        {"wl_eye.5", kSlotWolf},       {"al_bootsH", kSlotIronBoots},
@@ -537,6 +549,14 @@ void build_self_table() {
     add("Zmdl", "zl.bmd", "zl_boots", kSlotZoraFlippers);
     add("Bmdl", "bl_head.bmd", "bl_hair", kSlotHair);
     add("Kmdl", "al_head.bmd", "al_hair", kSlotHair);
+    add("Mmdl", "ml.bmd", "ml_armor", kSlotMagicArmor);
+    add("Mmdl", "ml.bmd", "ml_body", kSlotMagicArmor);
+    add("Mmdl", "ml.bmd", "ml_gauntlet", kSlotMagicTrim);
+    add("Mmdl", "ml.bmd", "ml_belts", kSlotMagicTrim);
+    add("Mmdl", "ml.bmd", "ml_accessory", kSlotMagicTrim);
+    add("Mmdl", "ml.bmd", "ml_boots", kSlotMagicBoots);
+    add("Mmdl", "ml_head.bmd", "ml_tiara", kSlotMagicTiara);
+    add("Mmdl", "ml_head.bmd", "ml_cap", kSlotMagicTiara);
     add("Mmdl", "ml_head.bmd", "al_hair", kSlotHair);
     add("Wmdl", "wl.bmd", "wl_body", kSlotWolf);
     add("Wmdl", "wl.bmd", "wl_eye.1", kSlotWolf);
@@ -556,7 +576,10 @@ void load_self_base_textures() {
         if (t.loaded) continue;
         dRes_info_c* info = dComIfG_getObjectResInfo(t.arc);
         if (info == nullptr || info->getArchive() == nullptr) continue;
+
+        local_skin_suppress(true);
         J3DModelData* data = static_cast<J3DModelData*>(dComIfG_getObjectRes(t.arc, t.bmd));
+        local_skin_suppress(false);
         if (data == nullptr) continue;
         J3DTexture* tex = data->getTexture();
         JUTNameTab* names = data->getTextureName();
@@ -646,6 +669,8 @@ struct PuppetTexture {
 const int kMaxPuppetTextures = 8;
 struct PuppetModelColors {
     J3DModel* model = nullptr;
+
+    bool mine = false;
     unsigned char* shadow = nullptr;
     TGXTexObj* texObjs = nullptr;
     u8** imgPtrs = nullptr;
@@ -654,7 +679,7 @@ struct PuppetModelColors {
     PuppetTexture tex[kMaxPuppetTextures];
 };
 
-const int kMaxPuppetModels = 6;
+const int kMaxPuppetModels = 16;
 PuppetModelColors s_models[kMaxPuppetModels];
 
 SlotColor peer_color(int slot) {
@@ -663,7 +688,7 @@ SlotColor peer_color(int slot) {
 
 void apply_puppet_texture(PuppetModelColors& m, PuppetTexture& t) {
     if (svc_texture == nullptr) return;
-    const SlotColor want = peer_color(t.slot);
+    const SlotColor want = m.mine ? effective_local(t.slot) : peer_color(t.slot);
     if (t.registered && want == t.applied) return;
 
     std::vector<uint8_t> pixels(t.buffer, t.buffer + t.size);
@@ -752,6 +777,15 @@ ConfigVarHandle colors_slot_var(int slot) {
     return (slot >= 0 && slot < kSlotCount) ? s_vars[slot] : 0;
 }
 
+void colors_invalidate_self() {
+    for (SelfTexture& t : s_self) {
+        if (t.handle != 0 && svc_texture != nullptr) svc_texture->unregister(mod_ctx, t.handle);
+        t.handle = 0;
+        t.loaded = false;
+        t.applied = SlotColor{};
+    }
+}
+
 void colors_reset_mine() {
     for (int i = 0; i < kSlotCount; ++i) {
         if (s_vars[i] != 0) svc_config->set_string(mod_ctx, s_vars[i], "");
@@ -816,7 +850,7 @@ void colors_on_message(const uint8_t* payload, size_t size) {
     coop_log::info("coop_mod: [COLORS] received the other player's colors ({} slots)", count);
 }
 
-void colors_attach_puppet_model(J3DModel* model) {
+void colors_attach_model(J3DModel* model, bool mine) {
     if (model == nullptr || svc_texture == nullptr) return;
     for (const PuppetModelColors& m : s_models) {
         if (m.model == model) return;
@@ -830,10 +864,13 @@ void colors_attach_puppet_model(J3DModel* model) {
     }
     if (slot == nullptr) return;
 
+    if (!coop_ptr_looks_live(model)) return;
     J3DModelData* data = model->getModelData();
-    J3DTexture* original = data != nullptr ? data->getTexture() : nullptr;
-    JUTNameTab* names = data != nullptr ? data->getTextureName() : nullptr;
-    if (original == nullptr || names == nullptr || original->getNum() == 0) return;
+    if (!coop_ptr_looks_live(data)) return;
+    J3DTexture* original = data->getTexture();
+    JUTNameTab* names = data->getTextureName();
+    if (!coop_ptr_looks_live(original) || !coop_ptr_looks_live(names)) return;
+    if (original->getNum() == 0) return;
 
     PuppetModelColors m;
     m.model = model;
@@ -882,6 +919,7 @@ void colors_attach_puppet_model(J3DModel* model) {
         m.imgPtrs[t.index] = t.buffer;
     }
 
+    m.mine = mine;
     *slot = m;
     for (int i = 0; i < slot->count; ++i) apply_puppet_texture(*slot, slot->tex[i]);
 
@@ -893,8 +931,29 @@ void colors_attach_puppet_model(J3DModel* model) {
         static_cast<void*>(model), slot->count);
 }
 
+void colors_attach_puppet_model(J3DModel* model) {
+    colors_attach_model(model, false);
+}
+
+void colors_attach_local_model(J3DModel* model) {
+    colors_attach_model(model, true);
+}
+
+void colors_detach_model(J3DModel* model) {
+    if (model == nullptr) return;
+    for (PuppetModelColors& m : s_models) {
+        if (m.model == model) release_model_colors(m);
+    }
+}
+
 void colors_detach_puppet_models() {
     for (PuppetModelColors& m : s_models) {
         if (m.model != nullptr) release_model_colors(m);
+    }
+}
+
+void colors_detach_local_models() {
+    for (PuppetModelColors& m : s_models) {
+        if (m.model != nullptr && m.mine) release_model_colors(m);
     }
 }

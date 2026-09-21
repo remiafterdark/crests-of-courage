@@ -38,6 +38,33 @@ and press **Restore latest backup** (or **Restore oldest backup** for the very f
 - Pots, grass, flowers, pushed blocks and other world objects
 - Time of day
 - Optional death link
+- Custom models, per player - see below
+
+## Custom models
+
+Every player can look like somebody else, and everyone sees it. The game's own files are left
+alone: nothing here replaces the Link your copy of the game ships with.
+
+Models live in one folder per model under Dusklight's `mod_data/dev.remiafterdark.coop_mod/models`. The
+**Models** tab has a button that opens it, and a **Reload** button for after you add one.
+
+You do not have to wear a whole model. Each part chooses its own, so you can wear one model's
+hero's clothes, another's Ordon clothes, a third's sword and hookshot, and a fourth's voice:
+
+| Part | What it covers |
+| --- | --- |
+| Hero's clothes, Ordon clothes, Zora armor, Magic armor | the four outfits |
+| Wolf | wolf form |
+| Equipment | swords, shields, the hookshot - everything held |
+| Cutscenes | the copies of Link that cutscenes use |
+| Voice | the grunts and shouts, heard by everyone |
+
+Voices and models are per player, so two people wearing different models sound and look different
+to each other, with no restarts. **Dialogue** is the exception - text is not per player, so there is
+one switch that rewrites it in your own game only.
+
+Linkle, Dark Link and the Hero of Time ship with the mod, so the tab is not empty on a fresh
+install. Anyone can add more, and a folder of your own with the same name as a shipped one wins.
 
 ## Experimental
 
@@ -50,7 +77,8 @@ so only the host needs to change them.
 
 ## Known issues
 
-- Epona isn't shared yet.
+- One Epona each, enemy sync and boss sync are unfinished. They are off by default and sit under
+  a heading in Settings that says so - turn them on knowing they can break a fight.
 - The warp effect on other players is off (it could crash).
 
 ## Reporting bugs
@@ -74,6 +102,12 @@ release should use. Setting it ties the build to one exact Dusklight build (fine
 
 - **Fimmel** - the original puppet and model-loading code the other players' models are built on.
 - The Dusklight team, for the port and the mod SDK.
+
+Models that ship with the mod, used with their authors' permission:
+
+- **Linkle** - Ditrey. Concept art by ThenMichael, modelling help from SkilarBabcock.
+- **Dark Link** - LoadingError.
+- **Hero of Time** - SkilarBabcock.
 
 ## License
 

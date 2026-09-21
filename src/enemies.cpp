@@ -12,6 +12,7 @@
 #include "SSystem/SComponent/c_lib.h"
 
 #include "d/actor/d_a_alink.h"
+#include "d/actor/d_a_obj_iceblock.h"
 #include "d/actor/d_a_player.h"
 #include "m_Do/m_Do_ext.h"
 #include "d/d_particle.h"
@@ -253,6 +254,14 @@ int32_t round_unit(f32 v) {
     return static_cast<int32_t>(std::floor(v + 0.5f));
 }
 
+bool is_ice_block(fopAc_ac_c* actor) {
+    return actor != nullptr && fopAcM_GetName(actor) == fpcNm_Obj_IceBlock_e;
+}
+
+bool keyed_by_param(fopAc_ac_c* actor) {
+    return is_ice_block(actor);
+}
+
 uint32_t compute_placement_key(fopAc_ac_c* actor) {
     uint32_t h = 2166136261u;
     const int16_t name = fopAcM_GetName(actor);
@@ -263,6 +272,11 @@ uint32_t compute_placement_key(fopAc_ac_c* actor) {
         return h != 0 ? h : 1u;
     }
     const uint32_t param = fopAcM_GetParam(actor);
+    if (keyed_by_param(actor)) {
+        h = fnv(h, &name, sizeof(name));
+        h = fnv(h, &param, sizeof(param));
+        return h != 0 ? h : 1u;
+    }
     const int32_t x = round_unit(actor->home.pos.x);
     const int32_t y = round_unit(actor->home.pos.y);
     const int32_t z = round_unit(actor->home.pos.z);
@@ -2394,7 +2408,8 @@ void* collect_breakable(void* proc, void* data) {
     if (fopAcM_GetGroup(actor) != fopAc_ACTOR_e) return nullptr;
 
     if (fopAcM_checkCarryNow(actor) != 0) return nullptr;
-    if (actor->setID == 0xFFFF) return nullptr;
+
+    if (actor->setID == 0xFFFF && !keyed_by_param(actor)) return nullptr;
     if (boss_room(fopAcM_GetRoomNo(actor))) return nullptr;
     const uint32_t key = compute_placement_key(actor);
     if (key == 0) return nullptr;
@@ -2440,6 +2455,35 @@ fopAc_ac_c* find_local_breakable(BreakableList& list, int8_t room, uint32_t key)
     return nullptr;
 }
 
+const int kMaxObjPos = kMaxBreakables;
+struct ObjPos {
+    uint32_t key = 0;
+    int8_t room = 0;
+    bool used = false;
+    cXyz pos;
+};
+ObjPos s_objPos[kMaxObjPos];
+
+cXyz* remember_position(int8_t room, uint32_t key, const cXyz& now) {
+    int free = -1;
+    for (int i = 0; i < kMaxObjPos; ++i) {
+        if (s_objPos[i].used && s_objPos[i].key == key && s_objPos[i].room == room) {
+            return &s_objPos[i].pos;
+        }
+        if (!s_objPos[i].used && free < 0) free = i;
+    }
+    if (free < 0) return nullptr;
+    s_objPos[free].used = true;
+    s_objPos[free].key = key;
+    s_objPos[free].room = room;
+    s_objPos[free].pos = now;
+    return &s_objPos[free].pos;
+}
+
+void forget_tracked_positions() {
+    for (int i = 0; i < kMaxObjPos; ++i) s_objPos[i] = ObjPos{};
+}
+
 const int kMaxMovers = 32;
 
 const f32 kMoverEpsilon = 0.6f;
@@ -2458,6 +2502,9 @@ struct Mover {
     uint32_t key = 0;
     cXyz lastPos;
     int tail = 0;
+
+    cXyz sentPos;
+    bool everSent = false;
 };
 Mover s_movers[kMaxMovers];
 
@@ -2476,6 +2523,8 @@ void reset_movers() {
         s_movers[i] = Mover{};
         s_pendingMoves[i] = PendingMove{};
     }
+
+    forget_tracked_positions();
 }
 
 Mover* find_mover(int8_t room, uint32_t key) {
@@ -2522,6 +2571,105 @@ bool nearest_to(const cXyz& pos) {
     return true;
 }
 
+const int kPushQuietTicks = 24;
+struct PushQuiet {
+    uint32_t key = 0;
+    int8_t room = 0;
+    int ticks = 0;
+};
+PushQuiet s_pushQuiet[16];
+uint32_t s_pushesSent = 0;
+uint32_t s_pushesApplied = 0;
+
+void age_push_quiet() {
+    for (PushQuiet& q : s_pushQuiet) {
+        if (q.ticks > 0 && --q.ticks == 0) q.key = 0;
+    }
+}
+
+bool push_is_quiet(int8_t room, uint32_t key) {
+    for (const PushQuiet& q : s_pushQuiet) {
+        if (q.ticks > 0 && q.key == key && q.room == room) return true;
+    }
+    return false;
+}
+
+void push_go_quiet(int8_t room, uint32_t key) {
+    PushQuiet* slot = &s_pushQuiet[0];
+    for (PushQuiet& q : s_pushQuiet) {
+        if (q.ticks == 0) { slot = &q; break; }
+        if (q.ticks < slot->ticks) slot = &q;
+    }
+    slot->key = key;
+    slot->room = room;
+    slot->ticks = kPushQuietTicks;
+}
+
+bool is_pushable_block(fopAc_ac_c* actor) {
+    return is_ice_block(actor);
+}
+
+struct PendingPush {
+    bool used = false;
+    MsgObjectPush msg{};
+};
+PendingPush s_pendingPushes[8];
+
+void apply_pending_pushes() {
+    bool any = false;
+    for (const PendingPush& pending : s_pendingPushes) {
+        if (pending.used) { any = true; break; }
+    }
+    if (!any) return;
+
+    BreakableList list;
+    collect_breakables(list);
+    for (PendingPush& pending : s_pendingPushes) {
+        if (!pending.used) continue;
+        const MsgObjectPush msg = pending.msg;
+        pending = PendingPush{};
+        if (msg.dir > 3) continue;
+
+        fopAc_ac_c* actor = find_local_breakable(list, msg.room, msg.key);
+        if (!is_pushable_block(actor)) continue;
+        auto* block = static_cast<daObjIceBlk_c*>(actor);
+        for (int d = 0; d < 4; ++d) {
+            block->mCounter[d] = (d == msg.dir) ? 1 : 0;
+        }
+
+        push_go_quiet(msg.room, msg.key);
+        ++s_pushesApplied;
+    }
+}
+
+void capture_block_pushes(BreakableList& list) {
+    age_push_quiet();
+    for (int i = 0; i < list.count; ++i) {
+        fopAc_ac_c* actor = list.actors[i];
+        if (!is_pushable_block(actor)) continue;
+        const int8_t room = list.rooms[i];
+        const uint32_t key = list.keys[i];
+        if (push_is_quiet(room, key)) continue;
+
+        auto* block = static_cast<daObjIceBlk_c*>(actor);
+        int dir = -1;
+        for (int d = 0; d < 4; ++d) {
+            if (block->mCounter[d] != 0) dir = d;
+        }
+        if (dir < 0) continue;
+
+        if (!nearest_to(actor->current.pos)) continue;
+
+        MsgObjectPush msg{};
+        msg.key = key;
+        msg.room = room;
+        msg.dir = static_cast<uint8_t>(dir);
+        coop_net_send(kMsgObjectPush, &msg, sizeof(msg));
+        push_go_quiet(room, key);
+        ++s_pushesSent;
+    }
+}
+
 void capture_moved_objects(BreakableList& list) {
     int live = 0;
     for (int i = 0; i < kMaxMovers; ++i) {
@@ -2534,20 +2682,21 @@ void capture_moved_objects(BreakableList& list) {
         fopAc_ac_c* actor = list.actors[i];
         const int8_t room = list.rooms[i];
         const uint32_t key = list.keys[i];
+
+        if (is_pushable_block(actor)) continue;
+        cXyz* last = remember_position(room, key, actor->current.pos);
+        if (last == nullptr) continue;
+        const cXyz step = actor->current.pos - *last;
+        *last = actor->current.pos;
+        if (step.abs() < kMoverEpsilon) continue;
+
         Mover* m = find_mover(room, key);
         if (m == nullptr) {
-
-            const cXyz drift = actor->current.pos - actor->home.pos;
-            if (drift.abs() < kMoverEpsilon) continue;
             add_mover(room, key, actor->current.pos);
-
-            continue;
+            m = find_mover(room, key);
+            if (m == nullptr) continue;
         }
-
-        const cXyz step = actor->current.pos - m->lastPos;
-        const f32 moved = step.abs();
         m->lastPos = actor->current.pos;
-        if (moved < kMoverEpsilon) continue;
         m->tail = kMoverTailTicks;
         if (!nearest_to(actor->current.pos)) continue;
         daAlink_c* alink = daAlink_getAlinkActorClass();
@@ -2556,6 +2705,10 @@ void capture_moved_objects(BreakableList& list) {
         {
             continue;
         }
+
+        if (m->everSent && (actor->current.pos - m->sentPos).abs() < kMoverEpsilon) continue;
+        m->sentPos = actor->current.pos;
+        m->everSent = true;
 
         MsgObjectMove msg{};
         msg.key = key;
@@ -2778,7 +2931,10 @@ void on_collision_move_post(ModContext*, void*, void*, void*) {
         if (enemiesOn && hits) capture_landed_hits(list);
         if (hits && breakables_enabled()) capture_landed_object_hits(breakables);
 
-        if (movers_enabled()) capture_moved_objects(breakables);
+        if (movers_enabled()) {
+            capture_block_pushes(breakables);
+            capture_moved_objects(breakables);
+        }
     } else if (hits) {
         collect_enemies(list);
         capture_landed_hits(list);
@@ -2878,9 +3034,9 @@ void log_status(const EnemyList* list) {
         s_diagInstructed);
 
     coop_log::info("coop_mod: [OBJ] on={} objects={} blows(sent={} replayed={} lost={}) "
-                    "moving={} moves(sent={} applied={})",
+                    "moving={} moves(sent={} applied={}) pushes(sent={} applied={})",
         breakables_enabled() ? 1 : 0, s_diagBreakables, s_objHitsSent, s_objHitsApplied,
-        s_objHitsLost, s_diagMovers, s_movesSent, s_movesApplied);
+        s_objHitsLost, s_diagMovers, s_movesSent, s_movesApplied, s_pushesSent, s_pushesApplied);
 
     char worlds[128];
     int at = 0;
@@ -3049,7 +3205,10 @@ void enemies_update() {
         if (objects_live()) {
             age_breakable_quiet();
             if (real_hits_enabled() && breakables_enabled()) inject_pending_object_hits();
-            if (movers_enabled()) apply_pending_moves();
+            if (movers_enabled()) {
+                apply_pending_pushes();
+                apply_pending_moves();
+            }
         }
         log_status(nullptr);
         return;
@@ -3068,7 +3227,10 @@ void enemies_update() {
 
     age_breakable_quiet();
     if (real_hits_enabled() && breakables_enabled()) inject_pending_object_hits();
-    if (movers_enabled()) apply_pending_moves();
+    if (movers_enabled()) {
+        apply_pending_pushes();
+        apply_pending_moves();
+    }
     run_self_test(list, host);
 
     decide_targets(list);
@@ -3225,6 +3387,25 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
         coop_log::info("coop_mod: [OBJ] dropped a relayed blow - {} already queued",
             kMaxPendingObjectHits);
         break;
+    }
+    case kMsgObjectPush: {
+        if (size < sizeof(MsgObjectPush) || !movers_enabled()) return;
+        MsgObjectPush msg;
+        std::memcpy(&msg, payload, sizeof(msg));
+        for (PendingPush& pending : s_pendingPushes) {
+            if (pending.used && pending.msg.key == msg.key && pending.msg.room == msg.room) {
+                pending.msg = msg;
+                return;
+            }
+        }
+        for (PendingPush& pending : s_pendingPushes) {
+            if (!pending.used) {
+                pending.used = true;
+                pending.msg = msg;
+                return;
+            }
+        }
+        return;
     }
     case kMsgObjectMove: {
         if (size < sizeof(MsgObjectMove) || !movers_enabled()) return;

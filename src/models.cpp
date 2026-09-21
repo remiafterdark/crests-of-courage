@@ -8,7 +8,11 @@
 #include "JSystem/JKernel/JKRExpHeap.h"
 #include "JSystem/J3DGraphBase/J3DPacket.h"
 
+#include "JSystem/J3DGraphAnimator/J3DMaterialAnm.h"
+#include "JSystem/J3DGraphLoader/J3DModelLoader.h"
+
 #include <cstdio>
+#include <fstream>
 #include <cstring>
 
 static const u32 kCoopDifferedDlistFlags = 0x11000284u | J3DDiffFlag_KonstColor | J3DDiffFlag_TexGen;
@@ -217,6 +221,92 @@ J3DModel* loadBmdFromArc(const char* arcName, const char* bmdName, cXyz scale) {
 }
 
 #include "JSystem/J3DGraphLoader/J3DAnmLoader.h"
+
+J3DModelData* loadBmdDataFromFile(const char* path) {
+    if (path == nullptr) return nullptr;
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        coop_log::warn("coop_mod: [models] cannot open '{}'", path);
+        return nullptr;
+    }
+    const std::streamoff size = file.tellg();
+    if (size <= 64 || size > 64 * 1024 * 1024) {
+        coop_log::warn("coop_mod: [models] '{}' is not a sensible size ({} bytes)", path,
+            static_cast<long long>(size));
+        return nullptr;
+    }
+    file.seekg(0);
+
+    ensure_system_heap_capacity();
+    JKRHeap* heap = JKRHeap::getRootHeap();
+    if (heap == nullptr) heap = JKRHeap::getSystemHeap();
+    if (heap == nullptr) return nullptr;
+    void* buffer = heap->alloc(static_cast<u32>(size), 32);
+    if (buffer == nullptr) {
+        coop_log::warn("coop_mod: [models] no room for '{}' ({} bytes)", path,
+            static_cast<long long>(size));
+        return nullptr;
+    }
+    if (!file.read(static_cast<char*>(buffer), size)) {
+        coop_log::warn("coop_mod: [models] short read on '{}'", path);
+        return nullptr;
+    }
+
+    if (std::memcmp(buffer, "J3D2", 4) != 0) {
+        coop_log::warn("coop_mod: [models] '{}' is not a J3D model file", path);
+        return nullptr;
+    }
+
+    const u32 kBmwrLoadFlags = 0x59040030;
+
+    struct CurrentHeapFor {
+        explicit CurrentHeapFor(JKRHeap* heap) : mPrevious(heap->becomeCurrentHeap()) {}
+        ~CurrentHeapFor() {
+            if (mPrevious != nullptr) mPrevious->becomeCurrentHeap();
+        }
+        JKRHeap* mPrevious;
+    } heapScope(heap);
+    J3DModelData* data = J3DModelLoaderDataBase::load(buffer, kBmwrLoadFlags);
+    if (data == nullptr || data->getMaterialNum() == 0 || data->getShapeTable() == nullptr ||
+        data->getShapeTable()->getShapeNum() == 0 || data->getMaterialNodePointer(0) == nullptr) {
+        coop_log::warn("coop_mod: [models] '{}' loaded but has no usable materials or shapes", path);
+        return nullptr;
+    }
+
+    for (u16 i = 0; i < data->getMaterialNum(); ++i) {
+        J3DMaterial* material = data->getMaterialNodePointer(i);
+        if (material == nullptr) continue;
+        material->change();
+        J3DMaterialAnm* anm = new J3DMaterialAnm();
+        if (anm == nullptr) return nullptr;
+        material->setMaterialAnm(anm);
+    }
+    if (data->newSharedDisplayList(J3DMdlFlag_UseSingleDL) != kJ3DError_Success) {
+        coop_log::warn("coop_mod: [models] '{}': no room for its display list", path);
+        return nullptr;
+    }
+    data->simpleCalcMaterial(const_cast<MtxP>(j3dDefaultMtx));
+    data->makeSharedDL();
+
+    coop_log::info("coop_mod: [models] loaded '{}' ({} joints, {} materials)", path,
+        data->getJointNum(), data->getMaterialNum());
+    return data;
+}
+
+J3DModel* modelFromData(J3DModelData* data, cXyz scale) {
+    if (data == nullptr) return nullptr;
+    J3DModel* model = mDoExt_J3DModel__create(data, 0x80000, kCoopDifferedDlistFlags);
+    if (model == nullptr) {
+        coop_log::warn("coop_mod: [models] mDoExt_J3DModel__create returned null");
+        return nullptr;
+    }
+    model->setBaseScale(scale);
+    return model;
+}
+
+J3DModel* loadBmdFromFile(const char* path, cXyz scale) {
+    return modelFromData(loadBmdDataFromFile(path), scale);
+}
 
 J3DModel* loadBmdFromArcIdx(const char* arcName, int resIndex, cXyz scale) {
     if (arcName == nullptr) return nullptr;

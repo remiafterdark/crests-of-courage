@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-const uint16_t kCoopProtocolVersion = 41;
+const uint16_t kCoopProtocolVersion = 51;
 
 const int kCoopMaxPlayers = 4;
 const uint8_t kCoopHostId = 0;
@@ -60,6 +60,9 @@ enum CoopMsgType : uint8_t {
     kMsgPause = 42,
     kMsgGrassCut = 43,
     kMsgSessionSettings = 44,
+    kMsgSkinChoices = 45,
+    kMsgSkinRequest = 46,
+    kMsgObjectPush = 47,
 };
 
 struct MsgPause {
@@ -145,7 +148,7 @@ enum CoopEnemyFlags : uint8_t {
     kEnemyFlagCarried = 1 << 1,
 };
 
-const int kCoopColorSlots = 14;
+const int kCoopColorSlots = 18;
 
 enum CoopBottleEvent : uint8_t {
     kBottleFillEmpty = 0,
@@ -191,6 +194,8 @@ struct MsgPresence {
     float x, y, z;
     int16_t angleY;
     uint8_t inGame;
+
+    uint32_t skinStamp;
 
     uint16_t life;
     uint16_t maxLife;
@@ -347,6 +352,11 @@ struct MsgWorldFull {
     uint8_t data[32];
 };
 
+struct MsgSkinChoices {
+    char name[22][32];
+    uint32_t hash[22];
+};
+
 struct MsgEnemyHit {
     uint32_t key;
     int8_t room;
@@ -374,6 +384,12 @@ struct MsgGrassCut {
     float pos[kGrassCutsPerMsg][3];
 };
 
+struct MsgObjectPush {
+    uint32_t key;
+    int8_t room;
+    uint8_t dir;
+};
+
 struct MsgObjectMove {
     uint32_t key;
     int8_t room;
@@ -389,6 +405,10 @@ struct MsgHorse {
     uint8_t procID;
 
     uint8_t riding;
+
+    uint8_t owner;
+
+    uint8_t standing;
 
     uint16_t anmIdx[2];
     float anmRatio;

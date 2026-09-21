@@ -40,7 +40,10 @@ const f32 kDefaultScale = 0.55f;
 ConfigVarHandle s_enableVar = 0;
 ConfigVarHandle s_scaleVar = 0;
 ConfigVarHandle s_offsetYVar = 0;
-ConfigVarHandle s_fakeVar = 0;
+ConfigVarHandle s_hurtOnlyVar = 0;
+ConfigVarHandle s_hurtSecondsVar = 0;
+ConfigVarHandle s_hurtFadeVar = 0;
+ConfigVarHandle s_worldSizeVar = 0;
 
 struct SquadScreen {
     J2DScreen* screen = nullptr;
@@ -171,7 +174,6 @@ void set_hearts(u16 maxLife, u16 life) {
     if (quarters == 0) --filled;
 
     s_ours.bigHeart->hide();
-    if (life != 0) s_ours.bigHeart->show();
 
     for (int i = 0; i < kHeartSlots; ++i) {
         if (i >= maxHearts) {
@@ -188,7 +190,13 @@ void set_hearts(u16 maxLife, u16 life) {
             s_ours.fullS[i]->hide();
             s_ours.full[i]->hide();
         }
-        if (i == filled && life != 0) {
+        if (i == filled && life != 0 && quarters == 0) {
+
+            s_ours.fullS[i]->show();
+            s_ours.full[i]->show();
+        }
+        if (i == filled && life != 0 && quarters != 0) {
+            s_ours.bigHeart->show();
 
             for (int q = 0; q < 4; ++q) {
                 if (q == quarters) s_ours.bigQuarter[q]->show();
@@ -209,8 +217,9 @@ void copy_heart_scales(dMeter2Draw_c* real) {
         J2DPane* src = real->mpHeartMark[i]->getPanePtr();
         if (src != nullptr) s_ours.mark[i]->scale(src->getScaleX(), src->getScaleY());
     }
-    if (real->mpBigHeart != nullptr && real->mpBigHeart->getPanePtr() != nullptr) {
-        J2DPane* src = real->mpBigHeart->getPanePtr();
+
+    if (real->mpHeartMark[0] != nullptr && real->mpHeartMark[0]->getPanePtr() != nullptr) {
+        J2DPane* src = real->mpHeartMark[0]->getPanePtr();
         s_ours.bigHeart->scale(src->getScaleX(), src->getScaleY());
     }
 }
@@ -361,13 +370,53 @@ void draw_name(const std::string& name, f32 x, f32 y, f32 cell, u8 alpha, bool l
     font->drawString_scale(x, y, cell, cell, text.c_str(), true);
 }
 
-const f32 kWorldHeartScale = 0.42f;
+const f32 kWorldHeartScale = 0.55f;
+
+const int kHurtShowTicks = 150;
+const int kHurtFadeTicks = 45;
+const int kTicksPerSecond = 30;
+
+int hurt_show_ticks() {
+    const int seconds = static_cast<int>(cfg_int(s_hurtSecondsVar, 5));
+    return (seconds > 0 ? seconds : 5) * kTicksPerSecond;
+}
+
+int hurt_fade_ticks() {
+    const int tenths = static_cast<int>(cfg_int(s_hurtFadeVar, 15));
+    return tenths * kTicksPerSecond / 10;
+}
+struct HurtWatch {
+    uint16_t life = 0;
+    bool known = false;
+    int show = 0;
+};
+HurtWatch s_hurt[kCoopMaxPlayers];
+
+f32 hurt_alpha(uint8_t id, const CoopPeer& peer) {
+    if (id >= kCoopMaxPlayers) return 1.0f;
+    HurtWatch& w = s_hurt[id];
+    if (!peer.present || !peer.lifeKnown) {
+        w.known = false;
+        w.show = 0;
+        return 0.0f;
+    }
+    if (w.known && peer.life < w.life) w.show = hurt_show_ticks();
+    w.life = peer.life;
+    w.known = true;
+    if (w.show <= 0) return 0.0f;
+    --w.show;
+    const int fade = hurt_fade_ticks();
+    if (fade <= 0 || w.show >= fade) return 1.0f;
+    return static_cast<f32>(w.show) / static_cast<f32>(fade);
+}
+
 const f32 kWorldFadeStart = 3000.0f;
 const f32 kWorldFadeEnd = 4500.0f;
 
 void draw_world_hearts(J2DPane* realGroup, dMeter2Draw_c* real, J2DGrafContext* graf,
     f32 alphaRate) {
     if (!puppet_hook_health_enabled()) return;
+    const bool hurtOnly = cfg_bool(s_hurtOnlyVar, false);
     J2DOrthoGraph* og = static_cast<J2DOrthoGraph*>(graf);
     const auto* o = og->getOrtho();
     const f32 realSx = realGroup->getScaleX();
@@ -390,9 +439,11 @@ void draw_world_hearts(J2DPane* realGroup, dMeter2Draw_c* real, J2DGrafContext* 
         if (camDist > kWorldFadeStart) {
             fade = 1.0f - (camDist - kWorldFadeStart) / (kWorldFadeEnd - kWorldFadeStart);
         }
+        if (hurtOnly) fade *= hurt_alpha(id, p);
         if (fade <= 0.02f) continue;
 
-        const f32 k = kWorldHeartScale * (cell / 18.0f);
+        const f32 pick = static_cast<f32>(cfg_int(s_worldSizeVar, 55)) / 100.0f;
+        const f32 k = (kWorldHeartScale / 0.55f) * pick * (cell / 18.0f);
         const f32 eff = realSy * k;
         s_ours.heartN->scale(realSx * k, eff);
         s_ours.heartMgr->setAlphaRate(alphaRate * fade);
@@ -408,7 +459,7 @@ void draw_world_hearts(J2DPane* realGroup, dMeter2Draw_c* real, J2DGrafContext* 
         const f32 gx = o->i.x + u * (o->f.x - o->i.x);
         const f32 gy = o->i.y + v * (o->f.y - o->i.y);
         const f32 tx = ps.x(gx - rowWidth * 0.5f) - dx;
-        const f32 ty = ps.y(gy + realStep * k * 0.2f) - dy;
+        const f32 ty = ps.y(gy + realStep * k * 0.7f) - dy;
         s_ours.heartN->translate(tx, ty);
         s_ours.screen->draw(0.0f, 0.0f, graf);
 
@@ -487,21 +538,6 @@ void draw_squad() {
                 };
                 return pos(a.id) < pos(b.id);
             });
-        }
-    }
-
-    if (features_debug_menu()) {
-        const int fake = static_cast<int>(cfg_int(s_fakeVar, 0));
-        for (int f = 0; f < fake && count < kCoopMaxPlayers + 4; ++f) {
-            SquadMember& m = members[count++];
-            m.id = 0xFF;
-            m.rank = 3;
-            m.dist = 0.0f;
-            m.name = "Test " + std::to_string(f + 1);
-            m.maxLife = 100;
-            m.life = static_cast<u16>(80 - f * 13);
-            m.low = false;
-            m.paused = false;
         }
     }
     if (!listOn) count = 0;
@@ -699,6 +735,34 @@ void squad_hud_register_vars() {
     on.default_bool = true;
     if (svc_config->register_var(mod_ctx, &on, &s_enableVar) != MOD_OK) s_enableVar = 0;
 
+    ConfigVarDesc hurt = CONFIG_VAR_DESC_INIT;
+    hurt.name = "world_hearts_hurt_only";
+    hurt.type = CONFIG_VAR_BOOL;
+    hurt.default_bool = false;
+    if (svc_config->register_var(mod_ctx, &hurt, &s_hurtOnlyVar) != MOD_OK) s_hurtOnlyVar = 0;
+
+    ConfigVarDesc hurtSeconds = CONFIG_VAR_DESC_INIT;
+    hurtSeconds.name = "world_hearts_seconds";
+    hurtSeconds.type = CONFIG_VAR_INT;
+    hurtSeconds.default_int = kHurtShowTicks / kTicksPerSecond;
+    if (svc_config->register_var(mod_ctx, &hurtSeconds, &s_hurtSecondsVar) != MOD_OK) {
+        s_hurtSecondsVar = 0;
+    }
+
+    ConfigVarDesc hurtFade = CONFIG_VAR_DESC_INIT;
+    hurtFade.name = "world_hearts_fade_tenths";
+    hurtFade.type = CONFIG_VAR_INT;
+    hurtFade.default_int = kHurtFadeTicks * 10 / kTicksPerSecond;
+    if (svc_config->register_var(mod_ctx, &hurtFade, &s_hurtFadeVar) != MOD_OK) s_hurtFadeVar = 0;
+
+    ConfigVarDesc worldSize = CONFIG_VAR_DESC_INIT;
+    worldSize.name = "world_hearts_size";
+    worldSize.type = CONFIG_VAR_INT;
+    worldSize.default_int = 55;
+    if (svc_config->register_var(mod_ctx, &worldSize, &s_worldSizeVar) != MOD_OK) {
+        s_worldSizeVar = 0;
+    }
+
     ConfigVarDesc scale = CONFIG_VAR_DESC_INIT;
     scale.name = "squad_health_size";
     scale.type = CONFIG_VAR_INT;
@@ -706,12 +770,6 @@ void squad_hud_register_vars() {
     if (svc_config->register_var(mod_ctx, &scale, &s_scaleVar) != MOD_OK) s_scaleVar = 0;
 
     ConfigVarDesc offset = CONFIG_VAR_DESC_INIT;
-    ConfigVarDesc fake = CONFIG_VAR_DESC_INIT;
-    fake.name = "debug_squad_fake";
-    fake.type = CONFIG_VAR_INT;
-    fake.default_int = 0;
-    if (svc_config->register_var(mod_ctx, &fake, &s_fakeVar) != MOD_OK) s_fakeVar = 0;
-
     offset.name = "squad_health_offset_y";
     offset.type = CONFIG_VAR_INT;
     offset.default_int = 0;
@@ -730,8 +788,20 @@ ConfigVarHandle squad_hud_offset_var() {
     return s_offsetYVar;
 }
 
-ConfigVarHandle squad_hud_fake_var() {
-    return s_fakeVar;
+ConfigVarHandle squad_hud_hurt_seconds_var() {
+    return s_hurtSecondsVar;
+}
+
+ConfigVarHandle squad_hud_hurt_fade_var() {
+    return s_hurtFadeVar;
+}
+
+ConfigVarHandle squad_hud_world_size_var() {
+    return s_worldSizeVar;
+}
+
+ConfigVarHandle squad_hud_hurt_only_var() {
+    return s_hurtOnlyVar;
 }
 
 void squad_hud_queue() {

@@ -28,6 +28,11 @@ add_mod(coop_mod
              src/epona.cpp
              src/grass.cpp
              src/party_hud.cpp
+             src/skins.cpp
+             src/icons.cpp
+             src/voices.cpp
+             src/game_mode.cpp
+             src/horses.cpp
     MOD_JSON mod.json
 )
 

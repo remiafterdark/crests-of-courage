@@ -7,6 +7,8 @@
 #include "mods/svc/ui.h"
 #include "mods/svc/item.h"
 #include "mods/svc/host.h"
+#include "mods/svc/overlay.h"
+#include "mods/svc/resource.h"
 #include "mods/svc/texture.h"
 
 #include "d/actor/d_a_alink.h"
@@ -55,12 +57,16 @@ IMPORT_SERVICE(UiService, svc_ui);
 IMPORT_OPTIONAL_SERVICE(ItemService, svc_item);
 IMPORT_OPTIONAL_SERVICE(TextureService, svc_texture);
 IMPORT_OPTIONAL_SERVICE(HostService, svc_host);
+IMPORT_OPTIONAL_SERVICE(OverlayService, svc_overlay);
+
+IMPORT_OPTIONAL_SERVICE(ResourceService, svc_resource);
 
 namespace {
 
 ConfigVarHandle g_modeVar = 0;
 ConfigVarHandle g_bindPortVar = 0;
 ConfigVarHandle g_joinAddressVar = 0;
+ConfigVarHandle g_joinPortVar = 0;
 ConfigVarHandle g_autoConnectVar = 0;
 ConfigVarHandle g_autoConnectDelayTicksVar = 0;
 bool g_autoConnectPending = false;
@@ -423,7 +429,15 @@ std::string normalize_join_address(std::string address) {
 }
 
 ModResult start_joining(const std::string& rawAddress) {
-    const std::string address = normalize_join_address(rawAddress);
+
+    std::string typed = rawAddress;
+    const size_t colons = static_cast<size_t>(std::count(typed.begin(), typed.end(), ':'));
+    const bool hasPort = typed.rfind('[', 0) == 0 ? typed.find("]:") != std::string::npos
+                                                  : colons == 1;
+    if (!typed.empty() && !hasPort) {
+        typed += ":" + std::to_string(cfg_int(g_joinPortVar, 27716));
+    }
+    const std::string address = normalize_join_address(typed);
     if (address.empty()) {
         g_statusText = "Enter the host's address first";
         return MOD_ERROR;
@@ -616,6 +630,16 @@ bool local_models_are_unsafe() {
     }
     return true;
 }
+
+}
+
+bool coop_local_models_unsafe() {
+    daAlink_c* alink = daAlink_getAlinkActorClass();
+    if (alink != nullptr && alink->mClothesChangeWaitTimer != 0) return true;
+    return g_modelHoldTicks > 0;
+}
+
+namespace {
 
 void send_local_snapshot() {
     const bool modelsUnsafe = local_models_are_unsafe();
@@ -1662,6 +1686,14 @@ ConfigVarHandle coop_net_address_var() {
     return g_joinAddressVar;
 }
 
+ConfigVarHandle coop_net_join_port_var() {
+    return g_joinPortVar;
+}
+
+std::string coop_net_join_address() {
+    return cfg_string(g_joinAddressVar, "");
+}
+
 ConfigVarHandle coop_net_autoconnect_var() {
     return g_autoConnectVar;
 }
@@ -1765,8 +1797,15 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     ConfigVarDesc joinDesc = CONFIG_VAR_DESC_INIT;
     joinDesc.name = "join_address";
     joinDesc.type = CONFIG_VAR_STRING;
-    joinDesc.default_string = "";
+
+    joinDesc.default_string = "127.0.0.1";
     svc_config->register_var(mod_ctx, &joinDesc, &g_joinAddressVar);
+
+    ConfigVarDesc joinPortDesc = CONFIG_VAR_DESC_INIT;
+    joinPortDesc.name = "join_port";
+    joinPortDesc.type = CONFIG_VAR_INT;
+    joinPortDesc.default_int = 27716;
+    svc_config->register_var(mod_ctx, &joinPortDesc, &g_joinPortVar);
 
     ConfigVarDesc autoDesc = CONFIG_VAR_DESC_INIT;
     autoDesc.name = "auto_connect";
@@ -1790,6 +1829,11 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 
     features_register_vars();
     features_init();
+    skins_init();
+    voices_init();
+    game_mode_init();
+    puppet_register_vars();
+    horses_init();
     ui_init();
     puppet_hook_init();
 

@@ -1,7 +1,7 @@
 {
-  "id": "dev.remi.coop_mod",
+  "id": "dev.remiafterdark.coop_mod",
   "name": "Crests of Courage",
-  "version": "0.1.0",
-  "author": "remi",
-  "description": "Online co-op for Twilight Princess. See each other, share items and progress, and fight together."
+  "version": "1.0.0",
+  "author": "remiafterdark",
+  "description": "Online co-op for Twilight Princess\n\nTo play, select \"co-op\" from the Dusklight menu, then create a new save."
 }
