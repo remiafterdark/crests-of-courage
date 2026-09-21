@@ -111,4 +111,8 @@ Models that ship with the mod, used with their authors' permission:
 
 ## License
 
-MIT - see [LICENSE](LICENSE).
+MIT for the code in `src/` - see [LICENSE](LICENSE).
+
+The models in `models/` are not covered by it: they belong to the people in
+[CREDITS.md](CREDITS.md) and are here with their permission. Forking this repo does not carry that
+permission with it.
