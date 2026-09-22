@@ -2077,10 +2077,10 @@ void boss_update() {
             phaseLeft = reinterpret_cast<b_bq_class*>(list.actors[i])->field_0x6ec;
             break;
         }
-        coop_log::info("coop_mod: [BOSS-DIAG2] helperHere={} helperAction={} helperMode={} "
+        coop_log::trace("coop_mod: [BOSS-DIAG2] helperHere={} helperAction={} helperMode={} "
                         "helperCarry={} helperSide={} headsLeftBeforePhase2={}",
             helperHere, helpAct, helpMode, helpCarry, helpSide, phaseLeft);
-        coop_log::info("coop_mod: [BOSS-DIAG] id={} host={} collected={} cached={} syncOn={} "
+        coop_log::trace("coop_mod: [BOSS-DIAG] id={} host={} collected={} cached={} syncOn={} "
                         "peerHere={} inGameplay={} enabled={} fightOver={} "
                         "localAction={} localDemo={} remoteAction={} remoteInDemo={} "
                         "proc={:#x} event={} ready={} latched={} roomTicks={}",

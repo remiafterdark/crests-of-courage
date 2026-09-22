@@ -10,12 +10,17 @@ namespace coop_log {
 
 template <typename... Args>
 void info(fmt::format_string<Args...> formatString, Args&&... args) {
-    if (coop_dev_logging()) mods::log::info(formatString, std::forward<Args>(args)...);
+    mods::log::info(formatString, std::forward<Args>(args)...);
 }
 
 template <typename... Args>
 void warn(fmt::format_string<Args...> formatString, Args&&... args) {
-    if (coop_dev_logging()) mods::log::warn(formatString, std::forward<Args>(args)...);
+    mods::log::warn(formatString, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+void trace(fmt::format_string<Args...> formatString, Args&&... args) {
+    if (coop_dev_logging()) mods::log::info(formatString, std::forward<Args>(args)...);
 }
 
 template <typename... Args>

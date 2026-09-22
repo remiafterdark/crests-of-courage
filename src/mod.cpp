@@ -89,6 +89,7 @@ ConfigVarHandle g_hostKeyVar = 0;
 ConfigVarHandle g_fakePlayersVar = 0;
 ConfigVarHandle g_clearTwilightVar = 0;
 ConfigVarHandle g_eponaFlagsVar = 0;
+ConfigVarHandle g_giveKitVar = 0;
 
 uint16_t g_fakeMask = 0;
 }
@@ -1097,6 +1098,19 @@ void apply_debug_epona_flags() {
     }
 }
 
+void apply_debug_give_kit() {
+    static bool s_done = false;
+    if (s_done || g_giveKitVar == 0 || !cfg_bool(g_giveKitVar, false)) return;
+    if (daAlink_getAlinkActorClass() == nullptr || svc_item == nullptr) return;
+    static const int kKit[] = {dItemNo_COPY_ROD_e, dItemNo_BOMB_BAG_LV1_e, dItemNo_KANTERA_e,
+        dItemNo_BOW_e, dItemNo_BOOMERANG_e};
+    for (int item : kKit) {
+        svc_item->give_item(mod_ctx, nullptr, static_cast<uint8_t>(item), ITEM_GIVE_SILENT);
+    }
+    s_done = true;
+    coop_log::info("coop_mod: [DEBUG] test kit given (rod, bombs, lantern, bow, boomerang)");
+}
+
 void send_local_snapshot() {
     const bool modelsUnsafe = local_models_are_unsafe();
 
@@ -1820,7 +1834,7 @@ void send_local_snapshot() {
          snapshot.footAngles[0][1] != 0 || snapshot.footAngles[1][0] != 0))
     {
         ++g_poseDiagLogs;
-        coop_log::info("coop_mod: [POSEDIAG-TX] rootMask={:#x} clear=({},{},{}) "
+        coop_log::trace("coop_mod: [POSEDIAG-TX] rootMask={:#x} clear=({},{},{}) "
                         "foot0=({},{},{}) foot1=({},{},{}) bodyRot=({},{},{})",
             snapshot.rootClearMask, snapshot.rootClearX, snapshot.rootClearY, snapshot.rootClearZ,
             snapshot.footAngles[0][0], snapshot.footAngles[0][1], snapshot.footAngles[0][2],
@@ -2590,6 +2604,12 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     eponaDesc.default_bool = false;
     svc_config->register_var(mod_ctx, &eponaDesc, &g_eponaFlagsVar);
 
+    ConfigVarDesc kitDesc = CONFIG_VAR_DESC_INIT;
+    kitDesc.name = "debug_give_kit";
+    kitDesc.type = CONFIG_VAR_BOOL;
+    kitDesc.default_bool = false;
+    svc_config->register_var(mod_ctx, &kitDesc, &g_giveKitVar);
+
     ConfigVarDesc fakeDesc = CONFIG_VAR_DESC_INIT;
     fakeDesc.name = "debug_fake_players";
     fakeDesc.type = CONFIG_VAR_INT;
@@ -2685,6 +2705,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 
     apply_debug_clear_twilight();
     apply_debug_epona_flags();
+    apply_debug_give_kit();
     send_local_snapshot();
     send_local_midna();
     send_local_horse();

@@ -518,12 +518,12 @@ mDoExt_MtxCalcAnmBlendTblOld* puppet_build_blend(daAlink_c* alink, PuppetAnimHal
             if (bck != nullptr && !anim_is_live(bck)) bck = nullptr;
         }
         if (trace) {
-            coop_log::info("coop_mod: [BLEND] slot {} resIdx={} bck={:#x}", i, half.resIdx[i],
+            coop_log::trace("coop_mod: [BLEND] slot {} resIdx={} bck={:#x}", i, half.resIdx[i],
                 reinterpret_cast<uintptr_t>(bck));
         }
         J3DAnmTransform* anm = (bck != nullptr) ? bck->getBckAnm() : nullptr;
         if (trace) {
-            coop_log::info("coop_mod: [BLEND] slot {} anm={:#x}", i,
+            coop_log::trace("coop_mod: [BLEND] slot {} anm={:#x}", i,
                 reinterpret_cast<uintptr_t>(anm));
         }
         if (anm != nullptr) {
@@ -533,7 +533,7 @@ mDoExt_MtxCalcAnmBlendTblOld* puppet_build_blend(daAlink_c* alink, PuppetAnimHal
             if (!(f >= 0.0f)) f = 0.0f;
             if (f > maxFrame) f = maxFrame;
             if (trace) {
-                coop_log::info("coop_mod: [BLEND] slot {} frame={} max={}", i, f, maxFrame);
+                coop_log::trace("coop_mod: [BLEND] slot {} frame={} max={}", i, f, maxFrame);
             }
             anm->setFrame(f);
             ++usable;
@@ -556,19 +556,19 @@ mDoExt_MtxCalcAnmBlendTblOld* puppet_build_blend(daAlink_c* alink, PuppetAnimHal
     }
     if (half.tbl == nullptr) {
         if (pup().oldFrame == nullptr) {
-            if (trace) coop_log::info("coop_mod: [BLEND] no oldFrame - no table this frame");
+            if (trace) coop_log::trace("coop_mod: [BLEND] no oldFrame - no table this frame");
             return nullptr;
         }
         half.tbl = JKR_NEW mDoExt_MtxCalcAnmBlendTblOld(pup().oldFrame, kAnmSlots, half.packs);
         if (trace) {
-            coop_log::info("coop_mod: [BLEND] new table {:#x} over oldFrame {:#x}",
+            coop_log::trace("coop_mod: [BLEND] new table {:#x} over oldFrame {:#x}",
                 reinterpret_cast<uintptr_t>(half.tbl),
                 reinterpret_cast<uintptr_t>(pup().oldFrame));
         }
         if (half.tbl == nullptr) return nullptr;
     }
     half.tbl->mNum = kAnmSlots;
-    if (trace) coop_log::info("coop_mod: [BLEND] table ready, usable={}", usable);
+    if (trace) coop_log::trace("coop_mod: [BLEND] table ready, usable={}", usable);
     return half.tbl;
 }
 
@@ -1190,24 +1190,24 @@ void set_hat_tail_callbacks(J3DModel* hatModel) {
 
 void log_warp_state(const char* label, J3DModelData* modelData) {
     if (modelData == nullptr) {
-        coop_log::info("coop_mod: [DIAG-WARP] {}: modelData is null", label);
+        coop_log::trace("coop_mod: [DIAG-WARP] {}: modelData is null", label);
         return;
     }
     const u16 matNum = modelData->getMaterialNum();
-    coop_log::info("coop_mod: [DIAG-WARP] {}: {} materials, isLocked={} hasSharedDL={}", label,
+    coop_log::trace("coop_mod: [DIAG-WARP] {}: {} materials, isLocked={} hasSharedDL={}", label,
         matNum, static_cast<int>(modelData->isLocked()),
         static_cast<int>(modelData->getMaterialNodePointer(0) != nullptr &&
                           modelData->getMaterialNodePointer(0)->getSharedDisplayListObj() != nullptr));
     for (u16 i = 0; i < matNum; ++i) {
         J3DMaterial* material = modelData->getMaterialNodePointer(i);
         if (material == nullptr) {
-            coop_log::info("coop_mod: [DIAG-WARP]   mat[{}]: null", i);
+            coop_log::trace("coop_mod: [DIAG-WARP]   mat[{}]: null", i);
             continue;
         }
         J3DTevBlock* tevBlock = material->getTevBlock();
         J3DTexGenBlock* texGenBlock = material->getTexGenBlock();
         if (tevBlock == nullptr || texGenBlock == nullptr) {
-            coop_log::info("coop_mod: [DIAG-WARP]   mat[{}]: null tev/texgen block", i);
+            coop_log::trace("coop_mod: [DIAG-WARP]   mat[{}]: null tev/texgen block", i);
             continue;
         }
         const u8 tevStageNum = tevBlock->getTevStageNum();
@@ -1322,7 +1322,7 @@ mDoExt_bckAnm* get_or_load_puppet_anim(daAlink_c* alink, u16 resIdx) {
     }
 
     const uintptr_t vtbl = *reinterpret_cast<const uintptr_t*>(anm);
-    coop_log::info("coop_mod: [DIAG-ANM] resIdx={} anm={:#x} vtbl0={:#x}", resIdx,
+    coop_log::trace("coop_mod: [DIAG-ANM] resIdx={} anm={:#x} vtbl0={:#x}", resIdx,
         reinterpret_cast<uintptr_t>(anm), vtbl);
     if (!vtbl_looks_like_code(vtbl)) {
 
@@ -1456,7 +1456,7 @@ J3DModelData* get_field_item_data(u8 itemNo) {
     slot.data = data;
     slot.fromOutfit = false;
     slot.shared = true;
-    coop_log::info("coop_mod: [DIAG-ITEM] get-item model for item {:#x} from '{}' idx={}",
+    coop_log::trace("coop_mod: [DIAG-ITEM] get-item model for item {:#x} from '{}' idx={}",
         static_cast<int>(itemNo), arc, static_cast<int>(bmd));
     return slot.data;
 }
@@ -1488,7 +1488,7 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
         slot.shared = true;
         std::memcpy(pup().rideArcBuilt[which], pup().rideArc, sizeof(pup().rideArc));
         pup().rideIdxBuilt[which] = wireIdx;
-        coop_log::info("coop_mod: [DIAG-ITEM] loaded kind={} from ride archive '{}' idx={}", kind,
+        coop_log::trace("coop_mod: [DIAG-ITEM] loaded kind={} from ride archive '{}' idx={}", kind,
             pup().rideArc, wireIdx);
         return slot.data;
     }
@@ -1502,7 +1502,7 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
         slot.shared = true;
         prep_equipment_model(model);
         JKR_DELETE(model);
-        coop_log::info("coop_mod: [DIAG-ITEM] loaded kind={} from wire archive '{}' idx={}", kind,
+        coop_log::trace("coop_mod: [DIAG-ITEM] loaded kind={} from wire archive '{}' idx={}", kind,
             pup().rodArc, res.bmdResIdx);
         return slot.data;
     }
@@ -1517,7 +1517,7 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
         slot.shared = true;
         prep_equipment_model(model);
         JKR_DELETE(model);
-        coop_log::info("coop_mod: [DIAG-ITEM] loaded kind={} from outfit archive idx={}", kind,
+        coop_log::trace("coop_mod: [DIAG-ITEM] loaded kind={} from outfit archive idx={}", kind,
             res.bmdResIdx);
         return slot.data;
     }
@@ -1531,7 +1531,7 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
         slot.shared = true;
         prep_equipment_model(model);
         JKR_DELETE(model);
-        coop_log::info("coop_mod: [DIAG-ITEM] loaded kind={} from Alink idx={}", kind,
+        coop_log::trace("coop_mod: [DIAG-ITEM] loaded kind={} from Alink idx={}", kind,
             res.bmdResIdx);
         return slot.data;
     }
@@ -1547,7 +1547,7 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
         slot.shared = true;
         prep_equipment_model(model);
         JKR_DELETE(model);
-        coop_log::info("coop_mod: [DIAG-ITEM] loaded kind={} from outfit archive '{}'", kind,
+        coop_log::trace("coop_mod: [DIAG-ITEM] loaded kind={} from outfit archive '{}'", kind,
             res.outfitFile);
         return slot.data;
     }
@@ -1578,7 +1578,7 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
         return nullptr;
     }
     if (modelData == nullptr || modelData->getMaterialNum() == 0) {
-        coop_log::info("coop_mod: [DIAG-ITEM] kind={} bmdResIdx={} produced no usable model data",
+        coop_log::trace("coop_mod: [DIAG-ITEM] kind={} bmdResIdx={} produced no usable model data",
             kind, res.bmdResIdx);
         JKRFreeToSysHeap(buf);
         return nullptr;
@@ -1588,7 +1588,7 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
 
     slot.data = modelData;
     slot.buf = buf;
-    coop_log::info("coop_mod: [DIAG-ITEM] loaded kind={} bmdResIdx={} data={:p} mats={}", kind,
+    coop_log::trace("coop_mod: [DIAG-ITEM] loaded kind={} bmdResIdx={} data={:p} mats={}", kind,
         res.bmdResIdx, static_cast<void*>(modelData), modelData->getMaterialNum());
     return modelData;
 }
@@ -3577,12 +3577,12 @@ void sync_equipment_models() {
             if (pup().swordModel != nullptr) prep_equipment_model(pup().swordModel);
         }
         if (pup().swordModel != nullptr) {
-            coop_log::info("coop_mod: [DIAG-SWORD] '{}' from the model's equipment folder", skinBmd);
+            coop_log::trace("coop_mod: [DIAG-SWORD] '{}' from the model's equipment folder", skinBmd);
         } else if (outfitBmd != nullptr && pup().state == 2) {
             pup().swordModel = loadBmdFromArc(outfit_files(pup().outfit).arc, outfitBmd,
                 cXyz(1.0f, 1.0f, 1.0f));
             prep_equipment_model(pup().swordModel);
-            coop_log::info("coop_mod: [DIAG-SWORD] wooden sword from outfit archive '{}'",
+            coop_log::trace("coop_mod: [DIAG-SWORD] wooden sword from outfit archive '{}'",
                 outfitBmd);
         } else if (idx >= 0) {
             pup().swordModel = loadBmdFromArcIdx("Alink", idx, cXyz(1.0f, 1.0f, 1.0f));
@@ -3595,7 +3595,7 @@ void sync_equipment_models() {
             if (pup().swordModel != nullptr) {
                 J3DModelData* od = pup().swordModel->getModelData();
                 J3DModelData* rd = (ref != nullptr) ? ref->getModelData() : nullptr;
-                coop_log::info("coop_mod: [DIAG-SWORD] ourData={:p} refData={:p} ourDiff={:#x} "
+                coop_log::trace("coop_mod: [DIAG-SWORD] ourData={:p} refData={:p} ourDiff={:#x} "
                     "refDiff={:#x} mats={}",
                     static_cast<void*>(od), static_cast<void*>(rd),
                     pup().swordModel->mDiffFlag, (ref != nullptr) ? ref->mDiffFlag : 0u,
@@ -3607,7 +3607,7 @@ void sync_equipment_models() {
                         J3DShape* shp = mat->getShape();
                         J3DTevBlock* tb = mat->getTevBlock();
                         J3DTexGenBlock* tg = mat->getTexGenBlock();
-                        coop_log::info("coop_mod: [DIAG-SWORD]   mat[{}] tev={} texgen={} "
+                        coop_log::trace("coop_mod: [DIAG-SWORD]   mat[{}] tev={} texgen={} "
                             "hidden={} lastTexMap={}",
                             mi, (tb != nullptr) ? tb->getTevStageNum() : 0,
                             (tg != nullptr) ? tg->getTexGenNum() : 0,
@@ -3623,7 +3623,7 @@ void sync_equipment_models() {
         if (outfitBmd == nullptr || pup().swordModel != nullptr) {
             pup().swordId = pup().wantSword;
         }
-        coop_log::info("coop_mod: [DIAG-EQUIP] sword={} model={:p}", pup().swordId,
+        coop_log::trace("coop_mod: [DIAG-EQUIP] sword={} model={:p}", pup().swordId,
             static_cast<void*>(pup().swordModel));
     }
 
@@ -3654,7 +3654,7 @@ void sync_equipment_models() {
             prep_equipment_model(pup().sheathModel);
         }
         pup().sheathId = pup().wantSheath;
-        coop_log::info("coop_mod: [DIAG-EQUIP] sheath={} model={:p}", pup().sheathId,
+        coop_log::trace("coop_mod: [DIAG-EQUIP] sheath={} model={:p}", pup().sheathId,
             static_cast<void*>(pup().sheathModel));
     }
 
@@ -3686,7 +3686,7 @@ void sync_equipment_models() {
         if (pup().shieldModel != nullptr) {
             prep_equipment_model(pup().shieldModel);
             std::strncpy(pup().shieldArc, pup().wantShieldArc, sizeof(pup().shieldArc) - 1);
-            coop_log::info("coop_mod: [DIAG-EQUIP] shield '{}' from the model's equipment folder",
+            coop_log::trace("coop_mod: [DIAG-EQUIP] shield '{}' from the model's equipment folder",
                 shieldFile);
         }
         if (pup().shieldModel == nullptr && arcReady) {
@@ -3694,7 +3694,7 @@ void sync_equipment_models() {
                 loadBmdFromArcIdx(pup().wantShieldArc, 3, cXyz(1.0f, 1.0f, 1.0f));
             prep_equipment_model(pup().shieldModel);
             std::strncpy(pup().shieldArc, pup().wantShieldArc, sizeof(pup().shieldArc) - 1);
-            coop_log::info("coop_mod: [DIAG-EQUIP] shield arc='{}' model={:p}",
+            coop_log::trace("coop_mod: [DIAG-EQUIP] shield arc='{}' model={:p}",
                 pup().shieldArc, static_cast<void*>(pup().shieldModel));
         }
     }
@@ -4900,7 +4900,7 @@ void draw_one_puppet(daAlink_c* alink) {
          pup().footAngles[0][1] != 0 || pup().footAngles[1][0] != 0))
     {
         ++s_poseDiagLogs;
-        coop_log::info("coop_mod: [POSEDIAG-RX] cbJoints={:#x} wolf={} rootMask={:#x} "
+        coop_log::trace("coop_mod: [POSEDIAG-RX] cbJoints={:#x} wolf={} rootMask={:#x} "
                         "clear=({},{},{}) foot0=({},{},{}) foot1=({},{},{})",
             s_poseCbSeen, static_cast<int>(outfit_files(pup().outfit).isWolf),
             pup().rootClearMask, pup().rootClearX, pup().rootClearY, pup().rootClearZ,

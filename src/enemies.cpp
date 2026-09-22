@@ -1685,7 +1685,7 @@ void sweep(EnemyList& list, bool host) {
         if (!t.killed && t.runtime && !t.goneSent && !catchable && room_is_loaded(t.room)) {
             if (quiet) continue;
             send_gone(t.room, t.key);
-            coop_log::info("coop_mod: [ENEMY-DYN] a spawned actor was removed here (room {} "
+            coop_log::trace("coop_mod: [ENEMY-DYN] a spawned actor was removed here (room {} "
                             "key={:#010x}) - telling the other game", static_cast<int>(t.room),
                 t.key);
             t = Tracked{};
@@ -4269,7 +4269,7 @@ void log_status(const EnemyList* list) {
                             coop_world_stalled(static_cast<uint8_t>(i)) ? "(PAUSED)" : "");
     }
     worlds[sizeof(worlds) - 1] = 0;
-    coop_log::info("coop_mod: [ENEMY-WORLD] ourFrames={} {}", coop_local_world_frames(), worlds);
+    coop_log::trace("coop_mod: [ENEMY-WORLD] ourFrames={} {}", coop_local_world_frames(), worlds);
 }
 
 }

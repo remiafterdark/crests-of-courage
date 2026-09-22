@@ -719,7 +719,7 @@ void draw_squad() {
             J2DOrthoGraph* og = static_cast<J2DOrthoGraph*>(graf);
             const auto* o = og->getOrtho();
             const auto* b = og->getBounds();
-            coop_log::info("coop_mod: [SQUAD-DIAG] ortho=({:.1f},{:.1f})-({:.1f},{:.1f}) port=({:.1f},{:.1f})-({:.1f},{:.1f}) "
+            coop_log::trace("coop_mod: [SQUAD-DIAG] ortho=({:.1f},{:.1f})-({:.1f},{:.1f}) port=({:.1f},{:.1f})-({:.1f},{:.1f}) "
                             "realFirst top={:.1f} left={:.1f} bottom={:.1f} ours top={:.1f} left={:.1f} "
                             "tx={:.1f} ty={:.1f} ps=({:.3f},{:.3f},{:.1f},{:.1f}) nameCell={:.1f} realGroupT=({:.1f},{:.1f}) "
                             "realGroupBounds=({:.1f},{:.1f}) realS={:.3f}",
