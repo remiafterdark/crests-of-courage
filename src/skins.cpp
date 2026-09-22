@@ -26,7 +26,19 @@
 #include <string>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
+#if defined(_WIN32) || (defined(__APPLE__) && TARGET_OS_OSX) ||     (defined(__linux__) && !defined(__ANDROID__))
+#define COOP_HAS_FILE_MANAGER 1
+#else
+#define COOP_HAS_FILE_MANAGER 0
+#endif
+
 namespace {
+
+const bool kCanOpenFolder = COOP_HAS_FILE_MANAGER != 0;
 
 const char* const kPartFile[kSkinPartCount] = {
     "body.bmd", "face.bmd", "head.bmd", "hands.bmd", "sword.bmd", "shield.bmd"};
@@ -576,7 +588,13 @@ std::string skins_parts_text(int index) {
     return out.empty() ? "nothing usable" : out;
 }
 
+bool skins_can_open_folder() {
+    return kCanOpenFolder;
+}
+
 void skins_open_folder() {
+    if (!kCanOpenFolder) return;
+#if COOP_HAS_FILE_MANAGER
     const std::string dir = skins_folder_path();
     if (dir.empty()) return;
 #if defined(_WIN32)
@@ -587,6 +605,7 @@ void skins_open_folder() {
     const std::string command = "xdg-open \"" + dir + "\" &";
 #endif
     std::system(command.c_str());
+#endif
 }
 
 std::string skins_folder_path() {

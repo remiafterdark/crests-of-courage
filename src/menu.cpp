@@ -785,7 +785,9 @@ void build_models(UiElementHandle pane, SurfaceHandles& h, UiElementHandle detai
         add_slot_dropdown(pane, slot);
     }
     svc_ui->pane_add_section(mod_ctx, pane, "Your models folder");
-    add_button(pane, "Open the folder", [](ModContext*, void*) { skins_open_folder(); });
+    if (skins_can_open_folder()) {
+        add_button(pane, "Open the folder", [](ModContext*, void*) { skins_open_folder(); });
+    }
     add_button(pane, "Reload", [](ModContext*, void*) { skins_refresh(); }, nullptr,
         "Press after adding or changing a folder.");
 }

@@ -218,6 +218,8 @@ void icons_update();
 void icons_shutdown();
 void skins_open_folder();
 
+bool skins_can_open_folder();
+
 bool skins_covers_outfit(const char* name, int outfit);
 
 bool skins_covers_slot(const char* name, int slot);
