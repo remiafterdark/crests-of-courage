@@ -2,9 +2,11 @@
 
 #include <cstdint>
 
-const uint16_t kCoopProtocolVersion = 51;
+const uint16_t kCoopProtocolVersion = 65;
 
-const int kCoopMaxPlayers = 4;
+const int kCoopMaxPlayers = 16;
+
+typedef uint16_t CoopRoster;
 const uint8_t kCoopHostId = 0;
 const uint8_t kCoopNoPlayer = 0xFF;
 
@@ -63,6 +65,82 @@ enum CoopMsgType : uint8_t {
     kMsgSkinChoices = 45,
     kMsgSkinRequest = 46,
     kMsgObjectPush = 47,
+    kMsgSkipVote = 48,
+    kMsgCarry = 49,
+    kMsgTwilightBug = 50,
+    kMsgTearGot = 51,
+    kMsgTorch = 52,
+    kMsgAnimal = 53,
+};
+
+struct MsgTorch {
+    uint32_t key;
+    int8_t room;
+    uint8_t lit;
+    int16_t procName;
+    float home[3];
+};
+
+struct MsgAnimal {
+    uint32_t key;
+    int8_t room;
+    int16_t procName;
+    int16_t angleY;
+    float home[3];
+    float pos[3];
+    float speedF;
+    float dist;
+};
+
+struct MsgTwilightBug {
+    char stage[8];
+    int8_t room;
+    uint8_t swBit;
+    float pos[3];
+};
+
+struct MsgTearGot {
+    char stage[8];
+    int8_t saveNo;
+    uint8_t area;
+    uint8_t save;
+    uint8_t count;
+};
+
+enum CarryState : uint8_t {
+    kCarryHeld = 1,
+    kCarryGone = 3,
+    kCarryThrown = 4,
+    kCarryRest = 5,
+};
+struct MsgCarry {
+    uint32_t key;
+    int8_t room;
+    uint8_t state;
+    float pos[3];
+    int16_t angle[3];
+
+    uint8_t statueAnim;
+    uint8_t flags;
+
+    float statueFrame;
+
+    float rel[3];
+    int16_t relYaw;
+
+    float speedF;
+    float speedY;
+    float gravity;
+};
+const uint8_t kCarryFlagStatue = 0x01;
+const uint8_t kCarryFlagRelative = 0x02;
+
+const uint8_t kCarryFlagSpin = 0x04;
+
+struct MsgSkipVote {
+    uint8_t inCutscene;
+    uint8_t voted;
+    char stage[8];
 };
 
 struct MsgPause {
@@ -98,7 +176,7 @@ struct MsgAssignId {
 };
 
 struct MsgRoster {
-    uint8_t present;
+    CoopRoster present;
 };
 
 enum CoopBossCollider : uint8_t {
@@ -395,6 +473,18 @@ struct MsgObjectMove {
     int8_t room;
     float pos[3];
     int16_t angle[3];
+
+    int16_t phase[8];
+    uint8_t phaseCount;
+
+    uint8_t blobLen;
+    uint8_t blob[192];
+
+    int16_t procName;
+    int16_t homeAngleY;
+    uint16_t setID;
+    uint32_t param;
+    float home[3];
 };
 
 struct MsgHorse {
@@ -437,6 +527,8 @@ struct MsgActorState {
     int16_t state;
 
     uint32_t param;
+
+    int16_t roll[4];
 };
 
 struct MsgActorGone {

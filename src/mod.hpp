@@ -42,17 +42,22 @@ void coop_net_send_to(uint8_t playerId, uint8_t type, const void* payload, size_
 
 uint8_t coop_net_local_id();
 
-uint8_t coop_net_roster();
+uint16_t coop_net_roster();
 bool coop_net_player_present(uint8_t playerId);
 
 void coop_net_set_local_id(uint8_t playerId, uint8_t hostMaxPlayers);
-void coop_net_set_roster(uint8_t roster);
+void coop_net_set_roster(uint16_t roster);
 
 void features_on_roster_changed();
 ConfigVarHandle coop_net_port_var();
 ConfigVarHandle coop_net_address_var();
 ConfigVarHandle coop_net_join_port_var();
 ConfigVarHandle coop_net_autoconnect_var();
+
+bool features_reload_at_player(uint8_t playerId);
+
+void features_debug_fake_peer(uint8_t id, bool on, const char* name, const float* pos, uint16_t life,
+    uint16_t maxLife);
 void coop_debug_spawn_puppet();
 void coop_debug_force_transform();
 void coop_debug_give_midna();
@@ -272,6 +277,10 @@ std::string coop_net_join_address();
 void voices_begin(const char* skinName);
 
 void voices_begin_local();
+
+void voices_begin_remote(const char* skinName);
+void voices_end_remote();
+void voices_end_local();
 void voices_update();
 void voices_on_disconnected();
 
@@ -422,6 +431,15 @@ void boss_queue_overlay();
 
 bool boss_local_demo_running();
 
+void skipvote_init();
+
+void drops_init();
+
+void twilight_update();
+void twilight_on_message(uint8_t type, const uint8_t* payload, size_t size);
+void skipvote_update();
+void skipvote_on_message(const uint8_t* payload, size_t size, uint8_t from);
+
 void world_register_vars();
 void world_update();
 void world_on_connected();
@@ -445,6 +463,8 @@ void ui_init();
 
 void puppet_hook_release_player(uint8_t playerId);
 bool puppet_hook_player_active(uint8_t playerId);
+
+bool puppet_hook_sword_mtx(uint8_t playerId, float out[3][4], bool* master);
 bool puppet_hook_get_pose_of(uint8_t playerId, float* x, float* y, float* z, short* angleY,
     float* speedX, float* speedZ);
 
@@ -464,6 +484,47 @@ void puppet_hook_peer_skin_changed(uint8_t playerId);
 
 void local_skin_rebuild_link();
 
+ConfigVarHandle coop_net_upnp_var();
+
+void upnp_begin(int port);
+void upnp_release();
+void upnp_update();
+bool upnp_ready();
+
+std::string upnp_external_address();
+
+std::string upnp_status();
+
+ConfigVarHandle coop_net_room_code_var();
+ConfigVarHandle coop_net_room_server_var();
+ConfigVarHandle coop_net_rooms_var();
+ConfigVarHandle coop_net_host_key_var();
+void coop_net_join_code();
+
+void online_host_begin(int udpPort, const std::string& name);
+
+const size_t kRoomNameMin = 4;
+const size_t kRoomNameMax = 24;
+std::string normalize_room_code(const std::string& typed);
+
+void online_join_begin(const std::string& code, int localUdpPort);
+void online_stop();
+void online_update();
+bool online_active();
+
+std::string online_room_code();
+std::string online_status();
+
+bool online_accept_token(uint64_t token);
+
+bool online_on_datagram(const std::string& from, const uint8_t* data, size_t size);
+
+void coop_udp_send_raw(const std::string& endpoint, const void* data, size_t size);
+
+void coop_online_punched(const std::string& endpoint, uint64_t token);
+
+void coop_online_failed(const std::string& why, const std::string& upnpFallback);
+
 void local_skin_equipment_update();
 
 void local_skin_colors_update();
@@ -471,8 +532,11 @@ void local_skin_colors_update();
 bool coop_local_models_unsafe();
 
 inline bool coop_ptr_looks_live(const void* ptr) {
-    const uintptr_t v = reinterpret_cast<uintptr_t>(ptr);
-    return v >= 0x10000ull && v < 0x0000800000000000ull && (v & 3) == 0;
+    uintptr_t v = reinterpret_cast<uintptr_t>(ptr);
+#if defined(__aarch64__) || defined(_M_ARM64)
+    v &= 0x00FFFFFFFFFFFFFFull;
+#endif
+    return v >= 0x10000ull && v < 0x0001000000000000ull && (v & 3) == 0;
 }
 
 int local_skin_outfit();

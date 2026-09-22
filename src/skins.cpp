@@ -156,18 +156,18 @@ bool scan_one(const std::filesystem::path& path, Skin& skin) {
         }
     }
     std::error_code dec;
-    skin.hasEquipment = std::filesystem::is_directory(path / "equipment", dec) && !dec &&
+    skin.hasEquipment = is_directory_ci(path / "equipment", dec) && !dec &&
         !std::filesystem::is_empty(path / "equipment", dec);
-    skin.hasCutscenes = std::filesystem::is_directory(path / "cutscene", dec) && !dec &&
+    skin.hasCutscenes = is_directory_ci(path / "cutscene", dec) && !dec &&
         !std::filesystem::is_empty(path / "cutscene", dec);
-    skin.hasVoice = std::filesystem::exists(path / "voices.bin", dec) && !dec;
+    skin.hasVoice = exists_ci(path / "voices.bin", dec) && !dec;
 
     return any || skin.hasEquipment || skin.hasCutscenes || skin.hasVoice;
 }
 
 void scan_dir(const std::filesystem::path& dir, int& count) {
     std::error_code ec;
-    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+    for (const auto& entry : std::filesystem::directory_iterator(path_ci(dir), ec)) {
         if (!entry.is_directory()) continue;
         Skin skin;
         if (!scan_one(entry.path(), skin)) continue;
@@ -465,7 +465,7 @@ void skins_equipment_list(int index, std::vector<std::string>& has,
     if (index < 0 || index >= static_cast<int>(s_skins.size())) return;
     const std::filesystem::path dir = std::filesystem::path(s_skins[index].path) / "equipment";
     std::error_code ec;
-    const bool haveDir = std::filesystem::is_directory(dir, ec) && !ec;
+    const bool haveDir = is_directory_ci(dir, ec) && !ec;
 
     auto have_file = [&](const char* file) {
         return skins_ships_equipment_file(s_skins[index].name.c_str(), file);
@@ -486,7 +486,7 @@ void skins_equipment_list(int index, std::vector<std::string>& has,
 
     int others = 0;
     if (haveDir) {
-        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        for (const auto& entry : std::filesystem::directory_iterator(path_ci(dir), ec)) {
             if (ec) break;
             if (!entry.is_regular_file()) continue;
             const std::string name = entry.path().filename().string();
@@ -521,10 +521,10 @@ std::string skins_equipment_text(int index) {
     if (index < 0 || index >= static_cast<int>(s_skins.size())) return "";
     const std::filesystem::path dir = std::filesystem::path(s_skins[index].path) / "equipment";
     std::error_code ec;
-    if (!std::filesystem::is_directory(dir, ec) || ec) return "";
+    if (!is_directory_ci(dir, ec) || ec) return "";
     std::string out;
     int extra = 0;
-    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+    for (const auto& entry : std::filesystem::directory_iterator(path_ci(dir), ec)) {
         if (ec) break;
         if (!entry.is_regular_file()) continue;
         const std::string name = entry.path().filename().string();
@@ -732,7 +732,7 @@ J3DModelData* skins_local_cutscene_data(const char* file) {
     LoadedCutscene loaded;
     loaded.skin = skin->name;
     loaded.file = file;
-    if (std::filesystem::exists(path, ec) && !ec) {
+    if (exists_ci(path, ec) && !ec) {
         loaded.data = loadBmdDataFromFile(path.string().c_str());
     }
     loaded.failed = loaded.data == nullptr;
@@ -764,7 +764,7 @@ J3DModelData* skins_equipment_data(const char* name, const char* file) {
     std::error_code ec;
     LoadedCutscene loaded;
     loaded.skin = key;
-    if (std::filesystem::exists(path, ec) && !ec) {
+    if (exists_ci(path, ec) && !ec) {
         loaded.data = loadBmdDataFromFile(path.string().c_str());
     }
     loaded.failed = loaded.data == nullptr;
@@ -778,11 +778,11 @@ bool skins_ships_equipment_file(const char* name, const char* file) {
     if (skin == nullptr || file == nullptr) return false;
     std::error_code ec;
     const std::filesystem::path root(skin->path);
-    if (std::filesystem::exists(root / "equipment" / file, ec) && !ec) return true;
+    if (exists_ci(root / "equipment" / file, ec) && !ec) return true;
     for (int o = 0; o < kSkinOutfitCount; ++o) {
         const std::filesystem::path dir =
             (kOutfitDir[o][0] == '\0') ? root : root / kOutfitDir[o];
-        if (std::filesystem::exists(dir / file, ec) && !ec) return true;
+        if (exists_ci(dir / file, ec) && !ec) return true;
     }
     return false;
 }

@@ -2,6 +2,13 @@ cmake_minimum_required(VERSION 3.25)
 project(coop_mod CXX)
 
 set(DUSK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../dusklight" CACHE PATH "Path to dusk source root")
+if (NOT EXISTS "${DUSK_DIR}/sdk/CMakeLists.txt")
+    if (NOT DUSKLIGHT_VERSION)
+        set(DUSKLIGHT_VERSION "e9b120544cb75e81b5aa36777f1688fa61f2d9e8")
+    endif ()
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchDusklight.cmake")
+    set(DUSK_DIR "${DUSKLIGHT_DIR}")
+endif ()
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 add_subdirectory("${DUSK_DIR}/sdk" dusk-sdk EXCLUDE_FROM_ALL)
 
@@ -14,6 +21,11 @@ add_mod(coop_mod
              src/features.cpp
              src/menu.cpp
              src/colors.cpp
+             src/upnp.cpp
+             src/online.cpp
+             src/skipvote.cpp
+             src/drops.cpp
+             src/twilight.cpp
              src/projectiles.cpp
              src/effects.cpp
              src/pvp.cpp

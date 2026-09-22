@@ -243,6 +243,79 @@ void merge_into_live_save(dSv_info_c* info, const uint8_t* blob) {
     world_on_connected();
 }
 
+struct PendingSession {
+    bool active = false;
+    u8 selectEquip[sizeof(dSv_player_status_a_c::mSelectEquip)] = {};
+    u8 transform = 0;
+    u16 life = 0;
+    uint32_t waitedTicks = 0;
+};
+PendingSession s_session;
+
+const uint32_t kSessionGiveUpTicks = 600;
+
+void load_host_save(dSv_info_c* info, const uint8_t* blob) {
+    dSv_save_c& mine = info->getSavedata();
+    static dSv_save_c result;
+    std::memcpy(&result, blob, kSaveSize);
+
+    dSv_player_status_a_c& a = result.mPlayer.mPlayerStatusA;
+    const dSv_player_status_a_c& myA = mine.mPlayer.mPlayerStatusA;
+
+    std::memcpy(s_session.selectEquip, a.mSelectEquip, sizeof(s_session.selectEquip));
+    s_session.transform = a.mTransformStatus;
+    s_session.life = a.mLife;
+
+    std::memcpy(a.mSelectEquip, myA.mSelectEquip, sizeof(a.mSelectEquip));
+    a.mTransformStatus = myA.mTransformStatus;
+
+    const u16 maxLife = a.mMaxLife;
+    const u16 myLife = myA.mLife;
+    const u16 lifeCap = static_cast<u16>((maxLife / 5) * 4);
+    a.mLife = std::min<u16>(myLife == 0 ? u16{4} : myLife, lifeCap > 0 ? lifeCap : u16{4});
+
+    result.mPlayer.mConfig = mine.mPlayer.mConfig;
+
+    if (result.mPlayer.mHorsePlace.mName[0] != '\0') {
+        std::memset(result.mPlayer.mHorsePlace.mName, 0, sizeof(result.mPlayer.mHorsePlace.mName));
+        std::memcpy(result.mPlayer.mHorsePlace.mName, "coop", 4);
+    }
+
+    std::memcpy(&mine, &result, kSaveSize);
+
+    const int slot = current_save_slot();
+    if (slot >= 0) info->getMemory() = mine.getSave(slot);
+
+    features_reset_sync_baselines();
+    world_on_connected();
+
+    s_session.active = features_reload_at_player(kCoopHostId);
+    s_session.waitedTicks = 0;
+    if (!s_session.active) {
+        coop_log::warn("coop_mod: [JOIN] could not tell where the host is - keeping our own gear "
+                       "and position this time");
+    }
+}
+
+void apply_pending_session() {
+    if (!s_session.active) return;
+    dSv_info_c* info = dComIfGs_getSaveInfo();
+    if (info == nullptr) return;
+    if (daAlink_getAlinkActorClass() != nullptr) {
+        if (++s_session.waitedTicks >= kSessionGiveUpTicks) {
+            coop_log::warn("coop_mod: [JOIN] the load never happened - keeping our own gear");
+            s_session = PendingSession{};
+        }
+        return;
+    }
+    dSv_player_status_a_c& a = info->getSavedata().mPlayer.mPlayerStatusA;
+    std::memcpy(a.mSelectEquip, s_session.selectEquip, sizeof(a.mSelectEquip));
+    a.mTransformStatus = s_session.transform;
+    a.mLife = s_session.life;
+    coop_log::info("coop_mod: [JOIN] loading in with the host's gear and form");
+    s_session = PendingSession{};
+}
+
 void apply_snapshot() {
     dSv_info_c* info = dComIfGs_getSaveInfo();
     if (info == nullptr || s_pending.size() != kSaveSize) return;
@@ -252,7 +325,7 @@ void apply_snapshot() {
     } else {
         coop_log::info("coop_mod: [JOIN] co-op save - taking the host's world without a backup");
     }
-    merge_into_live_save(info, s_pending.data());
+    load_host_save(info, s_pending.data());
     s_carryingJoinedWorld = true;
     s_joinerApplied = true;
     s_havePending = false;
@@ -331,10 +404,11 @@ std::string joinsync_backup_summary() {
     char stage[9] = {};
     std::memcpy(stage, header.stage, 8);
     return std::string("Latest backup: ") + when + (stage[0] ? std::string(" (") + stage + ")" : "") +
-           ". " + std::to_string(all.size()) + " kept - the oldest is your first one.";
+           ". " + std::to_string(all.size()) + " kept. The oldest is your first one.";
 }
 
 void joinsync_on_connected() {
+    s_session = PendingSession{};
     for (int i = 0; i < kCoopMaxPlayers; ++i) s_hostSentTo[i] = false;
     s_joinerApplied = false;
     s_havePending = false;
@@ -343,6 +417,8 @@ void joinsync_on_connected() {
 }
 
 void joinsync_update() {
+
+    apply_pending_session();
     if (!coop_net_connected()) return;
     if (coop_net_is_host()) {
         if (!in_gameplay_settled()) return;

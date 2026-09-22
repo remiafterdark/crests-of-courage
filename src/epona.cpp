@@ -59,10 +59,7 @@ int s_diagTick = 0;
 
 bool enabled() {
 
-    if (s_enableVar == 0) return false;
-    bool value = true;
-    if (svc_config != nullptr) svc_config->get_bool(mod_ctx, s_enableVar, &value);
-    return value;
+    return false;
 }
 
 bool player_on_our_stage(uint8_t playerId) {

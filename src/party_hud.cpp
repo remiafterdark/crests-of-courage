@@ -337,6 +337,8 @@ void measure_anchor(const ParentSpace& ps, f32 usedTx, f32 usedTy, f32 scale) {
 const f32 kSquadFloorY = 222.0f;
 
 const int kMaxFullEntries = 3;
+
+const int kMaxTextRows = 6;
 const f32 kFitSteps[] = {1.0f, 0.85f, 0.7f, 0.6f, 0.5f};
 const int kFitStepCount = sizeof(kFitSteps) / sizeof(kFitSteps[0]);
 int s_fitStep = 0;
@@ -416,7 +418,7 @@ const f32 kWorldFadeEnd = 4500.0f;
 void draw_world_hearts(J2DPane* realGroup, dMeter2Draw_c* real, J2DGrafContext* graf,
     f32 alphaRate) {
     if (!puppet_hook_health_enabled()) return;
-    const bool hurtOnly = cfg_bool(s_hurtOnlyVar, false);
+    const bool hurtOnly = cfg_bool(s_hurtOnlyVar, true);
     J2DOrthoGraph* og = static_cast<J2DOrthoGraph*>(graf);
     const auto* o = og->getOrtho();
     const f32 realSx = realGroup->getScaleX();
@@ -475,7 +477,7 @@ void draw_world_hearts(J2DPane* realGroup, dMeter2Draw_c* real, J2DGrafContext* 
 }
 
 void draw_squad() {
-    const bool listOn = cfg_bool(s_enableVar, true);
+    const bool listOn = cfg_bool(s_enableVar, false);
     const bool worldOn = puppet_hook_health_enabled();
     if (!coop_net_connected() || (!listOn && !worldOn)) return;
     dMeter2_c* meter = dMeter2Info_getMeterClass();
@@ -518,7 +520,9 @@ void draw_squad() {
         }
     }
     {
-        static uint8_t s_order[kCoopMaxPlayers] = {0xFF, 0xFF, 0xFF, 0xFF};
+        static uint8_t s_order[kCoopMaxPlayers] = {
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
         static int s_orderAge = 0;
 
         if (++s_orderAge >= 120) {
@@ -539,6 +543,22 @@ void draw_squad() {
                 return pos(a.id) < pos(b.id);
             });
         }
+    }
+
+    {
+        static bool s_hiddenForCrowd = false;
+        const bool crowd = listOn && count > kMaxFullEntries;
+        if (!coop_net_connected()) s_hiddenForCrowd = false;
+        if (crowd != s_hiddenForCrowd) {
+            s_hiddenForCrowd = crowd;
+            if (crowd) {
+                coop_toast("Party HUD hidden", "It shows up to 3 other players. It comes back when "
+                                               "there are 3 or fewer.");
+            } else if (coop_net_connected()) {
+                coop_toast("Party HUD", "Back on. 3 or fewer other players.");
+            }
+        }
+        if (crowd) count = 0;
     }
     if (!listOn) count = 0;
     if (count == 0 && !worldOn) return;
@@ -653,6 +673,7 @@ void draw_squad() {
     const u8 alpha = static_cast<u8>(255.0f * alphaRate);
     f32 lineTop = bottom + gap;
     bool compact = false;
+    int textRows = 0;
     for (int n = 0; n < count; ++n) {
         const SquadMember& m = members[n];
         const f32 memberTop = lineTop;
@@ -663,6 +684,16 @@ void draw_squad() {
             graf->setPort();
             graf->setup2D();
             char line[64];
+            if (textRows >= kMaxTextRows) {
+
+                std::snprintf(line, sizeof(line), "+%d more", count - n);
+                lineTop += nameCell * 1.15f;
+                draw_name(line, left, lineTop, nameCell, alpha, false, false);
+                graf->setPort();
+                graf->setup2D();
+                break;
+            }
+            ++textRows;
             std::snprintf(line, sizeof(line), "%s  %u/%u", m.name.c_str(),
                 static_cast<unsigned>((m.life + 3) / 4), static_cast<unsigned>(m.maxLife / 5));
             lineTop += nameCell * 1.15f;
@@ -732,13 +763,13 @@ void squad_hud_register_vars() {
     ConfigVarDesc on = CONFIG_VAR_DESC_INIT;
     on.name = "squad_health";
     on.type = CONFIG_VAR_BOOL;
-    on.default_bool = true;
+    on.default_bool = false;
     if (svc_config->register_var(mod_ctx, &on, &s_enableVar) != MOD_OK) s_enableVar = 0;
 
     ConfigVarDesc hurt = CONFIG_VAR_DESC_INIT;
     hurt.name = "world_hearts_hurt_only";
     hurt.type = CONFIG_VAR_BOOL;
-    hurt.default_bool = false;
+    hurt.default_bool = true;
     if (svc_config->register_var(mod_ctx, &hurt, &s_hurtOnlyVar) != MOD_OK) s_hurtOnlyVar = 0;
 
     ConfigVarDesc hurtSeconds = CONFIG_VAR_DESC_INIT;

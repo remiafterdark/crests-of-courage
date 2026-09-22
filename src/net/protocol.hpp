@@ -60,7 +60,13 @@ enum PuppetHeldItem : uint8_t {
     kPuppetHeldBoomerangAimWind = 23,
 
     kPuppetHeldGetItem = 24,
-    kPuppetHeldCount = 25,
+
+    kPuppetHeldBomb = 25,
+
+    kPuppetHeldRide = 26,
+
+    kPuppetHeldRideExtra = 27,
+    kPuppetHeldCount = 28,
 };
 
 const uint16_t kPuppetHeldJointRoot = 0xFFFF;
@@ -140,6 +146,7 @@ struct PlayerSnapshot {
 
     char shieldArc[16];
     char rodArc[16];
+    char rideArc[16];
 
     AttachedModelSnapshot attached[kPuppetAttachSlots];
 
@@ -219,6 +226,45 @@ struct MidnaSnapshot {
 #pragma pack(pop)
 
 static_assert(sizeof(MidnaJointSnapshot) == 18 + 12, "MidnaJointSnapshot must stay packed");
+
+const uint32_t kHorseSnapshotMagic = 0x31535248u;
+const int kHorseJoints = 48;
+const uint8_t kHorseFlagRiding = 0x01;
+
+const uint8_t kHorseFlagIdle = 0x02;
+const float kHorseQuatScale = 32767.0f;
+const float kHorsePosScale = 16.0f;
+
+struct HorseJointSnapshot {
+    int16_t q[4];
+    int16_t p[3];
+};
+
+const int kHorseReinPoints = 75;
+
+struct HorseSnapshot {
+    uint32_t magic;
+    uint32_t seq;
+    uint8_t playerId;
+    uint8_t flags;
+    uint8_t jointCount;
+    uint8_t reinCount;
+    float baseMtx[12];
+    HorseJointSnapshot joints[kHorseJoints];
+    int16_t reins[kHorseReinPoints][3];
+
+    uint16_t idleAnm;
+    float idleFrame;
+    float idleRate;
+
+    int8_t room;
+    uint8_t pad2[3];
+};
+static_assert(sizeof(HorseJointSnapshot) == 14, "HorseJointSnapshot must stay packed");
+static_assert(sizeof(HorseSnapshot) == 4 + 4 + 4 + 48 + kHorseJoints * 14 + kHorseReinPoints * 6 + 2 + 8 + 4,
+    "HorseSnapshot must stay packed");
+
+static_assert(sizeof(HorseSnapshot) <= 1200, "HorseSnapshot must fit one small datagram");
 static_assert(sizeof(MidnaSnapshot) ==
         4 + 4 + 1 + 1 + 1 + 1 + 2 + 2 + 4 + 48 + 48 + 8 + 8 + 4 + 4 + (kMidnaJoints * 30),
     "MidnaSnapshot must stay packed");
@@ -229,10 +275,13 @@ static_assert(sizeof(AttachedModelSnapshot) == 1 + 2 + 2 + 4 + (12 * 4) + 4,
     "AttachedModelSnapshot must stay tightly packed");
 static_assert(sizeof(PlayerSnapshot) ==
         4 + 1 + 12 + 6 + 1 + 1 + (3 * 14) + (3 * 14) + 1 + 1 + 6 + 6 + 16 +
-            16 + (kPuppetAttachSlots * 61) + 6 + 1 + 1 + 1 + 2 +
+            16 + 16 + (kPuppetAttachSlots * 61) + 6 + 1 + 1 + 1 + 2 +
             (kPuppetChainPts * 3 * 4) + 1 + 12 + 24 + 2 + 1 + 2 + 12 + 1 + 4 + 4 +
             4  ,
     "PlayerSnapshot must stay tightly packed");
 
 static_assert(sizeof(MidnaSnapshot) != sizeof(PlayerSnapshot),
     "MidnaSnapshot and PlayerSnapshot must differ in size - handle_udp_event dispatches on it");
+static_assert(sizeof(HorseSnapshot) != sizeof(PlayerSnapshot) &&
+                  sizeof(HorseSnapshot) != sizeof(MidnaSnapshot),
+    "HorseSnapshot must differ in size from the other datagrams - handle_udp_event dispatches on it");

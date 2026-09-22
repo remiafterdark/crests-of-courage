@@ -24,6 +24,8 @@
 #include <iterator>
 #include <string>
 #include <vector>
+#include <algorithm>
+#include <cmath>
 
 namespace {
 

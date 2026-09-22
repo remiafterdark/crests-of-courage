@@ -1,29 +1,40 @@
 # Crests of Courage
 
 Online co-op for Twilight Princess, as a mod for [Dusklight](https://github.com/TwilitRealm/dusklight).
-2-4 players, one shared world.
+2-16 players, one shared world.
 
 **Early release.** Enemy sync and boss sync are experimental - read the warnings below.
 
 ## Requirements
 
-- Windows. Linux, Mac and Android aren't built yet.
+- Anywhere Dusklight runs: Windows, Mac, Linux, iOS and Android.
 - Everyone needs the same version of this mod. Different versions won't connect.
 
 ## Install
 
-Drop `coop_mod.dusk` into Dusklight's `mods` folder. A **Co-op** tab shows up in the in-game menu bar.
+Drop `crests_of_courage.dusk` into Dusklight's `mods` folder (delete any old `coop_mod.dusk` there). A **Co-op** tab shows up in the in-game menu bar.
 
 ## Connecting
 
 One player hosts, everyone else joins.
 
-- **Host:** press **Host** (default port **27716**).
-- **Join:** type the host's address and press **Join**.
+- **Host:** press **Host**. You get a six-letter **room code**, or type a **Room name** of your own
+  first.
+- **Join:** type the code or name and press **Join**.
 
-The first time you host, Windows asks to let Dusklight through the firewall - allow it.
-The host needs port 27716 open for **TCP and UDP**. If you can't open ports, everyone can install
-[Tailscale](https://tailscale.com) (free) and join with the host's Tailscale address instead.
+There's nothing to set up. The games find each other and connect directly, with no port
+forwarding.
+
+Some networks are too strict for that, like some mobile data and some school or office networks.
+If yours is, the game tells you. Then everyone can install [Tailscale](https://tailscale.com)
+(free) and use **Join by address** with the host's Tailscale address. On the same wifi, **Join by
+address** with the host's local address always works. For a forwarded port it's 27716, TCP and UDP.
+
+The first time you host, your device may ask whether to let Dusklight through its firewall. Allow
+it, or nobody can reach you.
+
+Room codes need a small room server. `server/` has it, and `server/README.md` explains how to run
+your own for free.
 
 **Joining uses the host's save.** Your own progress is backed up first - disconnect, load your save
 and press **Restore latest backup** (or **Restore oldest backup** for the very first one) to get it back.
@@ -34,8 +45,15 @@ and press **Restore latest backup** (or **Restore oldest backup** for the very f
 - Name tags (they stick to the screen edge when someone's off-screen, and go red at low health)
 - Everyone's hearts under your own, and each player's health at their feet
 - Sounds and attack effects
-- Items and dungeon progress (story progress is optional)
+- Each other's Epona, reins and all, and the canoe and the Snowpeak board
+- Items, chests and dungeon progress: switches, doors, traps, turning mechanisms, Dominion Rod
+  statues
+- Timed hazards: fire vents, flame jets, geysers and water columns
+- What pots, grass and enemies drop (everyone gets the same item; picking it up is still yours)
+- Twilight bugs and Tears of Light, even with enemy sync off
+- Things you pick up and throw, bombs included
 - Pots, grass, flowers, pushed blocks and other world objects
+- Skipping a boss cutscene: it's skipped once everyone has pressed skip
 - Time of day
 - Optional death link
 - Custom models, per player - see below
@@ -68,17 +86,20 @@ install. Anyone can add more, and a folder of your own with the same name as a s
 
 ## Experimental
 
-These are **off by default** - turn them on in Settings. The host's settings are the ones used,
-so only the host needs to change them.
+These are **off by default** - turn them on under **Unfinished** in the Co-op window's **Host**
+tab. The host's settings are the ones used, so only the host needs to change them.
 
-- **Enemy sync** - enemies fight both of you.
+- **Story progress** - cutscenes and quest flags are shared. Can leave a quest stuck.
+- **Enemy sync** - one set of enemies shared by everyone, instead of a copy each.
 - **Boss sync** - only **Ook** and **Diababa** so far. Other bosses are left alone, so each of you
   fights your own copy. **Boss sync can softlock a fight** - if it does, turn it off and re-enter.
+- **Hold boss fights** - the fight waits at the door until everyone has walked in. If someone
+  never arrives, you wait.
 
 ## Known issues
 
-- One Epona each, enemy sync and boss sync are unfinished. They are off by default and sit under
-  a heading in Settings that says so - turn them on knowing they can break a fight.
+- Everything under Experimental is unfinished. It is off by default and sits under **Unfinished** in the
+  Host tab - turn it on knowing it can break a fight or a quest.
 - The warp effect on other players is off (it could crash).
 
 ## Reporting bugs
@@ -87,12 +108,19 @@ Say what happened, where, and whose screen it was on. Logs are only written in d
 
 ## Building
 
-Visual Studio 2022, CMake, Ninja, and the Dusklight source at `../dusklight`. From an
-x64 Native Tools prompt:
+**Every platform at once:** push to GitHub. `.github/workflows/build.yml` builds Windows (x64 and
+ARM64), Linux (x86_64 and ARM64), macOS (Apple Silicon and Intel), iOS and Android, and packs them
+all into one `crests_of_courage.dusk` - Dusklight loads the right one for the device. It is under
+the run's artifacts; push a tag and it is attached to a release as well.
+
+**Locally:** CMake and Ninja, plus a compiler for your platform (Visual Studio 2022 on Windows).
+Dusklight's source is fetched automatically at the pinned version unless you keep a checkout at
+`../dusklight`:
 
 ```
 cmake -S . -B build_release -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCOOP_PUBLIC_BUILD=ON
 cmake --build build_release
+python tools/package.py --bundle build_release/mods/coop_mod.dusk --models models --out crests_of_courage.dusk
 ```
 
 Leaving `DUSK_GAME_EXE` unset links against Dusklight's version-independent stub, which is what a

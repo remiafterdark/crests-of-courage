@@ -15,6 +15,8 @@
 #include "d/actor/d_a_alink.h"
 #include "d/actor/d_a_boomerang.h"
 #include "d/actor/d_a_spinner.h"
+#include "d/actor/d_a_horse.h"
+#include "d/actor/d_a_nbomb.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_particle.h"
 #include "d/d_particle_copoly.h"
@@ -22,33 +24,32 @@
 
 #include <cstring>
 
-DEFINE_HOOK_SYMBOL("?startSound@Z2SoundObjBase@@UEAAPEAVZ2SoundHandlePool@@VJAISoundID@@IC@Z",
+DEFINE_HOOK_SYMBOL("Z2SoundObjBase::startSound",
     Z2SoundHandlePool*(Z2SoundObjBase*, JAISoundID, u32, s8), CoopFxObjSound);
-DEFINE_HOOK_SYMBOL("?startLevelSound@Z2SoundObjBase@@UEAAPEAVZ2SoundHandlePool@@VJAISoundID@@IC@Z",
+DEFINE_HOOK_SYMBOL("Z2SoundObjBase::startLevelSound",
     Z2SoundHandlePool*(Z2SoundObjBase*, JAISoundID, u32, s8), CoopFxObjLevelSound);
-DEFINE_HOOK_SYMBOL("?seStart@Z2SeMgr@@QEAA_NVJAISoundID@@PEBUVec@@ICMMMME@Z",
+DEFINE_HOOK_SYMBOL("Z2SeMgr::seStart",
     bool(Z2SeMgr*, JAISoundID, const Vec*, u32, s8, f32, f32, f32, f32, u8), CoopFxSeStart);
-DEFINE_HOOK_SYMBOL("?seStartLevel@Z2SeMgr@@QEAA_NVJAISoundID@@PEBUVec@@ICMMMME@Z",
+DEFINE_HOOK_SYMBOL("Z2SeMgr::seStartLevel",
     bool(Z2SeMgr*, JAISoundID, const Vec*, u32, s8, f32, f32, f32, f32, u8), CoopFxSeStartLevel);
-DEFINE_HOOK_SYMBOL(
-    "?set@dPa_control_c@@QEAAIIEGPEBUcXyz@@PEBVdKy_tevstr_c@@PEBVcsXyz@@0EPEAVdPa_levelEcallBack@@CPEBUGXColor@@40M@Z",
-    u32(dPa_control_c*, u32, u8, u16, const cXyz*, const dKy_tevstr_c*, const csXyz*, const cXyz*,
-        u8, dPa_levelEcallBack*, s8, const GXColor*, const GXColor*, const cXyz*, f32),
+
+DEFINE_HOOK((static_cast<u32 (dPa_control_c::*)(u32, u8, u16, const cXyz*, const dKy_tevstr_c*,
+                const csXyz*, const cXyz*, u8, dPa_levelEcallBack*, s8, const GXColor*,
+                const GXColor*, const cXyz*, f32)>(&dPa_control_c::set)),
     CoopFxParticleKeyed);
-DEFINE_HOOK_SYMBOL(
-    "?set@dPa_control_c@@QEAAPEAVJPABaseEmitter@@EGPEBUcXyz@@PEBVdKy_tevstr_c@@PEBVcsXyz@@0EPEAVdPa_levelEcallBack@@CPEBUGXColor@@40M@Z",
-    JPABaseEmitter*(dPa_control_c*, u8, u16, const cXyz*, const dKy_tevstr_c*, const csXyz*,
-        const cXyz*, u8, dPa_levelEcallBack*, s8, const GXColor*, const GXColor*, const cXyz*, f32),
+DEFINE_HOOK((static_cast<JPABaseEmitter* (dPa_control_c::*)(u8, u16, const cXyz*,
+                const dKy_tevstr_c*, const csXyz*, const cXyz*, u8, dPa_levelEcallBack*, s8,
+                const GXColor*, const GXColor*, const cXyz*, f32)>(&dPa_control_c::set)),
     CoopFxParticleOnce);
 DEFINE_HOOK(&daBoomerang_c::execute, CoopFxBoomerangExecute);
 
 DEFINE_HOOK_SYMBOL(
-    "?setEffectFour@dPaPoF_c@@QEAAHPEBVdKy_tevstr_c@@PEBUcXyz@@II11111PEBVcsXyz@@1CMM@Z",
+    "dPaPoF_c::setEffectFour",
     int(dPaPoF_c*, const dKy_tevstr_c*, const cXyz*, u32, u32, const cXyz*, const cXyz*,
         const cXyz*, const cXyz*, const cXyz*, const csXyz*, const cXyz*, s8, f32, f32),
     CoopFxWalkDustFour);
 DEFINE_HOOK_SYMBOL(
-    "?setEffectTwo@dPaPoT_c@@QEAAHPEBVdKy_tevstr_c@@PEBUcXyz@@II111PEBVcsXyz@@1CMM@Z",
+    "dPaPoT_c::setEffectTwo",
     int(dPaPoT_c*, const dKy_tevstr_c*, const cXyz*, u32, u32, const cXyz*, const cXyz*,
         const cXyz*, const csXyz*, const cXyz*, s8, f32, f32),
     CoopFxWalkDustTwo);
@@ -60,7 +61,7 @@ struct OwnedRange {
     const char* lo = nullptr;
     const char* hi = nullptr;
 };
-OwnedRange s_ranges[3];
+OwnedRange s_ranges[5];
 const void* s_hookSound = nullptr;
 bool s_windowAlink = false;
 bool s_windowBoomerang = false;
@@ -98,6 +99,21 @@ void refresh_owned_ranges() {
     if (daSpinner_c* spinner = alink->getSpinnerActor()) {
         s_ranges[2].lo = reinterpret_cast<const char*>(spinner);
         s_ranges[2].hi = s_ranges[2].lo + sizeof(daSpinner_c);
+    }
+
+    if (fopAc_ac_c* horse = dComIfGp_getHorseActor()) {
+        s_ranges[3].lo = reinterpret_cast<const char*>(horse);
+        s_ranges[3].hi = s_ranges[3].lo + sizeof(daHorse_c);
+    }
+
+    const fpc_ProcID grabbed = alink->getGrabActorID();
+    if (grabbed != fpcM_ERROR_PROCESS_ID_e) {
+        auto* held = static_cast<fopAc_ac_c*>(fopAcM_SearchByID(grabbed));
+        if (held != nullptr && fopAcM_GetName(held) == fpcNm_NBOMB_e &&
+            fopAcM_checkCarryNow(held) != 0) {
+            s_ranges[4].lo = reinterpret_cast<const char*>(held);
+            s_ranges[4].hi = s_ranges[4].lo + sizeof(daNbomb_c);
+        }
     }
     s_hookSound = alink->mpHookSound;
 }
@@ -447,7 +463,20 @@ void emit_particle(dPa_control_c* particles, daAlink_c* alink, const MsgParticle
         slot->localKey = particles->set(slot->localKey, e.type, e.id, &pos, &alink->tevStr, rotP,
             scaleP, e.alpha, nullptr, -1, prmP, envP, nullptr, e.blend);
         dComIfGp_particle_levelEmitterOnEventMove(slot->localKey);
-        apply_emitter_state(e, dComIfGp_particle_getEmitter(slot->localKey));
+        JPABaseEmitter* keyed = dComIfGp_particle_getEmitter(slot->localKey);
+        apply_emitter_state(e, keyed);
+
+        if (keyed != nullptr && e.id == ID_ZI_J_SWA_KIRARI_A) {
+            Mtx sword;
+            bool master = false;
+            if (puppet_hook_sword_mtx(slot->sender, sword, &master)) {
+                keyed->setGlobalRTMatrix(sword);
+                if (master) {
+                    keyed->setGlobalParticleScale(JGeometry::TVec3<f32>(1.0f, 1.171f, 1.0f));
+                    keyed->setLocalTranslation(JGeometry::TVec3<f32>(68.0f, 0.0f, 0.0f));
+                }
+            }
+        }
         return;
     }
     JPABaseEmitter* emitter = particles->set(e.type, e.id, &pos, &alink->tevStr, rotP, scaleP,
@@ -510,6 +539,19 @@ void fx_init() {
         });
     const ModResult c = mods::hook::add_post<CoopFxSeStart>(on_se_start_post);
     const ModResult d = mods::hook::add_post<CoopFxSeStartLevel>(on_se_start_level_post);
+
+    mods::hook::add_post<CoopFxSeStart>([](ModContext*, void*, void*, void*) { voices_end_local(); });
+    mods::hook::add_post<CoopFxSeStartLevel>(
+        [](ModContext*, void*, void*, void*) { voices_end_local(); });
+    mods::hook::add_post<CoopFxObjSound>([](ModContext*, void*, void*, void*) { voices_end_local(); });
+
+    mods::hook::add_pre<CoopFxObjLevelSound>(
+        [](ModContext* ctx, void* a, void* r, void* u) -> HookAction {
+            on_local_sound_pre(ctx, a, r, u);
+            return HOOK_CONTINUE;
+        });
+    mods::hook::add_post<CoopFxObjLevelSound>(
+        [](ModContext*, void*, void*, void*) { voices_end_local(); });
     mods::hook::add_pre<CoopFxParticleKeyed>(on_particle_keyed_pre);
     mods::hook::add_pre<CoopFxWalkDustFour>(on_walk_dust_pre);
     mods::hook::add_post<CoopFxWalkDustFour>(on_walk_dust_post);
@@ -597,13 +639,12 @@ void fx_on_sounds(const uint8_t* payload, size_t size, uint8_t from) {
                           ? dComIfGp_getReverb(static_cast<int>(peer.curRoom))
                           : 0;
 
-    if (peer.present) {
+    {
 
-        const char* voiceSkin = peer.skins.name[kSkinChoiceVoice];
-        if (voiceSkin[0] != '\0' &&
-            skins_have(voiceSkin, peer.skins.hash[kSkinChoiceVoice])) {
-            voices_begin(voiceSkin);
-        }
+        const char* voiceSkin = peer.present ? peer.skins.name[kSkinChoiceVoice] : "";
+        const bool haveIt = voiceSkin[0] != '\0' &&
+                            skins_have(voiceSkin, peer.skins.hash[kSkinChoiceVoice]);
+        voices_begin_remote(haveIt ? voiceSkin : nullptr);
     }
 
     ++s_suppress;
@@ -631,6 +672,7 @@ void fx_on_sounds(const uint8_t* payload, size_t size, uint8_t from) {
         se->seStart(JAISoundID(entry.id), &pos, 0, reverb, 1.0f, volume, -1.0f, -1.0f, 0);
     }
     --s_suppress;
+    voices_end_remote();
 }
 
 void fx_on_particles(const uint8_t* payload, size_t size, uint8_t from) {

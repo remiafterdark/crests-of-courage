@@ -4,6 +4,7 @@
 #include "mods/svc/log.hpp"
 #include "print.hpp"
 #include "mods/svc/net.hpp"
+#include "mods/svc/websocket.hpp"
 #include "mods/svc/ui.h"
 #include "mods/svc/item.h"
 #include "mods/svc/host.h"
@@ -18,6 +19,10 @@
 #include "d/actor/d_a_mg_rod.h"
 #include "d/actor/d_a_midna.h"
 #include "d/actor/d_a_spinner.h"
+#include "d/actor/d_a_horse.h"
+#include "d/actor/d_a_nbomb.h"
+#include "d/actor/d_a_canoe.h"
+#include "d/actor/d_a_obj_iceleaf.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_item_data.h"
 #include "JSystem/J3DGraphBase/J3DMaterial.h"
@@ -26,17 +31,22 @@
 
 #include "net/protocol.hpp"
 #include "net/messages.hpp"
+#include "net/reliable.hpp"
 #include "mod.hpp"
 
 #include "res/Object/AlAnm.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
+#include <cstdio>
+#include <string_view>
 
 void puppet_hook_init();
 
@@ -45,6 +55,7 @@ void puppet_hook_on_network_snapshot(uint8_t playerId, float x, float y, float z
     const AnmSlotSnapshot* upper, uint8_t handL, uint8_t handR,
     const PlayerSnapshot& equipment);
 void puppet_hook_on_midna_snapshot(uint8_t playerId, const MidnaSnapshot& snap);
+void puppet_hook_on_horse_snapshot(uint8_t playerId, const HorseSnapshot& snap);
 
 void puppet_hook_trigger_spawn();
 
@@ -61,6 +72,8 @@ IMPORT_OPTIONAL_SERVICE(OverlayService, svc_overlay);
 
 IMPORT_OPTIONAL_SERVICE(ResourceService, svc_resource);
 
+IMPORT_OPTIONAL_SERVICE(WebSocketService, svc_websocket);
+
 namespace {
 
 ConfigVarHandle g_modeVar = 0;
@@ -68,6 +81,22 @@ ConfigVarHandle g_bindPortVar = 0;
 ConfigVarHandle g_joinAddressVar = 0;
 ConfigVarHandle g_joinPortVar = 0;
 ConfigVarHandle g_autoConnectVar = 0;
+ConfigVarHandle g_upnpVar = 0;
+ConfigVarHandle g_roomCodeVar = 0;
+ConfigVarHandle g_roomServerVar = 0;
+ConfigVarHandle g_roomsVar = 0;
+ConfigVarHandle g_hostKeyVar = 0;
+ConfigVarHandle g_fakePlayersVar = 0;
+ConfigVarHandle g_clearTwilightVar = 0;
+ConfigVarHandle g_eponaFlagsVar = 0;
+
+uint16_t g_fakeMask = 0;
+}
+
+bool upnp_owns(NetHandle handle);
+void upnp_on_net_event(const mods::net::Event& event);
+
+namespace {
 ConfigVarHandle g_autoConnectDelayTicksVar = 0;
 bool g_autoConnectPending = false;
 uint32_t g_autoConnectTicksWaited = 0;
@@ -81,8 +110,23 @@ bool g_handshakeSent = false;
 bool g_connecting = false;
 std::string g_statusText = "Not connected";
 
+int g_udpPort = 0;
+
+void remember_udp_port(const std::string& local) {
+    const size_t colon = local.rfind(':');
+    g_udpPort = colon == std::string::npos ? 0 : std::atoi(local.c_str() + colon + 1);
+}
+
 struct PeerLink {
     bool used = false;
+
+    bool viaUdp = false;
+    rudp::Channel rel;
+
+    bool helloAcked = false;
+    uint64_t token = 0;
+    uint64_t helloSentMs = 0;
+    uint64_t createdMs = 0;
     mods::net::Socket sock;
     std::vector<uint8_t> rx;
     std::string udpEndpoint;
@@ -94,7 +138,7 @@ struct PeerLink {
 PeerLink g_links[kCoopMaxPlayers];
 
 uint8_t g_localId = kCoopHostId;
-uint8_t g_roster = 1u << kCoopHostId;
+CoopRoster g_roster = 1u << kCoopHostId;
 
 uint32_t g_playerQuiet[kCoopMaxPlayers] = {};
 
@@ -147,12 +191,83 @@ uint8_t g_vfxJumpLandCounter = 0;
 u16 g_vfxLastProc = 0xFFFF;
 bool g_peerConnected = false;
 
-constexpr uint32_t kSendEveryNTicks = 1;
+uint32_t send_every_n_ticks() {
+    int players = 0;
+    for (int i = 0; i < kCoopMaxPlayers; ++i) {
+        if ((g_roster & (1u << i)) != 0) ++players;
+    }
+    if (players <= 4) return 1;
+    if (players <= 8) return 2;
+    return 3;
+}
+
+const f32 kFarForSnapshots = 5000.0f;
+
+bool worth_sending(uint8_t about, int to, uint32_t seq) {
+    if (!g_isHost || to < 0 || to >= kCoopMaxPlayers) return true;
+    const CoopPeer& dest = features_peer_of(static_cast<uint8_t>(to));
+    if (!dest.present || dest.stage[0] == '\0') return true;
+    const char* stage = nullptr;
+    cXyz pos;
+    if (about == g_localId) {
+        daAlink_c* alink = daAlink_getAlinkActorClass();
+        stage = dComIfGp_getStartStageName();
+        if (alink == nullptr || stage == nullptr) return true;
+        pos = alink->current.pos;
+    } else {
+        if (about >= kCoopMaxPlayers) return true;
+        const CoopPeer& src = features_peer_of(about);
+        if (!src.present || src.stage[0] == '\0') return true;
+        stage = src.stage;
+        pos.set(src.x, src.y, src.z);
+    }
+    if (std::strncmp(stage, dest.stage, 8) != 0) return false;
+    const cXyz there(dest.x, dest.y, dest.z);
+    if ((pos - there).abs() > kFarForSnapshots) return seq % 4 == 0;
+    return true;
+}
+
+bool stage_local_message(uint8_t type) {
+    switch (type) {
+    case kMsgSounds:
+    case kMsgParticles:
+    case kMsgArrowShot:
+    case kMsgObjectMove:
+    case kMsgObjectPush:
+    case kMsgTorch:
+    case kMsgAnimal:
+    case kMsgCarry:
+    case kMsgGrassCut:
+    case kMsgActorState:
+    case kMsgEnemyState:
+        return true;
+    default:
+        return false;
+    }
+}
 
 void process_tcp_rx(PeerLink& link, uint8_t fromId);
 
+uint64_t steady_ms() {
+    using namespace std::chrono;
+    return static_cast<uint64_t>(
+        duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
+}
+
 void send_frame_to(PeerLink& link, uint8_t type, uint8_t from, const void* payload, size_t size) {
-    if (!link.used || !link.sock) return;
+    if (!link.used) return;
+    if (link.viaUdp) {
+        std::vector<uint8_t> frame(sizeof(MsgHeader) + size);
+        const MsgHeader header{static_cast<uint16_t>(size), type, from};
+        std::memcpy(frame.data(), &header, sizeof(header));
+        if (size > 0 && payload != nullptr) {
+            std::memcpy(frame.data() + sizeof(header), payload, size);
+        }
+
+        link.rel.write(frame.data(), frame.size());
+        return;
+    }
+    if (!link.sock) return;
     std::vector<std::byte> frame(sizeof(MsgHeader) + size);
     const MsgHeader header{static_cast<uint16_t>(size), type, from};
     std::memcpy(frame.data(), &header, sizeof(header));
@@ -164,8 +279,10 @@ void send_frame_to(PeerLink& link, uint8_t type, uint8_t from, const void* paylo
 
 void relay_frame(uint8_t type, uint8_t from, const uint8_t* payload, size_t size) {
     if (!g_isHost) return;
+    const bool local = stage_local_message(type);
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         if (i == from) continue;
+        if (local && !worth_sending(from, i, 0)) continue;
         send_frame_to(g_links[i], type, from, payload, size);
     }
 }
@@ -189,6 +306,16 @@ int lowest_free_id() {
 
 void drop_link(int id, const char* why);
 
+void send_bye(PeerLink& link) {
+    if (!link.used || !link.viaUdp || !g_udp || link.udpEndpoint.empty()) return;
+    std::vector<uint8_t> packet;
+    link.rel.control_packet(packet, rudp::kKindBye);
+    for (int i = 0; i < 3; ++i) {
+        g_udp.send_to(link.udpEndpoint,
+            {reinterpret_cast<const std::byte*>(packet.data()), packet.size()});
+    }
+}
+
 void on_session_up() {
     g_peerConnected = true;
     g_connecting = false;
@@ -210,21 +337,22 @@ void broadcast_roster() {
 void drop_link(int id, const char* why) {
     if (id < 0 || id >= kCoopMaxPlayers || !g_links[id].used) return;
     coop_log::warn("coop_mod: player {} disconnected ({})", id, why);
+    send_bye(g_links[id]);
     g_links[id].sock.close();
     g_links[id] = PeerLink{};
     g_haveRttMs[id] = false;
     g_playerPaused[id] = false;
-    g_roster = static_cast<uint8_t>(g_roster & ~(1u << id));
+    g_roster = static_cast<CoopRoster>(g_roster & ~(1u << id));
     puppet_hook_release_player(static_cast<uint8_t>(id));
     if (g_isHost) {
         broadcast_roster();
         g_connecting = static_cast<bool>(g_listener);
         if (live_link_count() == 0) {
             g_peerConnected = false;
-            g_statusText = g_listener ? "Hosting - waiting for players" : "Disconnected";
+            g_statusText = g_listener ? "Hosting. Waiting for players" : "Disconnected";
             features_on_disconnected();
         } else {
-            g_statusText = "Hosting - " + std::to_string(live_link_count() + 1) + " players";
+            g_statusText = "Hosting, " + std::to_string(live_link_count() + 1) + " players";
 
             features_on_roster_changed();
         }
@@ -238,6 +366,24 @@ void drop_link(int id, const char* why) {
         g_statusText = "Disconnected";
         features_on_disconnected();
     }
+}
+
+void admit_player(int id) {
+    g_roster = static_cast<CoopRoster>(g_roster | (1u << id));
+
+    MsgAssignId assign{};
+    assign.playerId = static_cast<uint8_t>(id);
+    assign.maxPlayers = static_cast<uint8_t>(kCoopMaxPlayers);
+    send_frame_to(g_links[id], kMsgAssignId, kCoopHostId, &assign, sizeof(assign));
+    g_statusText = "Hosting, " + std::to_string(live_link_count() + 1) + " players";
+    const bool firstLink = live_link_count() == 1;
+    broadcast_roster();
+    if (firstLink) {
+        on_session_up();
+    } else {
+        on_extra_link_up();
+    }
+    features_on_roster_changed();
 }
 
 void handle_tcp_event(const mods::net::Event& event) {
@@ -256,21 +402,7 @@ void handle_tcp_event(const mods::net::Event& event) {
             g_links[id] = PeerLink{};
             g_links[id].used = true;
             g_links[id].sock = mods::net::adopt(event.accepted);
-            g_roster = static_cast<uint8_t>(g_roster | (1u << id));
-
-            MsgAssignId assign{};
-            assign.playerId = static_cast<uint8_t>(id);
-            assign.maxPlayers = static_cast<uint8_t>(kCoopMaxPlayers);
-            send_frame_to(g_links[id], kMsgAssignId, kCoopHostId, &assign, sizeof(assign));
-            g_statusText = "Hosting - " + std::to_string(live_link_count() + 1) + " players";
-            const bool firstLink = live_link_count() == 1;
-            broadcast_roster();
-            if (firstLink) {
-                on_session_up();
-            } else {
-                on_extra_link_up();
-            }
-            features_on_roster_changed();
+            admit_player(id);
             break;
         }
         case NET_EVENT_CONNECTED:
@@ -313,7 +445,7 @@ void handle_tcp_event(const mods::net::Event& event) {
 
                 g_statusText = g_isHost
                     ? "Connection problem: " + std::string{event.message}
-                    : "Couldn't connect - check the address and that the host's port is open";
+                    : "Couldn't connect. Check the address and that the host's port is open";
             }
             break;
     }
@@ -384,7 +516,7 @@ ModResult start_hosting(int64_t port) {
         mods::log::error(
             "coop_mod: failed to listen on {}: {}", bind, static_cast<int>(outcome.error));
         g_statusText = "Could not host on port " + std::to_string(port) +
-                       " - is something else using it?";
+                       ". Is something else using it?";
         return MOD_ERROR;
     }
     g_isHost = true;
@@ -401,6 +533,51 @@ ModResult start_hosting(int64_t port) {
         return MOD_ERROR;
     }
     coop_log::info("coop_mod: udp bound on {}", udpOutcome.local);
+    remember_udp_port(udpOutcome.local);
+
+    if (cfg_bool(g_upnpVar, true)) upnp_begin(static_cast<int>(port));
+
+    if (cfg_bool(g_roomsVar, true)) {
+
+        const std::string name = normalize_room_code(cfg_string(g_roomCodeVar, ""));
+        if (!name.empty() && (name.size() < kRoomNameMin || name.size() > kRoomNameMax)) {
+
+            g_statusText = "Room names are 4 to 24 letters and numbers. Hosting by address only.";
+        } else {
+            online_host_begin(static_cast<int>(port), name);
+        }
+    }
+    return MOD_OK;
+}
+
+ModResult start_joining_code(const std::string& typed) {
+    const std::string code = normalize_room_code(typed);
+    if (code.size() < kRoomNameMin || code.size() > kRoomNameMax) {
+        g_statusText = "Enter the room code or name the host sees";
+        return MOD_ERROR;
+    }
+    for (int i = 0; i < kCoopMaxPlayers; ++i) {
+        g_links[i].sock.close();
+        g_links[i] = PeerLink{};
+    }
+    g_udp.close();
+    mods::net::BindOutcome udpOutcome;
+    g_udp = mods::net::open_datagram("udp://0.0.0.0:0", &udpOutcome);
+    if (!g_udp) {
+        g_statusText = "Couldn't start networking";
+        return MOD_ERROR;
+    }
+
+    const size_t colon = udpOutcome.local.rfind(':');
+    const int localPort =
+        colon == std::string::npos ? 0 : std::atoi(udpOutcome.local.c_str() + colon + 1);
+    remember_udp_port(udpOutcome.local);
+    g_isHost = false;
+    g_connecting = true;
+    g_localId = kCoopNoPlayer;
+    g_statusText = "Looking for room " + code + "...";
+    coop_log::info("coop_mod: joining room {} (udp {})", code, udpOutcome.local);
+    online_join_begin(code, localPort);
     return MOD_OK;
 }
 
@@ -452,7 +629,7 @@ ModResult start_joining(const std::string& rawAddress) {
     mods::net::Socket sock = mods::net::connect(endpoint);
     if (!sock) {
         mods::log::error("coop_mod: failed to connect to {}", endpoint);
-        g_statusText = "Could not reach " + address + " - check the address and port";
+        g_statusText = "Could not reach " + address + ". Check the address and port";
         return MOD_ERROR;
     }
     g_isHost = false;
@@ -476,6 +653,7 @@ ModResult start_joining(const std::string& rawAddress) {
         return MOD_ERROR;
     }
     coop_log::info("coop_mod: udp bound on {}", udpOutcome.local);
+    remember_udp_port(udpOutcome.local);
     return MOD_OK;
 }
 
@@ -509,6 +687,7 @@ void handle_midna_datagram(const mods::net::Event& event) {
     if (g_isHost) {
         for (int i = 0; i < kCoopMaxPlayers; ++i) {
             if (i == id || !g_links[i].used || !g_links[i].haveUdp) continue;
+            if (!worth_sending(static_cast<uint8_t>(id), i, snap.seq)) continue;
             g_udp.send_to(g_links[i].udpEndpoint,
                 {reinterpret_cast<const std::byte*>(&snap), sizeof(snap)});
         }
@@ -516,16 +695,212 @@ void handle_midna_datagram(const mods::net::Event& event) {
     puppet_hook_on_midna_snapshot(static_cast<uint8_t>(id), snap);
 }
 
+int udp_link_for(std::string_view endpoint) {
+    for (int i = 0; i < kCoopMaxPlayers; ++i) {
+        if (g_links[i].used && g_links[i].viaUdp && g_links[i].udpEndpoint == endpoint) return i;
+    }
+    return -1;
+}
+
+bool handle_reliable_datagram(const mods::net::Event& event) {
+    rudp::Header h;
+    const uint8_t* payload = nullptr;
+    if (!rudp::Channel::parse(event.data.data(), event.data.size(), h, payload)) return false;
+    const std::string from{event.endpoint};
+    const uint64_t now = steady_ms();
+
+    int id = udp_link_for(from);
+    if (id >= 0 && g_links[id].rel.conn() != h.conn) {
+
+        if (!g_isHost || h.kind != rudp::kKindHello) return true;
+        drop_link(id, "reconnected");
+        id = -1;
+    }
+    if (id < 0) {
+        if (!g_isHost || h.kind != rudp::kKindHello || h.len != sizeof(uint64_t)) return true;
+        uint64_t token;
+        std::memcpy(&token, payload, sizeof(token));
+
+        if (!online_accept_token(token)) return true;
+        id = lowest_free_id();
+        if (id < 0) {
+            coop_log::warn("coop_mod: session full ({} players) - turned away {}",
+                kCoopMaxPlayers, from);
+            PeerLink refused;
+            refused.rel.start(h.conn, now);
+            std::vector<uint8_t> bye;
+            refused.rel.control_packet(bye, rudp::kKindBye);
+            g_udp.send_to(from, {reinterpret_cast<const std::byte*>(bye.data()), bye.size()});
+            return true;
+        }
+        coop_log::info("coop_mod: player {} connected from {} (room code)", id, from);
+        g_links[id] = PeerLink{};
+        g_links[id].used = true;
+        g_links[id].viaUdp = true;
+        g_links[id].udpEndpoint = from;
+        g_links[id].haveUdp = true;
+        g_links[id].createdMs = now;
+        g_links[id].rel.start(h.conn, now);
+        admit_player(id);
+        if (!g_links[id].used) return true;
+    }
+
+    PeerLink& link = g_links[id];
+    g_ticksSinceRx = 0;
+    if (h.kind == rudp::kKindBye) {
+        drop_link(id, "left");
+        return true;
+    }
+    if (g_isHost && h.kind == rudp::kKindHello) {
+
+        std::vector<uint8_t> ack;
+        link.rel.control_packet(ack, rudp::kKindHelloAck);
+        g_udp.send_to(from, {reinterpret_cast<const std::byte*>(ack.data()), ack.size()});
+    }
+    if (!g_isHost && !link.helloAcked) {
+
+        link.helloAcked = true;
+        coop_log::info("coop_mod: connected to host (room code)");
+        g_statusText = "Connected";
+        online_stop();
+        on_session_up();
+        if (!link.used) return true;
+    }
+
+    std::vector<uint8_t> delivered;
+    link.rel.on_packet(h, payload, now, delivered);
+    if (delivered.empty()) return true;
+    if (link.rx.size() + delivered.size() > (1u << 16)) {
+        mods::log::error("coop_mod: player {} overflowed the reliable channel", id);
+        drop_link(id, "reliable channel overflowed");
+        return true;
+    }
+    link.rx.insert(link.rx.end(), delivered.begin(), delivered.end());
+    process_tcp_rx(link, g_isHost ? static_cast<uint8_t>(id) : kCoopNoPlayer);
+    return true;
+}
+
+void flush_udp_links() {
+    if (!g_udp) return;
+    const uint64_t now = steady_ms();
+    for (int i = 0; i < kCoopMaxPlayers; ++i) {
+        PeerLink& link = g_links[i];
+        if (!link.used || !link.viaUdp) continue;
+        const auto send = [&](const uint8_t* data, size_t size) {
+            g_udp.send_to(link.udpEndpoint, {reinterpret_cast<const std::byte*>(data), size});
+        };
+        if (!g_isHost && !link.helloAcked) {
+            if (now - link.createdMs > 8000) {
+                coop_log::warn("coop_mod: the host never answered our hello");
+                const std::string why =
+                    "Reached the host but could not finish connecting. Try again, or use "
+                    "Tailscale.";
+                coop_net_disconnect();
+                g_statusText = why;
+                return;
+            }
+            if (now - link.helloSentMs >= 200) {
+                link.helloSentMs = now;
+                std::vector<uint8_t> hello;
+                link.rel.control_packet(hello, rudp::kKindHello, &link.token, sizeof(link.token));
+                send(hello.data(), hello.size());
+            }
+            continue;
+        }
+        link.rel.flush(now, send);
+        if (link.rel.dead(now)) {
+            drop_link(i, link.rel.heard_any() ? "timed out" : "never answered");
+            if (!g_isHost) puppet_hook_request_release();
+        }
+    }
+}
+
+uint32_t g_lastHorseSeq[kCoopMaxPlayers] = {};
+bool g_haveHorseSeq[kCoopMaxPlayers] = {};
+
+void handle_horse_datagram(const mods::net::Event& event) {
+    HorseSnapshot snap;
+    std::memcpy(&snap, event.data.data(), sizeof(snap));
+    if (snap.magic != kHorseSnapshotMagic) return;
+    int id = -1;
+    if (g_isHost) {
+        for (int i = 0; i < kCoopMaxPlayers; ++i) {
+            if (g_links[i].used && g_links[i].haveUdp && g_links[i].udpEndpoint == event.endpoint) {
+                id = i;
+                break;
+            }
+        }
+        if (id < 0) return;
+        snap.playerId = static_cast<uint8_t>(id);
+    } else {
+        id = snap.playerId;
+        if (id < 0 || id >= kCoopMaxPlayers || id == g_localId) return;
+    }
+    if (g_haveHorseSeq[id] && static_cast<int32_t>(snap.seq - g_lastHorseSeq[id]) <= 0) return;
+    g_lastHorseSeq[id] = snap.seq;
+    g_haveHorseSeq[id] = true;
+    if (g_isHost) {
+        for (int i = 0; i < kCoopMaxPlayers; ++i) {
+            if (i == id || !g_links[i].used || !g_links[i].haveUdp) continue;
+            if (!worth_sending(static_cast<uint8_t>(id), i, snap.seq)) continue;
+            g_udp.send_to(g_links[i].udpEndpoint,
+                {reinterpret_cast<const std::byte*>(&snap), sizeof(snap)});
+        }
+    }
+    puppet_hook_on_horse_snapshot(static_cast<uint8_t>(id), snap);
+}
+
+void reopen_udp_after_close(const char* why) {
+    if (g_udpPort <= 0) return;
+
+    static uint32_t s_windowStart = 0;
+    static int s_inWindow = 0;
+    if (g_tickCounter - s_windowStart > 600) {
+        if (s_inWindow > 3) {
+            coop_log::warn("coop_mod: udp socket reopened {} times in the last 10 seconds",
+                s_inWindow);
+        }
+        s_windowStart = g_tickCounter;
+        s_inWindow = 0;
+    }
+    ++s_inWindow;
+    g_udp.detach();
+    mods::net::BindOutcome outcome;
+    g_udp = mods::net::open_datagram("udp://0.0.0.0:" + std::to_string(g_udpPort), &outcome);
+    if (!g_udp) {
+        coop_log::warn("coop_mod: udp socket closed ({}) and could not be reopened on port {}", why,
+            g_udpPort);
+        g_statusText = "Lost the network socket. Disconnect and try again";
+    } else if (s_inWindow <= 3) {
+        coop_log::warn("coop_mod: udp socket closed ({}) - reopened on {}", why, outcome.local);
+    }
+}
+
 void handle_udp_event(const mods::net::Event& event) {
     if (event.type != NET_EVENT_DATAGRAM) {
         if (event.error != NET_ERROR_NONE) {
             mods::log::error("coop_mod: udp error: {}", event.message);
         }
+        if (event.type == NET_EVENT_CLOSED && (g_isHost || g_connecting || g_peerConnected)) {
+            reopen_udp_after_close(std::string{event.message}.c_str());
+        }
         return;
     }
+
+    if (online_on_datagram(std::string{event.endpoint},
+            reinterpret_cast<const uint8_t*>(event.data.data()), event.data.size())) {
+        return;
+    }
+    if (handle_reliable_datagram(event)) return;
+
+    if (!g_isHost && !g_peerConnected) return;
     g_ticksSinceRx = 0;
     if (event.data.size() == sizeof(MidnaSnapshot)) {
         handle_midna_datagram(event);
+        return;
+    }
+    if (event.data.size() == sizeof(HorseSnapshot)) {
+        handle_horse_datagram(event);
         return;
     }
     if (event.data.size() != sizeof(PlayerSnapshot)) {
@@ -578,6 +953,7 @@ void handle_udp_event(const mods::net::Event& event) {
     if (g_isHost) {
         for (int i = 0; i < kCoopMaxPlayers; ++i) {
             if (i == id || !g_links[i].used || !g_links[i].haveUdp) continue;
+            if (!worth_sending(static_cast<uint8_t>(id), i, snapshot.seq)) continue;
             g_udp.send_to(g_links[i].udpEndpoint,
                 {reinterpret_cast<const std::byte*>(&snapshot), sizeof(snapshot)});
         }
@@ -641,13 +1017,93 @@ bool coop_local_models_unsafe() {
 
 namespace {
 
+void drive_fake_players(const PlayerSnapshot& mine) {
+    int64_t want = 0;
+    if (g_fakePlayersVar != 0) svc_config->get_int(mod_ctx, g_fakePlayersVar, &want);
+    if (!g_isHost || !g_udp) want = 0;
+    want = std::clamp<int64_t>(want, 0, kCoopMaxPlayers - 1);
+
+    uint16_t mask = 0;
+    int placed = 0;
+    for (int id = kCoopMaxPlayers - 1; id >= 1 && placed < want; --id) {
+        if (id == g_localId || g_links[id].used) continue;
+        mask = static_cast<uint16_t>(mask | (1u << id));
+        ++placed;
+    }
+
+    for (int id = 0; id < kCoopMaxPlayers; ++id) {
+        const uint16_t bit = static_cast<uint16_t>(1u << id);
+        if ((g_fakeMask & bit) != 0 && (mask & bit) == 0) {
+            puppet_hook_release_player(static_cast<uint8_t>(id));
+            features_debug_fake_peer(static_cast<uint8_t>(id), false, nullptr, nullptr, 0, 0);
+        }
+    }
+    g_fakeMask = mask;
+    if (mask == 0) return;
+
+    daAlink_c* alink = daAlink_getAlinkActorClass();
+    const u16 life = dComIfGs_getLife();
+    const u16 maxLife = dComIfGs_getMaxLife();
+    int k = 0;
+    for (int id = 0; id < kCoopMaxPlayers; ++id) {
+        if ((mask & (1u << id)) == 0) continue;
+
+        const s16 around = static_cast<s16>((k * 0x10000) / placed);
+        const f32 radius = 220.0f + 60.0f * (k % 3);
+        PlayerSnapshot fake = mine;
+        fake.playerId = static_cast<uint8_t>(id);
+        fake.posX = mine.posX + radius * cM_ssin(around);
+        fake.posZ = mine.posZ + radius * cM_scos(around);
+        fake.angleY = static_cast<int16_t>(mine.angleY + around);
+        g_playerQuiet[id] = 0;
+        puppet_hook_on_network_snapshot(static_cast<uint8_t>(id), fake.posX, fake.posY, fake.posZ,
+            fake.angleX, fake.angleY, fake.angleZ, fake.roomNo, fake.outfit, fake.under, fake.upper,
+            fake.handL, fake.handR, fake);
+        const float at[3] = {fake.posX, fake.posY, fake.posZ};
+        char name[16];
+        std::snprintf(name, sizeof(name), "Bot %d", id);
+
+        const u16 theirLife = static_cast<u16>(std::max<int>(4, life - k * 4));
+        features_debug_fake_peer(static_cast<uint8_t>(id), true, name, at, theirLife, maxLife);
+        (void)alink;
+        ++k;
+    }
+}
+
+void apply_debug_clear_twilight() {
+    static bool s_done = false;
+    if (s_done || g_clearTwilightVar == 0 || !cfg_bool(g_clearTwilightVar, false)) return;
+    if (dComIfGs_getSaveInfo() == nullptr) return;
+    for (int lv = 0; lv < 3; ++lv) {
+        if (!dComIfGs_isDarkClearLV(lv)) dComIfGs_onDarkClearLV(lv);
+    }
+    if (daAlink_getAlinkActorClass() != nullptr) {
+        s_done = true;
+        coop_log::info("coop_mod: [DEBUG] twilight cleared in Faron, Eldin and Lanayru");
+    }
+}
+
+void apply_debug_epona_flags() {
+    static bool s_done = false;
+    if (s_done || g_eponaFlagsVar == 0 || !cfg_bool(g_eponaFlagsVar, false)) return;
+    if (dComIfGs_getSaveInfo() == nullptr) return;
+    static const u16 kFlags[] = {0x0601, 0x4720, 0x5E20};
+    for (u16 flag : kFlags) {
+        if (!dComIfGs_isEventBit(flag)) dComIfGs_onEventBit(flag);
+    }
+    if (daAlink_getAlinkActorClass() != nullptr) {
+        s_done = true;
+        coop_log::info("coop_mod: [DEBUG] Epona flags set");
+    }
+}
+
 void send_local_snapshot() {
     const bool modelsUnsafe = local_models_are_unsafe();
 
     if (!g_udp || g_localId == kCoopNoPlayer) {
         return;
     }
-    if (++g_tickCounter % kSendEveryNTicks != 0) {
+    if (++g_tickCounter % send_every_n_ticks() != 0) {
         return;
     }
 
@@ -679,13 +1135,21 @@ void send_local_snapshot() {
             out[i].frame = frameCtrls[i].getFrame();
             out[i].ratio = packs[i].getRatio();
             out[i].rate = frameCtrls[i].getRate();
+
+            switch (out[i].resIdx) {
+            case dRes_INDEX_ALANM_BCK_BOMBD_e:
+            case dRes_INDEX_ALANM_BCK_CARRYD_e:
+            case dRes_INDEX_ALANM_BCK_GRABD_e:
+            case dRes_INDEX_ALANM_BCK_RODD_e:
+                out[i].rate = 0.0f;
+                break;
+            default:
+                break;
+            }
         }
     };
 
-    auto looks_like_live_data = [](const void* ptr) {
-        const uintptr_t v = reinterpret_cast<uintptr_t>(ptr);
-        return v >= 0x10000ull && v < 0x0000800000000000ull && (v & 3) == 0;
-    };
+    auto looks_like_live_data = [](const void* ptr) { return coop_ptr_looks_live(ptr); };
     auto shown_hand_index = [&](daAlink_c* a, J3DShape* shown) -> uint8_t {
         if (a == nullptr || shown == nullptr || a->mpLinkHandModel == nullptr) return 0xFE;
         if (!looks_like_live_data(a->mpLinkHandModel)) return 0xFE;
@@ -1124,6 +1588,49 @@ void send_local_snapshot() {
             }
         }
 
+        if (!modelsUnsafe && bodyData != nullptr) {
+            fopAc_ac_c* ride = alink->getRideActor();
+            const s16 rideName = ride != nullptr ? fopAcM_GetName(ride) : -1;
+            if (rideName == fpcNm_CANOE_e && looks_like_live_data(ride)) {
+                auto* canoe = static_cast<daCanoe_c*>(ride);
+                if (canoe->mArcName != nullptr) {
+                    std::strncpy(snapshot.rideArc, canoe->mArcName, sizeof(snapshot.rideArc) - 1);
+
+                    if (canoe->mpModel != nullptr && looks_like_live_data(canoe->mpModel)) {
+                        add_attachment(kPuppetHeldRide, canoe->mpModel, kPuppetHeldJointRoot, 4,
+                            0.0f);
+                    }
+                    if (canoe->mpPaddleModel != nullptr &&
+                        looks_like_live_data(canoe->mpPaddleModel)) {
+                        add_attachment(kPuppetHeldRideExtra, canoe->mpPaddleModel,
+                            nearest_hand_joint(canoe->mpPaddleModel), 3, 0.0f);
+                    }
+                }
+            } else if (rideName == fpcNm_Obj_IceLeaf_e && looks_like_live_data(ride)) {
+                auto* board = static_cast<daObjIceLeaf_c*>(ride);
+                std::strncpy(snapshot.rideArc, "V_IceLeaf", sizeof(snapshot.rideArc) - 1);
+                if (board->mpModel != nullptr && looks_like_live_data(board->mpModel)) {
+
+                    add_attachment(kPuppetHeldRide, board->mpModel, kPuppetHeldJointRoot, 7, 0.0f);
+                }
+            }
+        }
+
+        if (!modelsUnsafe && bodyData != nullptr) {
+            const fpc_ProcID grabbed = alink->getGrabActorID();
+            auto* held = grabbed != fpcM_ERROR_PROCESS_ID_e
+                             ? static_cast<fopAc_ac_c*>(fopAcM_SearchByID(grabbed))
+                             : nullptr;
+            if (held != nullptr && fopAcM_GetName(held) == fpcNm_NBOMB_e &&
+                fopAcM_checkCarryNow(held) != 0) {
+                J3DModel* bombModel = static_cast<daNbomb_c*>(held)->mpModel;
+                if (bombModel != nullptr && looks_like_live_data(bombModel)) {
+                    add_attachment(kPuppetHeldBomb, bombModel, nearest_hand_joint(bombModel),
+                        0xFFFF, 0.0f);
+                }
+            }
+        }
+
         if (!modelsUnsafe && alink->mpKanteraModel != nullptr &&
             looks_like_live_data(alink->mpKanteraModel) && bodyData != nullptr &&
             alink->checkNoResetFlg2(daAlink_c::FLG2_UNK_1))
@@ -1324,9 +1831,11 @@ void send_local_snapshot() {
     snapshot.playerId = g_localId;
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         if (!g_links[i].used || !g_links[i].haveUdp) continue;
+        if (!worth_sending(g_localId, i, snapshot.seq)) continue;
         g_udp.send_to(g_links[i].udpEndpoint,
             {reinterpret_cast<const std::byte*>(&snapshot), sizeof(snapshot)});
     }
+    drive_fake_players(snapshot);
 }
 
 uint32_t g_midnaSeq = 0;
@@ -1335,8 +1844,7 @@ int g_midnaNoneToSend = 0;
 const int kMidnaNoneRepeats = 3;
 
 bool midna_ptr_live(const void* ptr) {
-    const uintptr_t v = reinterpret_cast<uintptr_t>(ptr);
-    return v >= 0x10000ull && v < 0x0000800000000000ull && (v & 3) == 0;
+    return coop_ptr_looks_live(ptr);
 }
 
 void fill_mtx12(float* out, const Mtx m) {
@@ -1393,6 +1901,7 @@ uint8_t local_midna_hair_shape(daMidna_c* midna) {
 void send_midna_datagram(const MidnaSnapshot& snap) {
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         if (!g_links[i].used || !g_links[i].haveUdp) continue;
+        if (!worth_sending(g_localId, i, snap.seq)) continue;
         g_udp.send_to(g_links[i].udpEndpoint,
             {reinterpret_cast<const std::byte*>(&snap), sizeof(snap)});
     }
@@ -1401,7 +1910,7 @@ void send_midna_datagram(const MidnaSnapshot& snap) {
 void send_local_midna() {
     if (!g_udp || g_localId == kCoopNoPlayer) return;
 
-    if (g_tickCounter % kSendEveryNTicks != 0) return;
+    if (g_tickCounter % send_every_n_ticks() != 0) return;
 
     daAlink_c* alink = daAlink_getAlinkActorClass();
     daMidna_c* midna = daPy_py_c::getMidnaActor();
@@ -1510,6 +2019,152 @@ void send_local_midna() {
     send_midna_datagram(snap);
 }
 
+uint32_t g_horseSeq = 0;
+int g_horseNoneToSend = 0;
+
+void quat_from_mtx(const Mtx m, f32* q) {
+    const f32 tr = m[0][0] + m[1][1] + m[2][2];
+    if (tr > 0.0f) {
+        const f32 s = std::sqrt(tr + 1.0f) * 2.0f;
+        q[3] = 0.25f * s;
+        q[0] = (m[2][1] - m[1][2]) / s;
+        q[1] = (m[0][2] - m[2][0]) / s;
+        q[2] = (m[1][0] - m[0][1]) / s;
+    } else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) {
+        const f32 s = std::sqrt(1.0f + m[0][0] - m[1][1] - m[2][2]) * 2.0f;
+        q[3] = (m[2][1] - m[1][2]) / s;
+        q[0] = 0.25f * s;
+        q[1] = (m[0][1] + m[1][0]) / s;
+        q[2] = (m[0][2] + m[2][0]) / s;
+    } else if (m[1][1] > m[2][2]) {
+        const f32 s = std::sqrt(1.0f + m[1][1] - m[0][0] - m[2][2]) * 2.0f;
+        q[3] = (m[0][2] - m[2][0]) / s;
+        q[0] = (m[0][1] + m[1][0]) / s;
+        q[1] = 0.25f * s;
+        q[2] = (m[1][2] + m[2][1]) / s;
+    } else {
+        const f32 s = std::sqrt(1.0f + m[2][2] - m[0][0] - m[1][1]) * 2.0f;
+        q[3] = (m[1][0] - m[0][1]) / s;
+        q[0] = (m[0][2] + m[2][0]) / s;
+        q[1] = (m[1][2] + m[2][1]) / s;
+        q[2] = 0.25f * s;
+    }
+}
+
+int16_t to_fixed(f32 v, f32 scale) {
+    const f32 x = v * scale;
+    return static_cast<int16_t>(x > 32767.0f ? 32767.0f : (x < -32767.0f ? -32767.0f : x));
+}
+
+void send_horse_datagram(const HorseSnapshot& snap) {
+    for (int i = 0; i < kCoopMaxPlayers; ++i) {
+        if (!g_links[i].used || !g_links[i].haveUdp) continue;
+        if (!worth_sending(g_localId, i, snap.seq)) continue;
+        g_udp.send_to(g_links[i].udpEndpoint,
+            {reinterpret_cast<const std::byte*>(&snap), sizeof(snap)});
+    }
+}
+
+void send_local_horse() {
+    if (!g_udp || g_localId == kCoopNoPlayer) return;
+    daAlink_c* alink = daAlink_getAlinkActorClass();
+    auto* horse = static_cast<daHorse_c*>(dComIfGp_getHorseActor());
+    const bool riding = alink != nullptr && alink->checkHorseRide() != 0;
+    J3DModel* model = horse != nullptr ? horse->m_model : nullptr;
+
+    const bool hidden = horse != nullptr &&
+                        (horse->checkHorseCallWait() ||
+                            (horse->actor_status & fopAcStts_NODRAW_e) != 0);
+    const bool show = model != nullptr && model->getModelData() != nullptr && alink != nullptr &&
+                      !hidden && !coop_local_models_unsafe() && alink->mpLinkModel != nullptr;
+
+    if (!show) {
+        if (g_horseNoneToSend <= 0) return;
+        --g_horseNoneToSend;
+        HorseSnapshot none{};
+        none.magic = kHorseSnapshotMagic;
+        none.seq = ++g_horseSeq;
+        none.playerId = g_localId;
+        send_horse_datagram(none);
+        return;
+    }
+
+    const bool moving = riding || std::fabs(horse->speedF) > 0.5f;
+    const bool idle = !riding && !moving;
+
+    static s16 s_lastHorseYaw = 0;
+    const s16 yawStep = static_cast<s16>(horse->shape_angle.y - s_lastHorseYaw);
+    s_lastHorseYaw = horse->shape_angle.y;
+    const bool turning = yawStep > 0x40 || yawStep < -0x40;
+    const bool often = moving || turning;
+    if (!often && g_tickCounter % 10 != 0) return;
+
+    if (often && g_tickCounter % (send_every_n_ticks() * 2) != 0) return;
+    g_horseNoneToSend = 5;
+
+    HorseSnapshot snap{};
+    snap.magic = kHorseSnapshotMagic;
+    snap.seq = ++g_horseSeq;
+    snap.playerId = g_localId;
+    snap.room = static_cast<int8_t>(fopAcM_GetRoomNo(horse));
+    MtxP base = model->getBaseTRMtx();
+    Mtx rel;
+    if (riding) {
+        Mtx invBody;
+        mDoMtx_inverse(alink->mpLinkModel->getBaseTRMtx(), invBody);
+        mDoMtx_concat(invBody, base, rel);
+        snap.flags |= kHorseFlagRiding;
+    } else {
+        mDoMtx_copy(base, rel);
+        if (idle) {
+            snap.flags |= kHorseFlagIdle;
+            const u16 anm = horse->getAnmIdx(0);
+
+            const bool own = anm < 0x100;
+            snap.idleAnm = own ? anm : 27;
+            snap.idleFrame = own ? horse->m_frameCtrl[0].getFrame() : 0.0f;
+            snap.idleRate = own ? horse->m_frameCtrl[0].getRate() : 1.0f;
+        }
+    }
+    fill_mtx12(snap.baseMtx, rel);
+
+    Mtx invBase;
+    mDoMtx_inverse(base, invBase);
+    const u16 joints = model->getModelData()->getJointNum();
+    const int n = joints < kHorseJoints ? joints : kHorseJoints;
+    static bool s_saidJoints = false;
+    if (!s_saidJoints) {
+        s_saidJoints = true;
+        coop_log::info("coop_mod: [HORSE] our horse has {} joints (the datagram carries {})", joints,
+            kHorseJoints);
+    }
+    snap.jointCount = static_cast<uint8_t>(n);
+    for (int j = 0; j < n; ++j) {
+        Mtx m;
+        mDoMtx_concat(invBase, model->getAnmMtx(j), m);
+        f32 q[4];
+        quat_from_mtx(m, q);
+        HorseJointSnapshot& out = snap.joints[j];
+        for (int k = 0; k < 4; ++k) out.q[k] = to_fixed(q[k], kHorseQuatScale);
+        for (int r = 0; r < 3; ++r) out.p[r] = to_fixed(m[r][3], kHorsePosScale);
+    }
+
+    const int reins = horse->field_0x1204 < kHorseReinPoints ? horse->field_0x1204
+                                                               : kHorseReinPoints;
+    cXyz* points = reins > 0 ? horse->m_reinLine.getPos(0) : nullptr;
+    if (points != nullptr) {
+        snap.reinCount = static_cast<uint8_t>(reins);
+        for (int i = 0; i < reins; ++i) {
+            cXyz local;
+            mDoMtx_multVec(invBase, &points[i], &local);
+            snap.reins[i][0] = to_fixed(local.x, kHorsePosScale);
+            snap.reins[i][1] = to_fixed(local.y, kHorsePosScale);
+            snap.reins[i][2] = to_fixed(local.z, kHorsePosScale);
+        }
+    }
+    send_horse_datagram(snap);
+}
+
 void run_pending_auto_connect() {
     int64_t delayTicks = 600;
     svc_config->get_int(mod_ctx, g_autoConnectDelayTicksVar, &delayTicks);
@@ -1521,19 +2176,21 @@ void run_pending_auto_connect() {
     const std::string mode = cfg_string(g_modeVar, "host");
     if (mode == "join") {
         start_joining(cfg_string(g_joinAddressVar, "127.0.0.1:27716"));
+    } else if (mode == "join_code") {
+        start_joining_code(cfg_string(g_roomCodeVar, ""));
     } else {
         int64_t port = 27716;
         svc_config->get_int(mod_ctx, g_bindPortVar, &port);
         start_hosting(port);
     }
-    coop_log::info("coop_mod: auto-connected as {} after {} ticks",
-        mode == "join" ? "join" : "host", g_autoConnectTicksWaited);
+    coop_log::info("coop_mod: auto-connected as {} after {} ticks", mode, g_autoConnectTicksWaited);
 }
 
 }
 
 bool coop_net_connected() {
-    return g_peerConnected;
+
+    return g_peerConnected || (g_isHost && g_fakeMask != 0);
 }
 
 uint32_t coop_net_ticks_since_player(uint8_t playerId) {
@@ -1635,12 +2292,12 @@ uint8_t coop_net_local_id() {
     return g_localId;
 }
 
-uint8_t coop_net_roster() {
+uint16_t coop_net_roster() {
     return g_roster;
 }
 
 bool coop_net_player_present(uint8_t playerId) {
-    return playerId < kCoopMaxPlayers && (g_roster & (1u << playerId)) != 0;
+    return playerId < kCoopMaxPlayers && ((g_roster | g_fakeMask) & (1u << playerId)) != 0;
 }
 
 void coop_net_set_local_id(uint8_t playerId, uint8_t hostMaxPlayers) {
@@ -1656,11 +2313,11 @@ void coop_net_set_local_id(uint8_t playerId, uint8_t hostMaxPlayers) {
     coop_log::info("coop_mod: we are player {} of up to {}", playerId, hostMaxPlayers);
 }
 
-void coop_net_set_roster(uint8_t roster) {
+void coop_net_set_roster(uint16_t roster) {
     if (g_isHost) return;
-    const uint8_t was = g_roster;
-    const uint8_t before2 = g_roster;
-    g_roster = static_cast<uint8_t>(roster | (1u << kCoopHostId));
+    const uint16_t was = g_roster;
+    const uint16_t before2 = g_roster;
+    g_roster = static_cast<CoopRoster>(roster | (1u << kCoopHostId));
     if (g_roster != before2) features_on_roster_changed();
 
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
@@ -1675,6 +2332,12 @@ bool coop_net_is_host() {
 }
 
 const char* coop_net_status() {
+
+    static std::string online;
+    if (!g_isHost && g_connecting && !g_peerConnected && online_active()) {
+        online = online_status();
+        if (!online.empty()) return online.c_str();
+    }
     return g_statusText.c_str();
 }
 
@@ -1691,11 +2354,96 @@ ConfigVarHandle coop_net_join_port_var() {
 }
 
 std::string coop_net_join_address() {
+    if (cfg_string(g_modeVar, "") == "join_code") {
+        return "room " + normalize_room_code(cfg_string(g_roomCodeVar, ""));
+    }
     return cfg_string(g_joinAddressVar, "");
 }
 
 ConfigVarHandle coop_net_autoconnect_var() {
     return g_autoConnectVar;
+}
+
+ConfigVarHandle coop_net_upnp_var() {
+    return g_upnpVar;
+}
+
+ConfigVarHandle coop_net_room_code_var() {
+    return g_roomCodeVar;
+}
+
+ConfigVarHandle coop_net_room_server_var() {
+    return g_roomServerVar;
+}
+
+ConfigVarHandle coop_net_rooms_var() {
+    return g_roomsVar;
+}
+
+ConfigVarHandle coop_net_host_key_var() {
+    return g_hostKeyVar;
+}
+
+std::string normalize_room_code(const std::string& typed) {
+    std::string code;
+    for (const char c : typed) {
+        if (c >= 'a' && c <= 'z') code += static_cast<char>(c - 'a' + 'A');
+        else if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) code += c;
+    }
+    return code;
+}
+
+void coop_net_join_code() {
+    if (g_peerConnected || g_connecting) return;
+    svc_config->set_string(mod_ctx, g_modeVar, "join_code");
+    g_autoConnectPending = false;
+    start_joining_code(cfg_string(g_roomCodeVar, ""));
+}
+
+void coop_udp_send_raw(const std::string& endpoint, const void* data, size_t size) {
+    if (!g_udp) return;
+    g_udp.send_to(endpoint, {static_cast<const std::byte*>(data), size});
+}
+
+void coop_online_punched(const std::string& endpoint, uint64_t token) {
+    if (g_isHost || g_peerConnected) return;
+    const uint64_t now = steady_ms();
+    PeerLink& link = g_links[kCoopHostId];
+    link = PeerLink{};
+    link.used = true;
+    link.viaUdp = true;
+    link.udpEndpoint = endpoint;
+    link.haveUdp = true;
+    link.token = token;
+    link.createdMs = now;
+
+    uint32_t conn = 0;
+    for (uint32_t salt = 0; conn == 0; ++salt) {
+        conn = static_cast<uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count()) ^
+               static_cast<uint32_t>(token) ^ static_cast<uint32_t>(token >> 32) ^ salt;
+    }
+    link.rel.start(conn, now);
+    g_statusText = "Found the host. Connecting...";
+}
+
+void coop_online_failed(const std::string& why, const std::string& upnpFallback) {
+    if (g_isHost || g_peerConnected) return;
+    if (!upnpFallback.empty()) {
+
+        coop_log::info("coop_mod: room punch failed - trying the host's own address {}",
+            upnpFallback);
+
+        online_stop();
+        if (start_joining(upnpFallback) == MOD_OK) {
+            g_statusText = "Trying the host's address directly...";
+            return;
+        }
+    }
+    g_udp.close();
+    for (int i = 0; i < kCoopMaxPlayers; ++i) g_links[i] = PeerLink{};
+    g_connecting = false;
+    g_localId = kCoopHostId;
+    g_statusText = why;
 }
 
 void coop_net_host() {
@@ -1716,6 +2464,9 @@ void coop_net_join() {
 }
 
 void coop_net_disconnect() {
+    upnp_release();
+    online_stop();
+    for (int i = 0; i < kCoopMaxPlayers; ++i) send_bye(g_links[i]);
     const bool wasConnected = g_peerConnected;
     g_peerConnected = false;
     g_connecting = false;
@@ -1737,7 +2488,9 @@ void coop_net_disconnect() {
 
 void coop_net_send(uint8_t type, const void* payload, size_t size) {
     if (size > kCoopMaxMessagePayload) return;
+    const bool local = stage_local_message(type);
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
+        if (local && !worth_sending(g_localId, i, 0)) continue;
         send_frame_to(g_links[i], type, g_localId, payload, size);
     }
 }
@@ -1807,6 +2560,54 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     joinPortDesc.default_int = 27716;
     svc_config->register_var(mod_ctx, &joinPortDesc, &g_joinPortVar);
 
+    ConfigVarDesc upnpDesc = CONFIG_VAR_DESC_INIT;
+    upnpDesc.name = "open_port_automatically";
+    upnpDesc.type = CONFIG_VAR_BOOL;
+    upnpDesc.default_bool = true;
+    svc_config->register_var(mod_ctx, &upnpDesc, &g_upnpVar);
+
+    ConfigVarDesc roomCodeDesc = CONFIG_VAR_DESC_INIT;
+    roomCodeDesc.name = "room_code";
+    roomCodeDesc.type = CONFIG_VAR_STRING;
+    roomCodeDesc.default_string = "";
+    svc_config->register_var(mod_ctx, &roomCodeDesc, &g_roomCodeVar);
+
+    ConfigVarDesc roomServerDesc = CONFIG_VAR_DESC_INIT;
+    roomServerDesc.name = "room_server";
+    roomServerDesc.type = CONFIG_VAR_STRING;
+    roomServerDesc.default_string = "";
+    svc_config->register_var(mod_ctx, &roomServerDesc, &g_roomServerVar);
+
+    ConfigVarDesc twilightDesc = CONFIG_VAR_DESC_INIT;
+    twilightDesc.name = "debug_clear_twilight";
+    twilightDesc.type = CONFIG_VAR_BOOL;
+    twilightDesc.default_bool = false;
+    svc_config->register_var(mod_ctx, &twilightDesc, &g_clearTwilightVar);
+
+    ConfigVarDesc eponaDesc = CONFIG_VAR_DESC_INIT;
+    eponaDesc.name = "debug_epona_flags";
+    eponaDesc.type = CONFIG_VAR_BOOL;
+    eponaDesc.default_bool = false;
+    svc_config->register_var(mod_ctx, &eponaDesc, &g_eponaFlagsVar);
+
+    ConfigVarDesc fakeDesc = CONFIG_VAR_DESC_INIT;
+    fakeDesc.name = "debug_fake_players";
+    fakeDesc.type = CONFIG_VAR_INT;
+    fakeDesc.default_int = 0;
+    svc_config->register_var(mod_ctx, &fakeDesc, &g_fakePlayersVar);
+
+    ConfigVarDesc hostKeyDesc = CONFIG_VAR_DESC_INIT;
+    hostKeyDesc.name = "room_host_key";
+    hostKeyDesc.type = CONFIG_VAR_STRING;
+    hostKeyDesc.default_string = "";
+    svc_config->register_var(mod_ctx, &hostKeyDesc, &g_hostKeyVar);
+
+    ConfigVarDesc roomsDesc = CONFIG_VAR_DESC_INIT;
+    roomsDesc.name = "room_codes";
+    roomsDesc.type = CONFIG_VAR_BOOL;
+    roomsDesc.default_bool = true;
+    svc_config->register_var(mod_ctx, &roomsDesc, &g_roomsVar);
+
     ConfigVarDesc autoDesc = CONFIG_VAR_DESC_INIT;
     autoDesc.name = "auto_connect";
     autoDesc.type = CONFIG_VAR_BOOL;
@@ -1836,6 +2637,8 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     horses_init();
     ui_init();
     puppet_hook_init();
+    skipvote_init();
+    drops_init();
 
     return MOD_OK;
 }
@@ -1867,23 +2670,36 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     while (mods::net::poll(event)) {
         if (event.handle == g_udp.handle()) {
             handle_udp_event(event);
+        } else if (upnp_owns(event.handle)) {
+            upnp_on_net_event(event);
         } else {
             handle_tcp_event(event);
         }
     }
 
+    upnp_update();
+    online_update();
     update_pings();
     announce_local_pause();
     features_update();
 
+    apply_debug_clear_twilight();
+    apply_debug_epona_flags();
     send_local_snapshot();
     send_local_midna();
+    send_local_horse();
+
+    flush_udp_links();
 
     return MOD_OK;
 }
 
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
-    for (int i = 0; i < kCoopMaxPlayers; ++i) g_links[i].sock.close();
+    online_stop();
+    for (int i = 0; i < kCoopMaxPlayers; ++i) {
+        send_bye(g_links[i]);
+        g_links[i].sock.close();
+    }
     g_listener.close();
     g_udp.close();
     coop_log::info("coop_mod shut down");

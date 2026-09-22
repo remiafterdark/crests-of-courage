@@ -22,8 +22,8 @@
 #include <cmath>
 #include <cstring>
 
-DEFINE_HOOK_SYMBOL("?fopAcM_fastCreate@@YAPEAVfopAc_ac_c@@FIPEBUcXyz@@HPEBVcsXyz@@0CP6AHPEAX@Z2IE@Z",
-    fopAc_ac_c*(s16, u32, const cXyz*, int, const csXyz*, const cXyz*, s8, void*, void*, u32, u8),
+DEFINE_HOOK((static_cast<fopAc_ac_c* (*)(s16, u32, const cXyz*, int, const csXyz*, const cXyz*, s8,
+                createFunc, void*, u32, u8)>(&fopAcM_fastCreate)),
     FastCreateHook);
 
 namespace {
@@ -44,6 +44,62 @@ int s_diagReplicas = 0;
 int s_creatingReplica = 0;
 
 const int kAlinkBombResIdx = 0x1E;
+
+void write_roll(const Mtx m, int16_t* q) {
+    f32 x, y, z, w;
+    const f32 tr = m[0][0] + m[1][1] + m[2][2];
+    if (tr > 0.0f) {
+        const f32 s = std::sqrt(tr + 1.0f) * 2.0f;
+        w = 0.25f * s;
+        x = (m[2][1] - m[1][2]) / s;
+        y = (m[0][2] - m[2][0]) / s;
+        z = (m[1][0] - m[0][1]) / s;
+    } else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) {
+        const f32 s = std::sqrt(1.0f + m[0][0] - m[1][1] - m[2][2]) * 2.0f;
+        w = (m[2][1] - m[1][2]) / s;
+        x = 0.25f * s;
+        y = (m[0][1] + m[1][0]) / s;
+        z = (m[0][2] + m[2][0]) / s;
+    } else if (m[1][1] > m[2][2]) {
+        const f32 s = std::sqrt(1.0f + m[1][1] - m[0][0] - m[2][2]) * 2.0f;
+        w = (m[0][2] - m[2][0]) / s;
+        x = (m[0][1] + m[1][0]) / s;
+        y = 0.25f * s;
+        z = (m[1][2] + m[2][1]) / s;
+    } else {
+        const f32 s = std::sqrt(1.0f + m[2][2] - m[0][0] - m[1][1]) * 2.0f;
+        w = (m[1][0] - m[0][1]) / s;
+        x = (m[0][2] + m[2][0]) / s;
+        y = (m[1][2] + m[2][1]) / s;
+        z = 0.25f * s;
+    }
+    const f32 v[4] = {x, y, z, w};
+    for (int k = 0; k < 4; ++k) {
+        const f32 c = v[k] > 1.0f ? 1.0f : (v[k] < -1.0f ? -1.0f : v[k]);
+        q[k] = static_cast<int16_t>(c * 32767.0f);
+    }
+}
+
+void read_roll(const int16_t* q, Mtx m) {
+    if (q[0] == 0 && q[1] == 0 && q[2] == 0 && q[3] == 0) return;
+    f32 x = q[0] / 32767.0f, y = q[1] / 32767.0f, z = q[2] / 32767.0f, w = q[3] / 32767.0f;
+    const f32 len = std::sqrt(x * x + y * y + z * z + w * w);
+    if (len < 0.0001f) return;
+    x /= len;
+    y /= len;
+    z /= len;
+    w /= len;
+    m[0][0] = 1.0f - 2.0f * (y * y + z * z);
+    m[0][1] = 2.0f * (x * y - z * w);
+    m[0][2] = 2.0f * (x * z + y * w);
+    m[1][0] = 2.0f * (x * y + z * w);
+    m[1][1] = 1.0f - 2.0f * (x * x + z * z);
+    m[1][2] = 2.0f * (y * z - x * w);
+    m[2][0] = 2.0f * (x * z - y * w);
+    m[2][1] = 2.0f * (y * z + x * w);
+    m[2][2] = 1.0f - 2.0f * (x * x + y * y);
+    m[0][3] = m[1][3] = m[2][3] = 0.0f;
+}
 
 bool bomb_model_available() {
     return dComIfG_getObjectRes(daAlink_c::getAlinkArcName(),
@@ -348,6 +404,9 @@ void send_transforms() {
         if (localInCutsceneTx) st.flags |= kActorFlagOwnerInCutscene;
         st.state = read_actor_state(actor, s_owned[i].procName);
         st.param = fopAcM_GetParam(actor);
+        if (s_owned[i].procName == fpcNm_NBOMB_e) {
+            write_roll(static_cast<daNbomb_c*>(actor)->field_0xa40, st.roll);
+        }
         std::memcpy(buffer + 1 + count * sizeof(st), &st, sizeof(st));
         ++count;
     }
@@ -886,6 +945,9 @@ void spawns_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_
             write_actor_state(actor, r->procName, st.state);
 
             if (fopAcM_GetParam(actor) != st.param) fopAcM_SetParam(actor, st.param);
+            if (r->procName == fpcNm_NBOMB_e) {
+                read_roll(st.roll, static_cast<daNbomb_c*>(actor)->field_0xa40);
+            }
             r->ownerInCutscene = (st.flags & kActorFlagOwnerInCutscene) != 0;
             const bool wantCarried = (st.flags & kActorFlagCarried) != 0;
             if (wantCarried != (fopAcM_checkCarryNow(actor) != 0)) {

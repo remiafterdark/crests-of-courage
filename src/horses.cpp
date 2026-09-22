@@ -109,10 +109,12 @@ void choose_pointer() {
 
 }
 
-DEFINE_HOOK_SYMBOL("?dComIfGp_setHorseActor@@YAXPEAVfopAc_ac_c@@@Z", void(fopAc_ac_c*),
+DEFINE_HOOK_SYMBOL("dComIfGp_setHorseActor", void(fopAc_ac_c*),
     HorsesSetHorseActorHook);
 
 void horses_init() {
+
+    if (!horse_sync_enabled()) return;
     mods::hook::add_pre<HorsesSetHorseActorHook>(
         [](ModContext*, void* args, void*, void*) -> HookAction {
             if (s_setting) return HOOK_CONTINUE;

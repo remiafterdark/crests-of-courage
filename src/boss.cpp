@@ -1249,7 +1249,7 @@ void boss_go_anyway();
 
 ConfigVarHandle s_waitVar = 0;
 
-uint8_t s_remoteReady = 0;
+uint16_t s_remoteReady = 0;
 uint32_t s_readyStamp[kCoopMaxPlayers] = {};
 
 char s_readyStage[kCoopMaxPlayers][8] = {};
@@ -1283,7 +1283,7 @@ bool player_ready(uint8_t id) {
 }
 
 int players_still_coming() {
-    const uint8_t roster = coop_net_roster();
+    const uint16_t roster = coop_net_roster();
     int missing = 0;
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         const uint8_t id = static_cast<uint8_t>(i);
@@ -1294,7 +1294,7 @@ int players_still_coming() {
 }
 
 int others_ready_count() {
-    const uint8_t roster = coop_net_roster();
+    const uint16_t roster = coop_net_roster();
     int n = 0;
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         const uint8_t id = static_cast<uint8_t>(i);
@@ -1305,7 +1305,7 @@ int others_ready_count() {
 }
 
 int others_still_coming() {
-    const uint8_t roster = coop_net_roster();
+    const uint16_t roster = coop_net_roster();
     int missing = 0;
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         const uint8_t id = static_cast<uint8_t>(i);
@@ -1373,7 +1373,7 @@ bool local_ready_now() {
 }
 
 bool wait_enabled() {
-    return coop_session(kSessBossWait, cfg_bool(s_waitVar, true));
+    return coop_session(kSessBossWait, cfg_bool(s_waitVar, false));
 }
 
 struct BeatenBoss {
@@ -1693,7 +1693,7 @@ void boss_register_vars() {
     ConfigVarDesc wait = CONFIG_VAR_DESC_INIT;
     wait.name = "boss_room_wait";
     wait.type = CONFIG_VAR_BOOL;
-    wait.default_bool = true;
+    wait.default_bool = false;
     if (svc_config->register_var(mod_ctx, &wait, &s_waitVar) != MOD_OK) s_waitVar = 0;
 }
 
@@ -2146,9 +2146,9 @@ void boss_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t 
         MsgBossReady msg;
         std::memcpy(&msg, payload, sizeof(msg));
         if (from < kCoopMaxPlayers) {
-            const uint8_t bit = static_cast<uint8_t>(1u << from);
-            s_remoteReady = msg.inRoom != 0 ? static_cast<uint8_t>(s_remoteReady | bit)
-                                            : static_cast<uint8_t>(s_remoteReady & ~bit);
+            const uint16_t bit = static_cast<uint16_t>(1u << from);
+            s_remoteReady = msg.inRoom != 0 ? static_cast<uint16_t>(s_remoteReady | bit)
+                                            : static_cast<uint16_t>(s_remoteReady & ~bit);
             s_readyStamp[from] = s_tick;
 
             s_readyRoom[from] = msg.room;

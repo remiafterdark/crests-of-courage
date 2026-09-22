@@ -1,4 +1,6 @@
 #include "util.hpp"
+
+#include <cctype>
 #include "mod.hpp"
 
 #include "d/d_com_inf_game.h"
@@ -43,4 +45,32 @@ int power_class_to_damage(int atp) {
     if (atp == 3) return 30;
     if (atp == 6) return 80;
     return 200;
+}
+
+std::filesystem::path path_ci(const std::filesystem::path& p) {
+    std::error_code ec;
+    if (std::filesystem::exists(p, ec)) return p;
+    std::filesystem::path cur;
+    for (const std::filesystem::path& part : p) {
+        const std::filesystem::path next = cur.empty() ? part : cur / part;
+        if (std::filesystem::exists(next, ec)) {
+            cur = next;
+            continue;
+        }
+        std::string want = part.string();
+        for (char& c : want) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        bool found = false;
+        const std::filesystem::path dir = cur.empty() ? std::filesystem::path(".") : cur;
+        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+            std::string have = entry.path().filename().string();
+            for (char& c : have) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (have == want) {
+                cur = entry.path();
+                found = true;
+                break;
+            }
+        }
+        if (!found) return p;
+    }
+    return cur;
 }

@@ -55,7 +55,7 @@ CoopPeer& first_peer() {
 
 bool s_peerAnnounced[kCoopMaxPlayers] = {};
 
-uint8_t s_lastRoster = 0;
+uint16_t s_lastRoster = 0;
 
 std::string sender_name(uint8_t from) {
     if (from < kCoopMaxPlayers && s_peers[from].present && !s_peers[from].name.empty()) {
@@ -293,6 +293,9 @@ bool s_haveInv = false;
 uint32_t s_invTick = 0;
 uint32_t s_invExpectUntil[kItemIdCount] = {};
 
+uint32_t s_invOwedSince[kItemIdCount] = {};
+const uint32_t kOwedRetryTicks = 600;
+
 bool on_title_screen() {
     const char* stage = dComIfGp_getStartStageName();
     return stage != nullptr && (std::strcmp(stage, "F_SP102") == 0 || std::strcmp(stage, "title") == 0);
@@ -304,13 +307,32 @@ void relay_item(uint8_t item) {
     coop_log::info("coop_mod: [INV] relayed item {:#x}", item);
 }
 
+void retry_owed_items() {
+    if (svc_item == nullptr || dComIfGp_event_runCheck() || dComIfGp_isEnableNextStage()) return;
+    for (int i = 0; i < kItemIdCount; ++i) {
+        if (s_invOwedSince[i] == 0) continue;
+        const uint8_t item = static_cast<uint8_t>(i);
+        if (dComIfGs_isItemFirstBit(item)) {
+            s_invOwedSince[i] = 0;
+            continue;
+        }
+        if (s_invTick - s_invOwedSince[i] < kOwedRetryTicks) continue;
+        coop_log::info("coop_mod: [INV] item {:#x} never landed - asking for it again", item);
+        svc_item->give_item(mod_ctx, nullptr, item, ITEM_GIVE_SILENT);
+        s_invOwedSince[i] = s_invTick;
+        s_invExpectUntil[i] = s_invTick + 1200;
+    }
+}
+
 void scan_inventory() {
     ++s_invTick;
     if (on_title_screen()) {
         s_haveInv = false;
+        std::memset(s_invOwedSince, 0, sizeof(s_invOwedSince));
         return;
     }
     if (!in_gameplay() || (s_invTick % 30) != 0) return;
+    if (coop_net_connected()) retry_owed_items();
 
     uint8_t bits[kItemIdCount] = {};
     for (int i = 0; i < kItemIdCount; ++i) {
@@ -403,7 +425,7 @@ void apply_death_link(const MsgDeathLink& msg) {
     std::strncpy(who, msg.name, kCoopNameMax - 1);
     who[kCoopNameMax - 1] = '\0';
     coop_log::info("coop_mod: [DEATH] {} died, and so do we", who);
-    toast(who[0] != '\0' ? who : "Your partner", "died - so did you.");
+    toast(who[0] != '\0' ? who : "Your partner", "died, so did you.");
 }
 
 void on_item_given(ModContext*, const ItemGiveInfo* info, void*) {
@@ -582,6 +604,7 @@ void apply_remote_item(uint8_t item, uint8_t from) {
         remove_local_heart_containers(from);
     } else if (!grant_equipment_without_equipping(item)) {
         svc_item->give_item(mod_ctx, nullptr, item, ITEM_GIVE_SILENT);
+        if (!item_is_stackable(item)) s_invOwedSince[item] = s_invTick != 0 ? s_invTick : 1;
     }
 
     s_invExpectUntil[item] = s_invTick + 1200;
@@ -959,7 +982,10 @@ static void run_debug_shift() {
 void coop_remember_last_host(const char* name, const char* address) {
     if (name == nullptr || name[0] == '\0') return;
     std::string body = "Last played with " + std::string(name);
-    if (address != nullptr && address[0] != '\0') body += " at " + std::string(address);
+    if (address != nullptr && address[0] != '\0') {
+        const std::string where(address);
+        body += (where.rfind("room ", 0) == 0 ? " in " : " at ") + where;
+    }
     features_toast("Co-op save", (body + ".").c_str());
 }
 
@@ -1034,6 +1060,8 @@ void features_update() {
     horse_update();
     grass_update();
     joinsync_update();
+    skipvote_update();
+    twilight_update();
     const bool connected = coop_net_connected();
 
     const bool nametagsOn = cfg_bool(s_vars.nametags, true);
@@ -1083,9 +1111,9 @@ void features_update() {
 void features_on_roster_changed() {
     if (!coop_net_connected()) return;
 
-    const uint8_t now = coop_net_roster();
+    const uint16_t now = coop_net_roster();
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
-        const uint8_t bit = static_cast<uint8_t>(1u << i);
+        const uint16_t bit = static_cast<uint16_t>(1u << i);
         if ((s_lastRoster & bit) == 0 || (now & bit) != 0) continue;
         if (static_cast<uint8_t>(i) == coop_net_local_id()) continue;
         if (s_peers[i].present) {
@@ -1215,10 +1243,17 @@ void features_on_message(uint8_t type, const uint8_t* payload, size_t size, uint
     case kMsgEnemyHit:
     case kMsgObjectHit:
     case kMsgObjectMove:
+    case kMsgCarry:
     case kMsgObjectPush:
+    case kMsgTorch:
+    case kMsgAnimal:
     case kMsgRoomClaim:
     case kMsgRoomOwner:
     case kMsgEnemyTargets: enemies_on_message(type, payload, size, from); break;
+
+    case kMsgSkipVote: skipvote_on_message(payload, size, from); break;
+    case kMsgTwilightBug:
+    case kMsgTearGot: twilight_on_message(type, payload, size); break;
     case kMsgActorSpawn:
     case kMsgActorState:
     case kMsgActorGone: spawns_on_message(type, payload, size, from); break;
@@ -1303,7 +1338,7 @@ uint16_t local_session_flags() {
     uint16_t f = 0;
     if (cfg_bool(enemies_enabled_var(), false)) f |= kSessEnemies;
     if (cfg_bool(boss_enabled_var(), false)) f |= kSessBosses;
-    if (cfg_bool(boss_wait_var(), true)) f |= kSessBossWait;
+    if (cfg_bool(boss_wait_var(), false)) f |= kSessBossWait;
     if (cfg_bool(enemies_breakables_var(), true)) f |= kSessWorldObjects;
     if (cfg_bool(world_dungeon_var(), true)) f |= kSessDungeon;
     if (cfg_bool(world_story_var(), false)) f |= kSessStory;
@@ -1371,5 +1406,47 @@ void features_teleport_to_player(uint8_t playerId) {
         who.name, who.stage, who.point, who.curRoom, who.layer,
         dComIfGp_getStartStageName(), fopAcM_GetRoomNo(alink));
     toast("Teleporting", "Heading to " + who.name + ".", 2500);
+}
+
+void features_debug_fake_peer(uint8_t id, bool on, const char* name, const float* pos, uint16_t life,
+    uint16_t maxLife) {
+    if (id >= kCoopMaxPlayers) return;
+    CoopPeer& p = peer_slot(id);
+    if (!on) {
+        p = CoopPeer{};
+        return;
+    }
+    daAlink_c* alink = daAlink_getAlinkActorClass();
+    const char* stage = dComIfGp_getStartStageName();
+    p.present = true;
+    p.inGame = alink != nullptr;
+    if (name != nullptr) p.name = name;
+    if (stage != nullptr) {
+        std::strncpy(p.stage, stage, 8);
+        p.stage[8] = '\0';
+    }
+    p.curRoom = alink != nullptr ? static_cast<int8_t>(fopAcM_GetRoomNo(alink)) : 0;
+    if (pos != nullptr) {
+        p.x = pos[0];
+        p.y = pos[1];
+        p.z = pos[2];
+    }
+    p.lifeKnown = maxLife != 0;
+    p.life = life;
+    p.maxLife = maxLife;
+}
+
+bool features_reload_at_player(uint8_t playerId) {
+    const CoopPeer& who = features_peer_of(playerId);
+    if (!who.present || !who.inGame || who.stage[0] == '\0') return false;
+    if (daAlink_getAlinkActorClass() == nullptr || dComIfGp_isEnableNextStage()) return false;
+    s_teleport = PendingTeleport{};
+    s_teleport.active = true;
+    s_teleport.playerId = playerId;
+    std::memcpy(s_teleport.stage, who.stage, 9);
+    dComIfGp_setNextStage(who.stage, who.point, who.curRoom, who.layer);
+    coop_log::info("coop_mod: [JOIN] loading into {} room {} where {} is", who.stage, who.curRoom,
+        who.name);
+    return true;
 }
 

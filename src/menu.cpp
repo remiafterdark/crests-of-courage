@@ -22,11 +22,13 @@ struct SurfaceHandles {
     UiElementHandle peer = 0;
     UiElementHandle models = 0;
     UiElementHandle party = 0;
+    UiElementHandle invite = 0;
     UiListHandle players = 0;
     std::string lastStatus;
     std::string lastPeer;
     std::string lastModels;
     std::string lastParty;
+    std::string lastInvite;
     std::string lastList;
 
     std::string lastBackup;
@@ -44,6 +46,7 @@ void open_window();
 
 std::string worn_text();
 std::string party_text();
+std::string invite_text();
 std::string escape_rml(const std::string& text);
 
 bool net_active(ModContext*, void*) {
@@ -163,18 +166,7 @@ std::string status_text() {
 std::string ping_text(uint8_t id) {
     const int32_t ms = coop_net_ping_ms(id);
     if (ms < 0) return "";
-    return "  -  " + std::to_string(ms) + " ms";
-}
-
-std::string health_text(const CoopPeer& peer) {
-    if (!peer.lifeKnown) return "";
-    const uint32_t quarters = peer.life;
-    const uint32_t maxHearts = peer.maxLife / 5u;
-    std::string out = "  -  " + std::to_string(quarters / 4);
-    static const char* const kFraction[4] = {"", ".25", ".5", ".75"};
-    out += kFraction[quarters % 4];
-    out += "/" + std::to_string(maxHearts) + " hearts";
-    return out;
+    return ", " + std::to_string(ms) + " ms";
 }
 
 std::string where_text(const CoopPeer& peer) {
@@ -224,14 +216,28 @@ std::string party_text() {
             continue;
         }
         out += where_text(p);
-        const std::string health = health_text(p);
         const std::string ping = ping_text(id);
-        if (!health.empty()) out += health;
         if (!ping.empty()) out += ping;
-        if (coop_player_paused(id)) out += "  -  paused";
+        if (coop_player_paused(id)) out += ", paused";
     }
     if (out.empty()) return "Connected.\n\nWaiting for somebody to join.";
     return out;
+}
+
+std::string invite_text() {
+    if (!coop_net_is_host() || !(coop_net_connected() || coop_net_connecting())) return "";
+
+    const std::string code = online_room_code();
+    const std::string online = online_status();
+    const std::string address = upnp_external_address();
+    if (!code.empty()) {
+        std::string out = "Room code: " + code;
+        if (!online.empty()) out += ". " + online;
+        return out;
+    }
+    if (!online.empty()) return online;
+    if (!address.empty()) return "Others can join you at " + address;
+    return upnp_status();
 }
 
 void push_players(SurfaceHandles& h) {
@@ -247,8 +253,8 @@ void push_players(SurfaceHandles& h) {
             const CoopPeer& p = features_peer_of(id);
             if (!p.present || !p.inGame) continue;
             h.rowIds.push_back(id);
-            h.rowLabels.push_back(p.name + (coop_player_paused(id) ? " (paused)" : "") + "  -  " +
-                                  where_text(p) + health_text(p) + ping_text(id));
+            h.rowLabels.push_back(p.name + (coop_player_paused(id) ? " (paused)" : "") + ", " +
+                                  where_text(p) + ping_text(id));
             joined += h.rowLabels.back() + " ";
         }
     }
@@ -290,6 +296,13 @@ void refresh(SurfaceHandles& h) {
         if (text != h.lastModels) {
             h.lastModels = text;
             svc_ui->elem_set_text(mod_ctx, h.models, h.lastModels.c_str());
+        }
+    }
+    if (h.invite != 0) {
+        const std::string text = invite_text();
+        if (text != h.lastInvite) {
+            h.lastInvite = text;
+            svc_ui->elem_set_text(mod_ctx, h.invite, h.lastInvite.c_str());
         }
     }
     if (h.party != 0) {
@@ -339,43 +352,67 @@ void add_group_or_section(UiElementHandle left, UiElementHandle detail, const ch
 }
 
 void add_step(UiElementHandle pane, int number, const char* text) {
+
     std::string rml = "<div class=\"coop-step\"><span class=\"coop-step-n\">";
     rml += std::to_string(number);
-    rml += "</span>";
+    rml += "</span><span class=\"coop-step-t\">";
     rml += escape_rml(text);
-    rml += "</div>";
+    rml += "</span></div>";
     svc_ui->pane_add_rml(mod_ctx, pane, rml.c_str(), nullptr);
 }
 
 ModResult build_online_guide(ModContext*, UiElementHandle pane, void*, ModError*) {
     add_panel_header(pane, "Playing together");
+    svc_ui->pane_add_text(mod_ctx, pane,
+        "Everyone types the same Room. One of you presses Host, the rest press Join.", nullptr);
 
-    svc_ui->pane_add_section(mod_ctx, pane, "Same house");
+    svc_ui->pane_add_section(mod_ctx, pane, "Same wifi");
     svc_ui->pane_add_text(mod_ctx, pane,
-        "Nothing to set up. One of you presses Host; the other types that computer's address on "
-        "the network into Join.", nullptr);
+        "If the room won't connect, use Join by address in Advanced with the host's local "
+        "address.", nullptr);
 
-    svc_ui->pane_add_section(mod_ctx, pane, "Anywhere else");
+    svc_ui->pane_add_section(mod_ctx, pane, "If the code won't connect");
     svc_ui->pane_add_text(mod_ctx, pane,
-        "Tailscale puts both computers on one private network, so the game can treat you as if you "
-        "were in the same house. It is free, and you only do this once.", nullptr);
-    add_step(pane, 1, "Both of you install Tailscale from tailscale.com/download and sign in - "
-                      "any Google, Microsoft or GitHub account will do.");
-    add_step(pane, 2, "One of you invites the other: in the Tailscale admin console, Users, then "
-                      "Invite external users. Send them the link.");
-    add_step(pane, 3, "The other opens that link and accepts. Both of you should now see two "
-                      "machines listed in Tailscale.");
-    add_step(pane, 4, "Whoever is hosting reads their Tailscale address - it starts with 100. and "
-                      "is next to their machine's name - and presses Host here.");
-    add_step(pane, 5, "The other types that 100. address into Address and presses Join.");
-    svc_ui->pane_add_text(mod_ctx, pane,
-        "After the first time, both of you only need Tailscale running.", nullptr);
-
-    svc_ui->pane_add_section(mod_ctx, pane, "If you would rather not");
-    svc_ui->pane_add_text(mod_ctx, pane,
-        "The host can forward the port above on their router instead, and give out their public "
-        "address. It works, but it is fiddlier than Tailscale and exposes that port to everyone.",
+        "Some networks are too strict. Use Tailscale instead. It's free and works everywhere.",
         nullptr);
+    add_step(pane, 1, "Everyone installs Tailscale and signs in.");
+    add_step(pane, 2, "The host invites the others at login.tailscale.com, under Users.");
+    add_step(pane, 3, "The host presses Host.");
+    add_step(pane, 4, "The others use Join by address in Advanced with the host's Tailscale "
+                      "address. It starts with 100.");
+
+    svc_ui->pane_add_section(mod_ctx, pane, "Firewall");
+    svc_ui->pane_add_text(mod_ctx, pane,
+        "If your device asks to let Dusklight through, allow it.", nullptr);
+    return MOD_OK;
+}
+
+ModResult group_advanced(ModContext*, UiElementHandle pane, void*, ModError*) {
+    add_panel_header(pane, "Advanced");
+    svc_ui->pane_add_section(mod_ctx, pane, "Join by address");
+    add_string(pane, "Address", coop_net_address_var(), 64);
+    add_number(pane, "Port", coop_net_join_port_var(), 1024, 65535, 1, nullptr);
+    add_button(pane, "Join by address", [](ModContext*, void*) { coop_net_join(); }, net_active,
+        "Same wifi, Tailscale, or a forwarded port.");
+
+    svc_ui->pane_add_section(mod_ctx, pane, "Hosting");
+    add_number(pane, "Port to listen on", coop_net_port_var(), 1024, 65535, 1, nullptr);
+    add_toggle(pane, "Room codes", coop_net_rooms_var());
+    add_toggle(pane, "Open the port for me", coop_net_upnp_var());
+    add_toggle(pane, "Connect on launch", coop_net_autoconnect_var());
+
+    svc_ui->pane_add_section(mod_ctx, pane, "Your save");
+    add_button(pane, "Restore latest backup",
+        [](ModContext*, void*) { joinsync_restore_backup(false); }, net_active);
+    add_button(pane, "Restore oldest backup",
+        [](ModContext*, void*) { joinsync_restore_backup(true); }, net_active);
+
+    static std::string s_backup;
+    s_backup = joinsync_backup_summary();
+    svc_ui->pane_add_text(mod_ctx, pane, s_backup.c_str(), nullptr);
+
+    static const std::string kVersionLine = "Version " + std::to_string(kCoopProtocolVersion);
+    svc_ui->pane_add_text(mod_ctx, pane, kVersionLine.c_str(), nullptr);
     return MOD_OK;
 }
 
@@ -383,48 +420,18 @@ void build_connect(UiElementHandle pane, SurfaceHandles& h, UiElementHandle deta
     const CoopFeatureVars& vars = features_vars();
     h.lastStatus = status_text();
     svc_ui->pane_add_text(mod_ctx, pane, h.lastStatus.c_str(), &h.status);
+    h.lastInvite = invite_text();
+    svc_ui->pane_add_text(mod_ctx, pane, h.lastInvite.c_str(), &h.invite);
 
-    if (detail != 0) {
-        UiGroupDesc guide = UI_GROUP_DESC_INIT;
-        guide.label = "How to play together";
-        guide.build = build_online_guide;
-        svc_ui->pane_add_group(mod_ctx, pane, detail, &guide, nullptr);
-    }
-
-    svc_ui->pane_add_section(mod_ctx, pane, "You");
     add_string(pane, "Name", vars.name, kCoopNameMax - 1);
-
-    svc_ui->pane_add_section(mod_ctx, pane, "Host a game");
-    add_number(pane, "Port to listen on", coop_net_port_var(), 1024, 65535, 1, nullptr,
-        "Forward this one on your router, or skip all that and use Tailscale.");
+    add_string(pane, "Room", coop_net_room_code_var(), static_cast<int32_t>(kRoomNameMax));
     add_button(pane, "Host", [](ModContext*, void*) { coop_net_host(); }, net_active,
-        "Your world and your save. Everyone who joins plays in it.");
-
-    svc_ui->pane_add_section(mod_ctx, pane, "Join a game");
-    add_string(pane, "Address", coop_net_address_var(), 64);
-    add_number(pane, "Port", coop_net_join_port_var(), 1024, 65535, 1, nullptr);
-    add_button(pane, "Join", [](ModContext*, void*) { coop_net_join(); }, net_active,
-        "Their world, their progress. Yours is put back when you disconnect.");
-
-    svc_ui->pane_add_section(mod_ctx, pane, "Connection");
+        "Empty Room gets a random code.");
+    add_button(pane, "Join", [](ModContext*, void*) { coop_net_join_code(); }, net_active);
     add_button(pane, "Disconnect", [](ModContext*, void*) { coop_net_disconnect(); }, net_idle);
-    add_toggle(pane, "Connect on launch", coop_net_autoconnect_var(),
-        "Host or join straight away next time, using the settings above.");
 
-    svc_ui->pane_add_section(mod_ctx, pane, "Your save");
-    add_button(pane, "Restore latest backup",
-        [](ModContext*, void*) { joinsync_restore_backup(false); }, net_active,
-        "The save you had before you last joined somebody.");
-    add_button(pane, "Restore oldest backup",
-        [](ModContext*, void*) { joinsync_restore_backup(true); }, net_active,
-        "The first one ever taken - from before any of this.");
-
-    h.lastBackup = joinsync_backup_summary();
-    svc_ui->pane_add_text(mod_ctx, pane, h.lastBackup.c_str(), nullptr);
-
-    static const std::string kVersionLine =
-        "Version " + std::to_string(kCoopProtocolVersion) + " - everyone needs the same one.";
-    svc_ui->pane_add_text(mod_ctx, pane, kVersionLine.c_str(), nullptr);
+    add_group_or_section(pane, detail, "Advanced", group_advanced);
+    add_group_or_section(pane, detail, "How to play together", build_online_guide);
 }
 
 void build_players(UiElementHandle pane, SurfaceHandles& h) {
@@ -445,11 +452,9 @@ ModResult group_sharing(ModContext*, UiElementHandle pane, void*, ModError*) {
     add_panel_header(pane, "Share");
     const CoopFeatureVars& vars = features_vars();
     add_toggle(pane, "Items", vars.syncInventory,
-        "Not rupees or ammo. Small keys are shared - one of you spends it, it is gone for both.");
+        "Not rupees or ammo. Small keys are shared: one of you spends it, it is gone for all.");
     add_toggle(pane, "Dungeon progress", world_dungeon_var(),
         "Chests, switches and doors. Open one and it is open for everybody.");
-    add_toggle(pane, "Story progress", world_story_var(),
-        "Cutscenes and quest flags, so nobody is left behind the story.");
     add_toggle(pane, "World objects", enemies_breakables_var(),
         "Pots, grass, blocks and the like.");
     add_toggle(pane, "Time of day", vars.syncTime,
@@ -461,22 +466,23 @@ ModResult group_together(ModContext*, UiElementHandle pane, void*, ModError*) {
     add_panel_header(pane, "Playing together");
     add_toggle(pane, "Death link", features_vars().deathLink,
         "One of you dies, everybody dies.");
-    add_toggle(pane, "Hold boss fights until everyone's there", boss_wait_var(),
-        "The fight waits at the door until the whole party has walked in.");
     return MOD_OK;
 }
 
 ModResult group_unfinished(ModContext*, UiElementHandle pane, void*, ModError*) {
     add_panel_header(pane, "Unfinished", nullptr, "coop-danger");
+
+    add_toggle(pane, "Story progress", world_story_var(),
+        "Cutscenes and quest flags are shared. Can break a quest.");
     add_toggle(pane, "Enemy sync", enemies_enabled_var(),
         "Enemies fight all of you: one set shared between you, instead of a copy each. Can leave an "
         "enemy alive on one screen and dead on the other.");
     add_toggle(pane, "Boss sync", boss_enabled_var(),
-        "Ook and Diababa only; other bosses are untouched. CAN SOFTLOCK THE FIGHT - if it does, "
+        "Ook and Diababa only; other bosses are untouched. CAN SOFTLOCK THE FIGHT. If it does, "
         "turn this off and re-enter the room.");
-    add_toggle(pane, "One Epona each", horse_enabled_var(),
-        "A horse per player, and you can ride whichever you walk up to. Barely tested: horses can "
-        "end up in the wrong place or refuse to be mounted.");
+    add_toggle(pane, "Hold boss fights until everyone's there", boss_wait_var(),
+        "The fight waits at the door until the whole party has walked in. Can leave you stuck at "
+        "the door if someone never arrives.");
     return MOD_OK;
 }
 
@@ -487,7 +493,7 @@ ModResult group_dev(ModContext*, UiElementHandle pane, void*, ModError*) {
     add_toggle(pane, "Warp effect on others (can crash)", features_vars().puppetWarpFx);
     add_toggle(pane, "Log puppet materials on build", puppet_warp_dump_var(),
         "Dumps every material of each model as a puppet is built. Noisy, and it reads engine "
-        "structures directly - only turn it on to chase a model bug.");
+        "structures directly. Only turn it on to chase a model bug.");
     return MOD_OK;
 }
 
@@ -498,7 +504,7 @@ void build_game(UiElementHandle pane, UiElementHandle detail) {
     }
     add_group_or_section(pane, detail, "Share", group_sharing);
     add_group_or_section(pane, detail, "Playing together", group_together);
-    add_group_or_section(pane, detail, "Unfinished - these can break your game", group_unfinished);
+    add_group_or_section(pane, detail, "Unfinished: these can break your game", group_unfinished);
     if (features_debug_menu()) add_group_or_section(pane, detail, "Dev", group_dev);
 }
 
@@ -555,7 +561,7 @@ ModResult group_sound(ModContext*, UiElementHandle pane, void*, ModError*) {
 ModResult group_messages(ModContext*, UiElementHandle pane, void*, ModError*) {
     add_panel_header(pane, "Messages");
     add_toggle(pane, "Say what they pick up", features_vars().notifyItems,
-        "A note when somebody finds something that matters - a key, an item, a heart piece.");
+        "A note when somebody finds something that matters: a key, an item, a heart piece.");
     return MOD_OK;
 }
 
@@ -846,9 +852,11 @@ ModResult tab_connect(
     s_window = SurfaceHandles{};
     build_connect(left, s_window, right);
     svc_ui->pane_add_text(mod_ctx, right,
-        "One player hosts, everyone else joins with the host's address. "
-        "The host needs the port open (TCP and UDP), or everyone can use Tailscale "
-        "and join with the host's Tailscale address.",
+        "Everyone types the same Room. One of you presses Host, the rest press Join. "
+        "Leave Room empty and Host makes a code for you to share.\n\n"
+        "Joining loads the host's game where they are standing. Your own save is backed up "
+        "first, and you can restore it from Advanced.\n\n"
+        "If it won't connect, open How to play together.",
         nullptr);
     return MOD_OK;
 }
@@ -986,19 +994,31 @@ select-button.group-button key {
 }
 
 .coop-step {
-    display: block;
-    color: rgba(var(--color-text-rgb), 88%);
-    font-size: var(--font-size-md);
-    line-height: 1.45;
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-sm);
     padding-bottom: var(--space-sm);
 }
 
 .coop-step-n {
-    display: inline-block;
+    flex: 0 0 22dp;
     width: 22dp;
+    height: 22dp;
+    line-height: 22dp;
+    text-align: center;
+    border-radius: 11dp;
+    background-color: rgba(var(--color-accent-rgb), 20%);
+    color: var(--color-accent);
     font-family: var(--font-family-heading);
     font-weight: bold;
-    color: var(--color-accent);
+    font-size: var(--font-size-2xs);
+}
+
+.coop-step-t {
+    flex: 1 1 auto;
+    color: rgba(var(--color-text-rgb), 88%);
+    font-size: var(--font-size-md);
+    line-height: 1.5;
 }
 
 .coop-credit {

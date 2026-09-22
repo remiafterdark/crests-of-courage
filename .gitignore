@@ -10,3 +10,8 @@ __pycache__/
 *.pyc
 build_release/
 release/
+
+node_modules/
+.wrangler/
+
+/dusklight/

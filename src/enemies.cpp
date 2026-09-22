@@ -13,6 +13,31 @@
 
 #include "d/actor/d_a_alink.h"
 #include "d/actor/d_a_obj_iceblock.h"
+#include "d/actor/d_a_cstatue.h"
+#include "d/actor/d_a_cstaF.h"
+#include "d/actor/d_a_crod.h"
+#include "d/actor/d_a_obj_carry.h"
+#include "d/actor/d_a_obj_lv6FurikoTrap.h"
+#include "d/actor/d_a_obj_lv6TogeRoll.h"
+#include "d/actor/d_a_obj_lv6TogeTrap.h"
+#include "d/actor/d_a_obj_rotTrap.h"
+#include "d/actor/d_a_obj_togeTrap.h"
+
+#include "dungeon_blob_includes.inc"
+#include "d/actor/d_a_obj_firepillar.h"
+#include "d/actor/d_a_obj_firepillar2.h"
+#include "d/actor/d_a_obj_geyser.h"
+#include "d/actor/d_a_obj_waterPillar.h"
+#include "d/actor/d_a_obj_lv1Candle00.h"
+#include "d/actor/d_a_obj_lv1Candle01.h"
+#include "d/actor/d_a_obj_lv2Candle.h"
+#include "d/actor/d_a_obj_lv3Candle.h"
+#include "d/actor/d_a_obj_fireWood.h"
+#include "d/actor/d_a_obj_fireWood2.h"
+#include "d/actor/d_a_cow.h"
+#include "d/actor/d_a_ni.h"
+#include "d/actor/d_a_obj_lv6swturn.h"
+#include "d/actor/d_a_obj_swturn.h"
 #include "d/actor/d_a_player.h"
 #include "m_Do/m_Do_ext.h"
 #include "d/d_particle.h"
@@ -110,11 +135,18 @@
 
 #include "mods/svc/hook.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <cstddef>
 
 DEFINE_HOOK(&fpcEx_Execute, EnemyExecuteHook);
+
+DEFINE_HOOK_SYMBOL("daCstatue_c::setAnime", void(daCstatue_c*), CoopStatueSetAnimeHook);
+
+DEFINE_HOOK_SYMBOL("daCstaF_c::setAnime", void(daCstaF_c*), CoopSmallStatueSetAnimeHook);
 
 DEFINE_HOOK(&dCcS::Move, EnemyCollisionHook);
 
@@ -522,8 +554,9 @@ void* collect_enemy(void* proc, void* data) {
 
     const bool trackedObject = fopAcM_GetName(actor) == kProcNbomb;
 
-    const bool carried = fopAcM_checkCarryNow(actor) != 0;
-    if (fopAcM_GetGroup(actor) != fopAc_ENEMY_e && !carried && !trackedObject) return nullptr;
+    if (fopAcM_GetGroup(actor) != fopAc_ENEMY_e && !trackedObject) return nullptr;
+
+    if (fopAcM_GetName(actor) == fpcNm_NI_e) return nullptr;
     ++list->enemyActors;
 
     if (!syncable(actor)) return nullptr;
@@ -2392,6 +2425,20 @@ void breakable_go_quiet(int8_t room, uint32_t key) {
     s_breakQuiet[slot].ticks = kBreakableQuietTicks;
 }
 
+bool has_blob(fopAc_ac_c* actor);
+
+bool is_timed_hazard(fopAc_ac_c* actor) {
+    switch (fopAcM_GetName(actor)) {
+    case fpcNm_Obj_FirePillar_e:
+    case fpcNm_Obj_FirePillar2_e:
+    case fpcNm_Obj_Geyser_e:
+    case fpcNm_Obj_WaterPillar_e:
+        return true;
+    default:
+        return false;
+    }
+}
+
 void* collect_breakable(void* proc, void* data) {
     auto* list = static_cast<BreakableList*>(data);
     auto* actor = static_cast<fopAc_ac_c*>(proc);
@@ -2409,7 +2456,7 @@ void* collect_breakable(void* proc, void* data) {
 
     if (fopAcM_checkCarryNow(actor) != 0) return nullptr;
 
-    if (actor->setID == 0xFFFF && !keyed_by_param(actor)) return nullptr;
+    if (actor->setID == 0xFFFF && !keyed_by_param(actor) && !has_blob(actor)) return nullptr;
     if (boss_room(fopAcM_GetRoomNo(actor))) return nullptr;
     const uint32_t key = compute_placement_key(actor);
     if (key == 0) return nullptr;
@@ -2461,14 +2508,16 @@ struct ObjPos {
     int8_t room = 0;
     bool used = false;
     cXyz pos;
+    csXyz angle;
+    uint32_t stateHash = 0;
 };
 ObjPos s_objPos[kMaxObjPos];
 
-cXyz* remember_position(int8_t room, uint32_t key, const cXyz& now) {
+ObjPos* remember_position(int8_t room, uint32_t key, const cXyz& now, const csXyz& angle) {
     int free = -1;
     for (int i = 0; i < kMaxObjPos; ++i) {
         if (s_objPos[i].used && s_objPos[i].key == key && s_objPos[i].room == room) {
-            return &s_objPos[i].pos;
+            return &s_objPos[i];
         }
         if (!s_objPos[i].used && free < 0) free = i;
     }
@@ -2477,7 +2526,188 @@ cXyz* remember_position(int8_t room, uint32_t key, const cXyz& now) {
     s_objPos[free].key = key;
     s_objPos[free].room = room;
     s_objPos[free].pos = now;
-    return &s_objPos[free].pos;
+    s_objPos[free].angle = angle;
+    return &s_objPos[free];
+}
+
+const int kMoverAngleEpsilon = 64;
+
+int angle_step(const csXyz& a, const csXyz& b) {
+    const int dx = std::abs(static_cast<int>(static_cast<s16>(a.x - b.x)));
+    const int dy = std::abs(static_cast<int>(static_cast<s16>(a.y - b.y)));
+    const int dz = std::abs(static_cast<int>(static_cast<s16>(a.z - b.z)));
+    return std::max(dx, std::max(dy, dz));
+}
+
+int object_phase(fopAc_ac_c* actor, int16_t* out) {
+    const s16 name = fopAcM_GetName(actor);
+    if (name == fpcNm_Obj_Lv6FuriTrap_e) {
+        out[0] = static_cast<daLv6FurikoTrap_c*>(actor)->mAngle;
+        return 1;
+    }
+    if (name == fpcNm_Obj_Lv6SwTurn_e) {
+        auto* sw = static_cast<daObjLv6SwTurn_c*>(actor);
+        out[0] = sw->mMode;
+        out[1] = sw->unk5B0;
+        out[2] = static_cast<int16_t>(sw->unk5B8);
+        out[3] = sw->unk5BC;
+        out[4] = sw->unk5B6;
+        out[5] = sw->unk5B2;
+        return 6;
+    }
+    if (name == fpcNm_Obj_SwTurn_e) {
+        auto* sw = static_cast<daObjSwTurn_c*>(actor);
+        out[0] = sw->mMode;
+        out[1] = sw->field_0x5c4;
+        out[2] = sw->field_0x5b8;
+        out[3] = static_cast<int16_t>(sw->field_0x5c0);
+        out[4] = static_cast<int16_t>(sw->field_0x5cc);
+        out[5] = sw->field_0x5ba;
+        out[6] = static_cast<int16_t>(sw->mRevCount);
+        return 7;
+    }
+    return 0;
+}
+
+struct BlobRun {
+    size_t begin;
+    size_t end;
+};
+
+const int kMaxBlobRuns = 8;
+
+int blob_runs(fopAc_ac_c* actor, BlobRun* out) {
+    switch (fopAcM_GetName(actor)) {
+    case fpcNm_Obj_Lv6TogeTrap_e:
+        out[0] = {offsetof(daLv6TogeTrap_c, mPathNo), offsetof(daLv6TogeTrap_c, mLine)};
+        out[1] = {offsetof(daLv6TogeTrap_c, mIsPathClosed), offsetof(daLv6TogeTrap_c, mCcStts)};
+        return 2;
+    case fpcNm_Obj_Lv6TogeRoll_e:
+        out[0] = {offsetof(daTogeRoll_c, mPathID), offsetof(daTogeRoll_c, mStts)};
+        return 1;
+    case fpcNm_Obj_RotTrap_e:
+        out[0] = {offsetof(daRotTrap_c, mMode), offsetof(daRotTrap_c, mCcStts)};
+        return 1;
+    case fpcNm_Obj_TogeTrap_e:
+        out[0] = {offsetof(daTogeTrap_c, mMode),
+            offsetof(daTogeTrap_c, mIsPlayerInArea) + sizeof(BOOL)};
+        return 1;
+
+    case fpcNm_Obj_FirePillar_e:
+        out[0] = {offsetof(daObjFPillar_c, mAction),
+            offsetof(daObjFPillar_c, mActionTimer) + sizeof(u16)};
+        return 1;
+    case fpcNm_Obj_FirePillar2_e:
+        out[0] = {offsetof(daObjFPillar2_c, mActionTimer),
+            offsetof(daObjFPillar2_c, mInitAngles)};
+        out[1] = {offsetof(daObjFPillar2_c, mAction), offsetof(daObjFPillar2_c, mAction) + 1};
+        out[2] = {offsetof(daObjFPillar2_c, mFirePipeTimer),
+            offsetof(daObjFPillar2_c, mFirePipeTimer) + 1};
+        return 3;
+    case fpcNm_Obj_Geyser_e:
+        out[0] = {offsetof(daObjGeyser_c, field_0x760),
+            offsetof(daObjGeyser_c, field_0x768) + sizeof(u16)};
+        return 1;
+    case fpcNm_Obj_WaterPillar_e:
+        out[0] = {offsetof(daWtPillar_c, mCurrentHeight),
+            offsetof(daWtPillar_c, mCurrentHeight) + sizeof(f32)};
+        out[1] = {offsetof(daWtPillar_c, mAction), offsetof(daWtPillar_c, mTargetSpeed) + sizeof(f32)};
+        return 2;
+#include "dungeon_blob_cases.inc"
+    default:
+        return 0;
+    }
+}
+
+int clipped_runs(fopAc_ac_c* actor, BlobRun* runs, size_t cap) {
+    const int count = blob_runs(actor, runs);
+    size_t used = 0;
+    for (int i = 0; i < count; ++i) {
+        if (runs[i].end <= runs[i].begin) return i;
+        const size_t len = runs[i].end - runs[i].begin;
+        if (used + len > cap) {
+            runs[i].end = runs[i].begin + (cap - used);
+            return runs[i].end > runs[i].begin ? i + 1 : i;
+        }
+        used += len;
+    }
+    return count;
+}
+
+const size_t kBlobCap = sizeof(MsgObjectMove::blob);
+
+bool has_blob(fopAc_ac_c* actor) {
+    BlobRun runs[kMaxBlobRuns];
+    return blob_runs(actor, runs) > 0;
+}
+
+int object_blob(fopAc_ac_c* actor, uint8_t* out, size_t cap) {
+    BlobRun runs[kMaxBlobRuns];
+    const int count = clipped_runs(actor, runs, cap);
+    size_t at = 0;
+    for (int i = 0; i < count; ++i) {
+        const size_t len = runs[i].end - runs[i].begin;
+        std::memcpy(out + at, reinterpret_cast<const uint8_t*>(actor) + runs[i].begin, len);
+        at += len;
+    }
+    return static_cast<int>(at);
+}
+
+uint32_t blob_hash(fopAc_ac_c* actor) {
+    uint8_t buf[kBlobCap];
+    const int n = object_blob(actor, buf, sizeof(buf));
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < n; ++i) h = (h ^ buf[i]) * 16777619u;
+    return h;
+}
+
+bool apply_object_blob(fopAc_ac_c* actor, const uint8_t* in, size_t len) {
+    BlobRun runs[kMaxBlobRuns];
+    const int count = clipped_runs(actor, runs, kBlobCap);
+    size_t total = 0;
+    for (int i = 0; i < count; ++i) total += runs[i].end - runs[i].begin;
+
+    if (count == 0 || total != len) return false;
+    size_t at = 0;
+    for (int i = 0; i < count; ++i) {
+        const size_t n = runs[i].end - runs[i].begin;
+        std::memcpy(reinterpret_cast<uint8_t*>(actor) + runs[i].begin, in + at, n);
+        at += n;
+    }
+    return true;
+}
+
+void apply_object_phase(fopAc_ac_c* actor, const int16_t* in, int count) {
+    const s16 name = fopAcM_GetName(actor);
+    if (name == fpcNm_Obj_Lv6FuriTrap_e && count >= 1) {
+        static_cast<daLv6FurikoTrap_c*>(actor)->mAngle = in[0];
+        return;
+    }
+    if (name == fpcNm_Obj_Lv6SwTurn_e && count >= 6) {
+        auto* sw = static_cast<daObjLv6SwTurn_c*>(actor);
+        sw->mMode = static_cast<u8>(in[0]);
+        sw->unk5B0 = in[1];
+        sw->unk5B8 = in[2];
+        sw->unk5BC = static_cast<s8>(in[3]);
+        sw->unk5B6 = in[4];
+        sw->unk5B2 = in[5];
+        return;
+    }
+    if (name == fpcNm_Obj_SwTurn_e && count >= 7) {
+        auto* sw = static_cast<daObjSwTurn_c*>(actor);
+
+        if (in[0] == daObjSwTurn_c::MODE_ROTATE && sw->mMode != daObjSwTurn_c::MODE_ROTATE) {
+            sw->field_0x5c0 = in[3];
+            sw->init_modeRotate();
+        }
+        sw->mMode = static_cast<u8>(in[0]);
+        sw->field_0x5c4 = in[1];
+        sw->field_0x5b8 = in[2];
+        sw->field_0x5c0 = in[3];
+        sw->field_0x5cc = static_cast<u16>(in[4]);
+        sw->field_0x5ba = in[5];
+        sw->mRevCount = static_cast<u16>(in[6]);
+    }
 }
 
 void forget_tracked_positions() {
@@ -2504,6 +2734,7 @@ struct Mover {
     int tail = 0;
 
     cXyz sentPos;
+    csXyz sentAngle;
     bool everSent = false;
 };
 Mover s_movers[kMaxMovers];
@@ -2516,13 +2747,17 @@ PendingMove s_pendingMoves[kMaxMovers];
 
 uint32_t s_movesSent = 0;
 uint32_t s_movesApplied = 0;
+uint32_t s_movesReceived = 0;
 int s_diagMovers = 0;
+
+void reset_animals_and_torches();
 
 void reset_movers() {
     for (int i = 0; i < kMaxMovers; ++i) {
         s_movers[i] = Mover{};
         s_pendingMoves[i] = PendingMove{};
     }
+    reset_animals_and_torches();
 
     forget_tracked_positions();
 }
@@ -2569,6 +2804,32 @@ bool nearest_to(const cXyz& pos) {
         if (d == ours && static_cast<uint8_t>(i) < us) return false;
     }
     return true;
+}
+
+bool runs_by_itself(fopAc_ac_c* actor) {
+    if (is_timed_hazard(actor)) return true;
+    switch (fopAcM_GetName(actor)) {
+    case fpcNm_Obj_Lv6TogeTrap_e:
+    case fpcNm_Obj_Lv6TogeRoll_e:
+    case fpcNm_Obj_RotTrap_e:
+    case fpcNm_Obj_TogeTrap_e:
+    case fpcNm_Obj_Lv6FuriTrap_e:
+    case fpcNm_Obj_WoodPendulum_e:
+    case fpcNm_Obj_Lv8KekkaiTrap_e:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool mechanism_is_ours(fopAc_ac_c* actor, int8_t room) {
+    if (coop_player_paused(coop_net_local_id())) return false;
+
+    if (!runs_by_itself(actor)) return nearest_to(actor->home.pos);
+    if (room >= 0 && room < kRooms && s_rooms.owner[room] != kRoomOwnerNone) {
+        return s_rooms.owner[room] == our_owner_id();
+    }
+    return nearest_to(actor->home.pos);
 }
 
 const int kPushQuietTicks = 24;
@@ -2670,6 +2931,9 @@ void capture_block_pushes(BreakableList& list) {
     }
 }
 
+bool carry_driven_elsewhere(int8_t room, uint32_t key);
+bool carry_driven_here(int8_t room, uint32_t key);
+
 void capture_moved_objects(BreakableList& list) {
     int live = 0;
     for (int i = 0; i < kMaxMovers; ++i) {
@@ -2684,11 +2948,26 @@ void capture_moved_objects(BreakableList& list) {
         const uint32_t key = list.keys[i];
 
         if (is_pushable_block(actor)) continue;
-        cXyz* last = remember_position(room, key, actor->current.pos);
+
+        if (carry_driven_elsewhere(room, key)) continue;
+        ObjPos* last = remember_position(room, key, actor->current.pos, actor->shape_angle);
         if (last == nullptr) continue;
-        const cXyz step = actor->current.pos - *last;
-        *last = actor->current.pos;
-        if (step.abs() < kMoverEpsilon) continue;
+        const cXyz step = actor->current.pos - last->pos;
+        const int turn = angle_step(actor->shape_angle, last->angle);
+        last->pos = actor->current.pos;
+        last->angle = actor->shape_angle;
+
+        bool stateChanged = false;
+        if (s_tick % 3 == 0 && has_blob(actor)) {
+            const uint32_t h = blob_hash(actor);
+            if (h != last->stateHash) {
+                last->stateHash = h;
+                stateChanged = true;
+            }
+        }
+        if (step.abs() < kMoverEpsilon && turn < kMoverAngleEpsilon && !stateChanged) continue;
+
+        if (is_timed_hazard(actor) && s_tick % 30 != 0) continue;
 
         Mover* m = find_mover(room, key);
         if (m == nullptr) {
@@ -2698,16 +2977,24 @@ void capture_moved_objects(BreakableList& list) {
         }
         m->lastPos = actor->current.pos;
         m->tail = kMoverTailTicks;
-        if (!nearest_to(actor->current.pos)) continue;
+        const bool mechanism = has_blob(actor);
+        if (mechanism ? !mechanism_is_ours(actor, room) : !nearest_to(actor->current.pos)) continue;
         daAlink_c* alink = daAlink_getAlinkActorClass();
+
         if (alink == nullptr ||
-            (actor->current.pos - alink->current.pos).abs() > kMoverRelayRange)
+            (!mechanism && (actor->current.pos - alink->current.pos).abs() > kMoverRelayRange))
         {
             continue;
         }
 
-        if (m->everSent && (actor->current.pos - m->sentPos).abs() < kMoverEpsilon) continue;
+        if (!stateChanged && m->everSent &&
+            (actor->current.pos - m->sentPos).abs() < kMoverEpsilon &&
+            angle_step(actor->shape_angle, m->sentAngle) < kMoverAngleEpsilon)
+        {
+            continue;
+        }
         m->sentPos = actor->current.pos;
+        m->sentAngle = actor->shape_angle;
         m->everSent = true;
 
         MsgObjectMove msg{};
@@ -2719,9 +3006,61 @@ void capture_moved_objects(BreakableList& list) {
         msg.angle[0] = actor->shape_angle.x;
         msg.angle[1] = actor->shape_angle.y;
         msg.angle[2] = actor->shape_angle.z;
+        msg.phaseCount = static_cast<uint8_t>(object_phase(actor, msg.phase));
+        msg.blobLen = static_cast<uint8_t>(object_blob(actor, msg.blob, sizeof(msg.blob)));
+        msg.procName = fopAcM_GetName(actor);
+        msg.homeAngleY = actor->home.angle.y;
+        msg.setID = actor->setID;
+        msg.param = fopAcM_GetParam(actor);
+        msg.home[0] = actor->home.pos.x;
+        msg.home[1] = actor->home.pos.y;
+        msg.home[2] = actor->home.pos.z;
         coop_net_send(kMsgObjectMove, &msg, sizeof(msg));
         ++s_movesSent;
     }
+}
+
+fopAc_ac_c* find_by_placement(BreakableList& list, const MsgObjectMove& msg) {
+    const cXyz home(msg.home[0], msg.home[1], msg.home[2]);
+    fopAc_ac_c* best = nullptr;
+    int bestIdx = -1;
+    f32 bestDist = 30.0f;
+    for (int i = 0; i < list.count; ++i) {
+        fopAc_ac_c* a = list.actors[i];
+        if (list.rooms[i] != msg.room || fopAcM_GetName(a) != msg.procName) continue;
+        const f32 d = (a->home.pos - home).abs();
+        if (d < bestDist) {
+            bestDist = d;
+            best = a;
+            bestIdx = i;
+        }
+    }
+    static uint32_t s_logged[32] = {};
+    static int s_loggedNext = 0;
+    bool seen = false;
+    for (uint32_t k : s_logged) seen = seen || k == msg.key;
+    if (!seen) {
+        s_logged[s_loggedNext] = msg.key;
+        s_loggedNext = (s_loggedNext + 1) % 32;
+        if (best == nullptr) {
+            coop_log::warn("coop_mod: [OBJ] no match for key {:#010x} room={} proc={} param={:#x} "
+                           "setID={} home=({:.1f},{:.1f},{:.1f}) angY={}",
+                msg.key, static_cast<int>(msg.room), static_cast<int>(msg.procName), msg.param,
+                static_cast<int>(msg.setID), msg.home[0], msg.home[1], msg.home[2],
+                static_cast<int>(msg.homeAngleY));
+        } else {
+            coop_log::warn("coop_mod: [OBJ] key differs for proc={} room={}: theirs {:#010x} "
+                           "(param={:#x} setID={} home=({:.1f},{:.1f},{:.1f}) angY={}) ours {:#010x} "
+                           "(param={:#x} setID={} home=({:.1f},{:.1f},{:.1f}) angY={}) - matched by "
+                           "placement",
+                static_cast<int>(msg.procName), static_cast<int>(msg.room), msg.key, msg.param,
+                static_cast<int>(msg.setID), msg.home[0], msg.home[1], msg.home[2],
+                static_cast<int>(msg.homeAngleY), list.keys[bestIdx], fopAcM_GetParam(best),
+                static_cast<int>(best->setID), best->home.pos.x, best->home.pos.y,
+                best->home.pos.z, static_cast<int>(best->home.angle.y));
+        }
+    }
+    return best;
 }
 
 void apply_pending_moves() {
@@ -2730,6 +3069,18 @@ void apply_pending_moves() {
         if (s_pendingMoves[i].used) { any = true; break; }
     }
     if (!any) return;
+
+    static const void* s_seenLink = nullptr;
+    static uint32_t s_seenLinkTick = 0;
+    daAlink_c* me = daAlink_getAlinkActorClass();
+    if (me != s_seenLink) {
+        s_seenLink = me;
+        s_seenLinkTick = s_tick;
+    }
+    if (me == nullptr || dComIfGp_isEnableNextStage() || s_tick - s_seenLinkTick < 90) {
+        for (int i = 0; i < kMaxMovers; ++i) s_pendingMoves[i] = PendingMove{};
+        return;
+    }
 
     BreakableList list;
     collect_breakables(list);
@@ -2740,13 +3091,23 @@ void apply_pending_moves() {
         s_pendingMoves[i] = PendingMove{};
 
         fopAc_ac_c* actor = find_local_breakable(list, msg.room, msg.key);
+        if (actor == nullptr) actor = find_by_placement(list, msg);
         if (actor == nullptr) continue;
 
-        if (nearest_to(actor->current.pos)) continue;
+        if (fpcM_IsCreating(fopAcM_GetID(actor))) continue;
+
+        if (carry_driven_here(msg.room, msg.key)) continue;
+
+        if (has_blob(actor) ? mechanism_is_ours(actor, msg.room) : nearest_to(actor->current.pos)) {
+            continue;
+        }
 
         const cXyz want(msg.pos[0], msg.pos[1], msg.pos[2]);
         const cXyz gap = want - actor->current.pos;
-        if (gap.abs() > kMoverSnapDist) {
+
+        const bool stateCopied = msg.blobLen > 0 && msg.blobLen <= sizeof(msg.blob) &&
+                                 apply_object_blob(actor, msg.blob, msg.blobLen);
+        if (stateCopied || gap.abs() > kMoverSnapDist) {
             actor->current.pos = want;
             actor->old.pos = want;
         } else {
@@ -2757,6 +3118,9 @@ void apply_pending_moves() {
         actor->shape_angle.x = msg.angle[0];
         actor->shape_angle.y = msg.angle[1];
         actor->shape_angle.z = msg.angle[2];
+        if (msg.phaseCount > 0 && msg.phaseCount <= 8) {
+            apply_object_phase(actor, msg.phase, msg.phaseCount);
+        }
 
         Mover* m = find_mover(msg.room, msg.key);
         if (m == nullptr) m = add_mover(msg.room, msg.key, actor->current.pos);
@@ -2764,6 +3128,856 @@ void apply_pending_moves() {
         m->tail = kMoverTailTicks;
         ++s_movesApplied;
     }
+}
+
+bool carry_live() {
+    return session_live() && movers_enabled();
+}
+
+const int kMaxCarried = 8;
+const int kCarrySendEvery = 2;
+const int kCarryRestTicks = 15;
+const int kCarryFlightMaxTicks = 300;
+const int kCarryStaleTicks = 30;
+const int kCarryNudgeTicks = 30;
+
+enum CarriedPhase : uint8_t { kPhaseHeld, kPhaseFlying };
+
+struct Carried {
+    bool used = false;
+    fpc_ProcID id = fpcM_ERROR_PROCESS_ID_e;
+    uint32_t key = 0;
+    int8_t room = 0;
+    uint8_t phase = kPhaseHeld;
+    bool rodStatue = false;
+    cXyz lastPos;
+    int still = 0;
+    int flight = 0;
+};
+Carried s_carried[kMaxCarried];
+
+struct RemoteCarry {
+    bool used = false;
+    uint8_t from = kCoopNoPlayer;
+    MsgCarry msg{};
+    uint32_t heardTick = 0;
+    bool applied = false;
+
+    bool simulating = false;
+    cXyz simSpeed;
+    f32 simGravity = -3.0f;
+    int age = 0;
+    bool spin = false;
+
+    bool nudging = false;
+    cXyz nudgeTo;
+};
+RemoteCarry s_remoteCarry[kMaxCarried];
+
+void to_local(const cXyz& d, s16 yaw, f32* out) {
+    const f32 c = cM_scos(yaw);
+    const f32 sn = cM_ssin(yaw);
+    out[0] = d.x * c - d.z * sn;
+    out[1] = d.y;
+    out[2] = d.x * sn + d.z * c;
+}
+
+cXyz from_local(const f32* l, s16 yaw) {
+    const f32 c = cM_scos(yaw);
+    const f32 sn = cM_ssin(yaw);
+    return cXyz(l[0] * c + l[2] * sn, l[1], -l[0] * sn + l[2] * c);
+}
+
+void fill_carry(MsgCarry& msg, const Carried& c, fopAc_ac_c* actor, uint8_t state) {
+    msg.key = c.key;
+    msg.room = c.room;
+    msg.state = state;
+    if (actor == nullptr) return;
+    msg.pos[0] = actor->current.pos.x;
+    msg.pos[1] = actor->current.pos.y;
+    msg.pos[2] = actor->current.pos.z;
+    msg.angle[0] = actor->shape_angle.x;
+    msg.angle[1] = actor->shape_angle.y;
+    msg.angle[2] = actor->shape_angle.z;
+}
+
+void send_held(const Carried& c, fopAc_ac_c* actor, daAlink_c* alink) {
+    MsgCarry msg{};
+    fill_carry(msg, c, actor, kCarryHeld);
+    if (c.rodStatue) {
+
+        msg.flags |= kCarryFlagStatue;
+        if (fopAcM_GetName(actor) == fpcNm_CSTATUE_e) {
+            auto* statue = static_cast<daCstatue_c*>(actor);
+            msg.statueAnim = statue->mCurrentAnim;
+            msg.statueFrame = statue->mpMorf != nullptr ? statue->mpMorf->getFrame() : 0.0f;
+        } else if (fopAcM_GetName(actor) == fpcNm_CSTAF_e) {
+            auto* statue = static_cast<daCstaF_c*>(actor);
+            msg.statueAnim = statue->m_action;
+            msg.statueFrame =
+                statue->mp_modelMorf != nullptr ? statue->mp_modelMorf->getFrame() : 0.0f;
+        }
+    } else if (alink != nullptr) {
+        msg.flags |= kCarryFlagRelative;
+        to_local(actor->current.pos - alink->current.pos, alink->shape_angle.y, msg.rel);
+        msg.relYaw = static_cast<int16_t>(actor->shape_angle.y - alink->shape_angle.y);
+    }
+    coop_net_send(kMsgCarry, &msg, sizeof(msg));
+}
+
+void send_simple(const Carried& c, fopAc_ac_c* actor, uint8_t state) {
+    MsgCarry msg{};
+    fill_carry(msg, c, actor, state);
+    if (state == kCarryThrown && actor != nullptr) {
+        msg.angle[1] = actor->current.angle.y;
+        msg.speedF = actor->speedF;
+        msg.speedY = actor->speed.y;
+        msg.gravity = actor->gravity;
+    }
+    coop_net_send(kMsgCarry, &msg, sizeof(msg));
+}
+
+struct CarriedNow {
+    fopAc_ac_c* actors[kMaxCarried];
+    int count = 0;
+};
+
+void* collect_carried_now(void* proc, void* data) {
+    auto* out = static_cast<CarriedNow*>(data);
+    auto* actor = static_cast<fopAc_ac_c*>(proc);
+    if (actor == nullptr || out->count >= kMaxCarried) return nullptr;
+    if (fopAcM_GetGroup(actor) == fopAc_PLAYER_e) return nullptr;
+
+    if (fopAcM_GetGroup(actor) == fopAc_ENEMY_e && enemies_setting_on() &&
+        fopAcM_GetName(actor) != fpcNm_NI_e) {
+        return nullptr;
+    }
+    if (fopAcM_checkCarryNow(actor) == 0) return nullptr;
+
+    if (fopAcM_GetName(actor) == kProcNbomb || fopAcM_GetName(actor) == fpcNm_BOOMERANG_e) {
+        return nullptr;
+    }
+    out->actors[out->count++] = actor;
+    return nullptr;
+}
+
+void capture_carried() {
+    CarriedNow now;
+    fopAcM_Search(collect_carried_now, &now);
+
+    daAlink_c* alink = daAlink_getAlinkActorClass();
+    fopAc_ac_c* statue = alink != nullptr ? alink->getCopyRodControllActor() : nullptr;
+
+    if (statue != nullptr && carry_driven_elsewhere(fopAcM_GetRoomNo(statue),
+                                 compute_placement_key(statue))) {
+        fopAc_ac_c* rod = alink->getCopyRodActor();
+        if (rod != nullptr) static_cast<daCrod_c*>(rod)->offControll();
+        coop_toast("Taken", "Someone else is controlling that statue.");
+        statue = nullptr;
+    }
+    if (statue != nullptr && now.count < kMaxCarried) {
+        bool listed = false;
+        for (int i = 0; i < now.count; ++i) listed = listed || now.actors[i] == statue;
+        if (!listed) now.actors[now.count++] = statue;
+    }
+
+    for (int i = 0; i < now.count; ++i) {
+        fopAc_ac_c* actor = now.actors[i];
+        const fpc_ProcID id = fopAcM_GetID(actor);
+        Carried* c = nullptr;
+        for (Carried& e : s_carried) {
+            if (e.used && e.id == id) c = &e;
+        }
+        if (c == nullptr) {
+            const uint32_t key = compute_placement_key(actor);
+            if (key == 0) continue;
+            for (Carried& e : s_carried) {
+                if (!e.used) { c = &e; break; }
+            }
+            if (c == nullptr) continue;
+            *c = Carried{};
+            c->used = true;
+            c->id = id;
+            c->key = key;
+            c->room = fopAcM_GetRoomNo(actor);
+            coop_log::info("coop_mod: [CARRY] picked up {:#x} (proc {})", key,
+                static_cast<int>(fopAcM_GetName(actor)));
+        }
+        c->phase = kPhaseHeld;
+        c->rodStatue = actor == statue;
+        c->still = 0;
+        c->flight = 0;
+        c->lastPos = actor->current.pos;
+    }
+
+    for (Carried& c : s_carried) {
+        if (!c.used) continue;
+        fopAc_ac_c* actor = fopAcM_SearchByID(c.id);
+        if (actor == nullptr) {
+
+            send_simple(c, nullptr, kCarryGone);
+            coop_log::info("coop_mod: [CARRY] {:#x} is gone", c.key);
+            c = Carried{};
+            continue;
+        }
+        const bool heldNow = c.rodStatue ? actor == statue : fopAcM_checkCarryNow(actor) != 0;
+        if (c.phase == kPhaseHeld && !heldNow) {
+            if (c.rodStatue) {
+
+                send_simple(c, actor, kCarryRest);
+                c = Carried{};
+                continue;
+            }
+
+            send_simple(c, actor, kCarryThrown);
+            c.phase = kPhaseFlying;
+            c.flight = 0;
+            c.still = 0;
+            c.lastPos = actor->current.pos;
+            continue;
+        }
+        if (c.phase == kPhaseFlying) {
+            ++c.flight;
+
+            if (s_tick % kCarrySendEvery == 0) {
+                MsgCarry spin{};
+                fill_carry(spin, c, actor, kCarryThrown);
+                spin.flags |= kCarryFlagSpin;
+                coop_net_send(kMsgCarry, &spin, sizeof(spin));
+            }
+            const f32 moved = (actor->current.pos - c.lastPos).abs();
+            c.still = moved < 1.0f ? c.still + 1 : 0;
+            c.lastPos = actor->current.pos;
+            if (c.still >= kCarryRestTicks || c.flight >= kCarryFlightMaxTicks) {
+                send_simple(c, actor, kCarryRest);
+                c = Carried{};
+            }
+            continue;
+        }
+        c.lastPos = actor->current.pos;
+        if (s_tick % kCarrySendEvery == 0) send_held(c, actor, alink);
+    }
+}
+
+bool carry_gone_live() {
+    return session_live() && breakables_enabled();
+}
+
+void carry_on_message(const MsgCarry& msg, uint8_t from) {
+    if (msg.state == kCarryGone ? !carry_gone_live() : !carry_live()) return;
+    if ((msg.flags & kCarryFlagSpin) != 0) {
+
+        for (RemoteCarry& r : s_remoteCarry) {
+            if (!r.used || r.msg.key != msg.key || r.msg.room != msg.room) continue;
+            if (r.msg.state != kCarryThrown || !r.applied) return;
+            r.msg.angle[0] = msg.angle[0];
+            r.msg.angle[1] = msg.angle[1];
+            r.msg.angle[2] = msg.angle[2];
+            r.spin = true;
+            r.heardTick = s_tick;
+        }
+        return;
+    }
+    RemoteCarry* slot = nullptr;
+    for (RemoteCarry& r : s_remoteCarry) {
+        if (r.used && r.msg.key == msg.key && r.msg.room == msg.room) slot = &r;
+    }
+    if (slot == nullptr) {
+        for (RemoteCarry& r : s_remoteCarry) {
+            if (!r.used) { slot = &r; break; }
+        }
+    }
+    if (slot == nullptr) {
+
+        slot = &s_remoteCarry[0];
+        for (RemoteCarry& r : s_remoteCarry) {
+            if (r.heardTick < slot->heardTick) slot = &r;
+        }
+    }
+    const bool keepFlight = slot->used && slot->simulating && msg.state == kCarryRest;
+    const bool wasSimulating = slot->simulating;
+    const cXyz simSpeed = slot->simSpeed;
+    const f32 simGravity = slot->simGravity;
+    *slot = RemoteCarry{};
+    slot->used = true;
+    slot->from = from;
+    slot->msg = msg;
+    slot->heardTick = s_tick;
+    if (keepFlight) {
+        slot->simulating = wasSimulating;
+        slot->simSpeed = simSpeed;
+        slot->simGravity = simGravity;
+    }
+}
+
+struct CarryFind {
+    uint32_t key;
+    int8_t room;
+    fopAc_ac_c* found;
+};
+
+void* find_by_placement_key(void* proc, void* data) {
+    auto* find = static_cast<CarryFind*>(data);
+    auto* actor = static_cast<fopAc_ac_c*>(proc);
+    if (actor == nullptr || find->found != nullptr) return nullptr;
+    if (fopAcM_GetGroup(actor) == fopAc_PLAYER_e) return nullptr;
+    if (fopAcM_GetRoomNo(actor) != find->room) return nullptr;
+    if (compute_placement_key(actor) != find->key) return nullptr;
+    find->found = actor;
+    return nullptr;
+}
+
+void place(fopAc_ac_c* actor, const cXyz& at) {
+    actor->current.pos = at;
+    actor->old.pos = at;
+    actor->speedF = 0.0f;
+    actor->speed.set(0.0f, 0.0f, 0.0f);
+}
+
+void apply_remote_carry() {
+    const bool full = carry_live();
+    daAlink_c* me = daAlink_getAlinkActorClass();
+    for (RemoteCarry& r : s_remoteCarry) {
+        if (!r.used) continue;
+        const MsgCarry& msg = r.msg;
+        if (!full && msg.state != kCarryGone) {
+            r = RemoteCarry{};
+            continue;
+        }
+        if (msg.state == kCarryHeld && s_tick - r.heardTick > kCarryStaleTicks) {
+            r = RemoteCarry{};
+            continue;
+        }
+        CarryFind find{msg.key, msg.room, nullptr};
+        fopAcM_Search(find_by_placement_key, &find);
+        fopAc_ac_c* actor = find.found;
+        if (actor == nullptr) {
+
+            if (msg.state != kCarryHeld) r = RemoteCarry{};
+            continue;
+        }
+
+        if (fopAcM_checkCarryNow(actor) != 0 ||
+            (me != nullptr && me->getCopyRodControllActor() == actor)) {
+            if (msg.state != kCarryHeld) r = RemoteCarry{};
+            continue;
+        }
+        const bool isPot = fopAcM_GetName(actor) == fpcNm_Obj_Carry_e;
+
+        switch (msg.state) {
+        case kCarryGone:
+            coop_log::info("coop_mod: [CARRY] {:#x} broke in their game - breaking ours", msg.key);
+
+            if (isPot) static_cast<daObjCarry_c*>(actor)->obj_break(true, true, true);
+            fopAcM_delete(actor);
+            r = RemoteCarry{};
+            break;
+
+        case kCarryHeld: {
+            if ((msg.flags & kCarryFlagRelative) != 0) {
+
+                f32 px = 0.0f, py = 0.0f, pz = 0.0f;
+                s16 yaw = 0;
+                if (puppet_hook_get_pose_of(r.from, &px, &py, &pz, &yaw, nullptr, nullptr)) {
+                    place(actor, cXyz(px, py, pz) + from_local(msg.rel, yaw));
+                    actor->shape_angle.x = msg.angle[0];
+                    actor->shape_angle.y = static_cast<s16>(yaw + msg.relYaw);
+                    actor->shape_angle.z = msg.angle[2];
+                    actor->current.angle.y = actor->shape_angle.y;
+                    break;
+                }
+            }
+            place(actor, cXyz(msg.pos[0], msg.pos[1], msg.pos[2]));
+            actor->shape_angle.x = msg.angle[0];
+            actor->shape_angle.y = msg.angle[1];
+            actor->shape_angle.z = msg.angle[2];
+            actor->current.angle.y = msg.angle[1];
+            break;
+        }
+
+        case kCarryThrown:
+            if (r.spin) {
+
+                r.spin = false;
+                actor->shape_angle.x = msg.angle[0];
+                actor->shape_angle.y = msg.angle[1];
+                actor->shape_angle.z = msg.angle[2];
+            }
+            if (r.applied) {
+
+                if (r.simulating && ++r.age < kCarryFlightMaxTicks) {
+                    actor->current.pos += r.simSpeed;
+                    r.simSpeed.y = std::max(r.simSpeed.y + r.simGravity, -100.0f);
+                }
+                break;
+            }
+            r.applied = true;
+            actor->current.pos.set(msg.pos[0], msg.pos[1], msg.pos[2]);
+            actor->old.pos = actor->current.pos;
+            actor->current.angle.y = msg.angle[1];
+            actor->speedF = msg.speedF;
+            actor->speed.y = msg.speedY;
+            if (isPot) {
+
+                static_cast<daObjCarry_c*>(actor)->mode_init_drop(0);
+            } else {
+                r.simulating = true;
+                r.simSpeed.set(msg.speedF * cM_ssin(msg.angle[1]), msg.speedY,
+                    msg.speedF * cM_scos(msg.angle[1]));
+                r.simGravity = msg.gravity < 0.0f ? msg.gravity : -3.0f;
+            }
+            break;
+
+        case kCarryRest: {
+
+            const cXyz to(msg.pos[0], msg.pos[1], msg.pos[2]);
+            if (!r.nudging) {
+                r.nudging = true;
+                r.age = 0;
+                r.simulating = false;
+                r.nudgeTo = to;
+            }
+            const cXyz gap = r.nudgeTo - actor->current.pos;
+            if (gap.abs() < 2.0f || ++r.age >= kCarryNudgeTicks) {
+                actor->current.pos = r.nudgeTo;
+                actor->old.pos = r.nudgeTo;
+                r = RemoteCarry{};
+                break;
+            }
+            actor->current.pos += gap * 0.25f;
+            break;
+        }
+
+        default:
+            r = RemoteCarry{};
+            break;
+        }
+    }
+}
+
+bool carry_driven_elsewhere(int8_t room, uint32_t key) {
+    for (const RemoteCarry& r : s_remoteCarry) {
+        if (r.used && r.msg.room == room && r.msg.key == key) return true;
+    }
+    return false;
+}
+
+bool is_torch(fopAc_ac_c* actor) {
+    switch (fopAcM_GetName(actor)) {
+    case fpcNm_Obj_Lv1Cdl00_e:
+    case fpcNm_Obj_Lv1Cdl01_e:
+    case fpcNm_Obj_Lv2Candle_e:
+    case fpcNm_Obj_Lv3Candle_e:
+    case fpcNm_Obj_FireWood_e:
+    case fpcNm_Obj_FireWood2_e:
+        return true;
+    default:
+        return false;
+    }
+}
+
+uint8_t* torch_lit_flag(fopAc_ac_c* actor) {
+    switch (fopAcM_GetName(actor)) {
+    case fpcNm_Obj_Lv1Cdl00_e:
+        return reinterpret_cast<uint8_t*>(&static_cast<daLv1Cdl00_c*>(actor)->mIsLit);
+    case fpcNm_Obj_Lv1Cdl01_e:
+        return reinterpret_cast<uint8_t*>(&static_cast<daLv1Cdl01_c*>(actor)->mIsLit);
+    case fpcNm_Obj_Lv2Candle_e:
+        return reinterpret_cast<uint8_t*>(&static_cast<daLv2Candle_c*>(actor)->mIsLit);
+    case fpcNm_Obj_Lv3Candle_e:
+        return &static_cast<daLv3Candle_c*>(actor)->mIsLit;
+    case fpcNm_Obj_FireWood_e:
+        return &static_cast<daFireWood_c*>(actor)->mIsLit;
+    case fpcNm_Obj_FireWood2_e:
+        return &static_cast<daFireWood2_c*>(actor)->mIsLit;
+    default:
+        return nullptr;
+    }
+}
+
+struct TorchSeen {
+    bool used = false;
+    fpc_ProcID id = fpcM_ERROR_PROCESS_ID_e;
+    bool lit = false;
+};
+const int kMaxTorches = 48;
+TorchSeen s_torches[kMaxTorches];
+
+struct TorchScan {
+    fopAc_ac_c* actors[kMaxTorches];
+    int count = 0;
+};
+
+void* scan_torches(void* proc, void* data) {
+    auto* out = static_cast<TorchScan*>(data);
+    auto* actor = static_cast<fopAc_ac_c*>(proc);
+    if (actor == nullptr || out->count >= kMaxTorches || !is_torch(actor)) return nullptr;
+    if (fpcM_IsCreating(fopAcM_GetID(actor))) return nullptr;
+    out->actors[out->count++] = actor;
+    return nullptr;
+}
+
+TorchSeen* torch_slot(fpc_ProcID id, bool add) {
+    TorchSeen* free = nullptr;
+    for (TorchSeen& t : s_torches) {
+        if (t.used && t.id == id) return &t;
+        if (!t.used && free == nullptr) free = &t;
+    }
+    if (!add || free == nullptr) return nullptr;
+    *free = TorchSeen{};
+    free->used = true;
+    free->id = id;
+    return free;
+}
+
+void capture_torches() {
+    TorchScan scan;
+    fopAcM_Search(scan_torches, &scan);
+
+    for (TorchSeen& t : s_torches) {
+        if (t.used && fopAcM_SearchByID(t.id) == nullptr) t = TorchSeen{};
+    }
+    for (int i = 0; i < scan.count; ++i) {
+        fopAc_ac_c* torch = scan.actors[i];
+        const uint8_t* flag = torch_lit_flag(torch);
+        if (flag == nullptr) continue;
+        const bool lit = *flag != 0;
+        TorchSeen* seen = torch_slot(fopAcM_GetID(torch), false);
+        if (seen == nullptr) {
+            seen = torch_slot(fopAcM_GetID(torch), true);
+            if (seen != nullptr) seen->lit = lit;
+            continue;
+        }
+        if (seen->lit == lit) continue;
+        seen->lit = lit;
+        const uint32_t key = compute_placement_key(torch);
+        if (key == 0) continue;
+        MsgTorch msg{};
+        msg.key = key;
+        msg.room = static_cast<int8_t>(fopAcM_GetRoomNo(torch));
+        msg.lit = lit ? 1 : 0;
+        msg.procName = fopAcM_GetName(torch);
+        msg.home[0] = torch->home.pos.x;
+        msg.home[1] = torch->home.pos.y;
+        msg.home[2] = torch->home.pos.z;
+        coop_net_send(kMsgTorch, &msg, sizeof(msg));
+        coop_log::info("coop_mod: [TORCH] {:#010x} {} here", key, lit ? "lit" : "put out");
+    }
+}
+
+void torch_on_message(const MsgTorch& msg) {
+    TorchScan scan;
+    fopAcM_Search(scan_torches, &scan);
+    const cXyz home(msg.home[0], msg.home[1], msg.home[2]);
+    for (int i = 0; i < scan.count; ++i) {
+        fopAc_ac_c* torch = scan.actors[i];
+        if (fopAcM_GetRoomNo(torch) != msg.room || fopAcM_GetName(torch) != msg.procName) continue;
+        if (compute_placement_key(torch) != msg.key && (torch->home.pos - home).abs() > 30.0f) {
+            continue;
+        }
+        uint8_t* flag = torch_lit_flag(torch);
+        if (flag == nullptr) return;
+        *flag = msg.lit;
+
+        TorchSeen* seen = torch_slot(fopAcM_GetID(torch), true);
+        if (seen != nullptr) seen->lit = msg.lit != 0;
+        mDoAud_seStart(msg.lit ? Z2SE_OBJ_FIRE_IGNITION : Z2SE_OBJ_FIRE_OFF, &torch->current.pos, 0,
+            dComIfGp_getReverb(fopAcM_GetRoomNo(torch)));
+        return;
+    }
+}
+
+bool is_animal(fopAc_ac_c* actor) {
+    const s16 name = fopAcM_GetName(actor);
+    return name == fpcNm_NI_e || name == fpcNm_COW_e;
+}
+
+struct AnimalSteer {
+    bool used = false;
+    uint32_t key = 0;
+    int8_t room = 0;
+    int16_t procName = 0;
+    cXyz home;
+    cXyz pos;
+    int16_t angleY = 0;
+    f32 speedF = 0.0f;
+    f32 theirDist = 0.0f;
+    uint32_t heardTick = 0;
+};
+const int kMaxAnimals = 48;
+AnimalSteer s_animals[kMaxAnimals];
+const uint32_t kAnimalFreshTicks = 30;
+const f32 kAnimalSnapDist = 400.0f;
+const f32 kAnimalPull = 0.15f;
+
+struct AnimalScan {
+    fopAc_ac_c* actors[kMaxAnimals];
+    int count = 0;
+};
+
+void* scan_animals(void* proc, void* data) {
+    auto* out = static_cast<AnimalScan*>(data);
+    auto* actor = static_cast<fopAc_ac_c*>(proc);
+    if (actor == nullptr || out->count >= kMaxAnimals || !is_animal(actor)) return nullptr;
+    if (fpcM_IsCreating(fopAcM_GetID(actor))) return nullptr;
+    out->actors[out->count++] = actor;
+    return nullptr;
+}
+
+AnimalSteer* animal_steer_for(fopAc_ac_c* actor, uint32_t key) {
+    const int8_t room = static_cast<int8_t>(fopAcM_GetRoomNo(actor));
+    for (AnimalSteer& a : s_animals) {
+        if (!a.used || a.room != room || a.procName != fopAcM_GetName(actor)) continue;
+        if (a.key == key || (a.home - actor->home.pos).abs() < 30.0f) return &a;
+    }
+    return nullptr;
+}
+
+void tick_animals() {
+    AnimalScan scan;
+    fopAcM_Search(scan_animals, &scan);
+    daAlink_c* me = daAlink_getAlinkActorClass();
+    if (me == nullptr) return;
+    for (int i = 0; i < scan.count; ++i) {
+        fopAc_ac_c* animal = scan.actors[i];
+        if (fopAcM_checkCarryNow(animal) != 0) continue;
+        const uint32_t key = compute_placement_key(animal);
+        if (key == 0) continue;
+
+        if (carry_driven_elsewhere(static_cast<int8_t>(fopAcM_GetRoomNo(animal)), key)) continue;
+        AnimalSteer* steer = animal_steer_for(animal, key);
+        const bool fresh = steer != nullptr && s_tick - steer->heardTick <= kAnimalFreshTicks;
+
+        const cXyz shared = fresh ? steer->pos : animal->current.pos;
+        const f32 mine = (shared - me->current.pos).abs();
+        bool ours = nearest_to(shared);
+
+        if (fresh && steer->theirDist < mine) ours = false;
+
+        if (ours) {
+            if (s_tick % 6 != 0) continue;
+            MsgAnimal msg{};
+            msg.key = key;
+            msg.room = static_cast<int8_t>(fopAcM_GetRoomNo(animal));
+            msg.procName = fopAcM_GetName(animal);
+            msg.home[0] = animal->home.pos.x;
+            msg.home[1] = animal->home.pos.y;
+            msg.home[2] = animal->home.pos.z;
+            msg.pos[0] = animal->current.pos.x;
+            msg.pos[1] = animal->current.pos.y;
+            msg.pos[2] = animal->current.pos.z;
+            msg.angleY = animal->shape_angle.y;
+            msg.speedF = animal->speedF;
+            msg.dist = (animal->current.pos - me->current.pos).abs();
+            coop_net_send(kMsgAnimal, &msg, sizeof(msg));
+            continue;
+        }
+        if (!fresh) continue;
+
+        const cXyz gap = steer->pos - animal->current.pos;
+        if (gap.abs() > kAnimalSnapDist) {
+            animal->current.pos = steer->pos;
+            animal->old.pos = steer->pos;
+        } else {
+            animal->current.pos += gap * kAnimalPull;
+        }
+        const s16 turn = static_cast<s16>(steer->angleY - animal->shape_angle.y);
+        animal->shape_angle.y = static_cast<s16>(animal->shape_angle.y + turn / 4);
+        animal->current.angle.y = animal->shape_angle.y;
+    }
+}
+
+void animal_on_message(const MsgAnimal& msg) {
+    AnimalSteer* slot = nullptr;
+    AnimalSteer* free = nullptr;
+    AnimalSteer* oldest = &s_animals[0];
+    const cXyz home(msg.home[0], msg.home[1], msg.home[2]);
+    for (AnimalSteer& a : s_animals) {
+        if (a.used && a.room == msg.room && a.procName == msg.procName &&
+            (a.key == msg.key || (a.home - home).abs() < 30.0f)) {
+            slot = &a;
+            break;
+        }
+        if (!a.used && free == nullptr) free = &a;
+        if (a.heardTick < oldest->heardTick) oldest = &a;
+    }
+    if (slot == nullptr) slot = free != nullptr ? free : oldest;
+    slot->used = true;
+    slot->key = msg.key;
+    slot->room = msg.room;
+    slot->procName = msg.procName;
+    slot->home = home;
+    slot->pos.set(msg.pos[0], msg.pos[1], msg.pos[2]);
+    slot->angleY = msg.angleY;
+    slot->speedF = msg.speedF;
+    slot->theirDist = msg.dist;
+    slot->heardTick = s_tick;
+}
+
+void reset_animals_and_torches() {
+    for (AnimalSteer& a : s_animals) a = AnimalSteer{};
+    for (TorchSeen& t : s_torches) t = TorchSeen{};
+}
+
+bool carry_driven_here(int8_t room, uint32_t key) {
+    for (const Carried& c : s_carried) {
+        if (c.used && c.room == room && c.key == key) return true;
+    }
+    return false;
+}
+
+const RemoteCarry* remote_statue(fopAc_ac_c* statue) {
+    const int8_t room = fopAcM_GetRoomNo(statue);
+    uint32_t key = 0;
+    for (const RemoteCarry& r : s_remoteCarry) {
+        if (!r.used || r.msg.state != kCarryHeld || (r.msg.flags & kCarryFlagStatue) == 0) continue;
+        if (r.msg.room != room) continue;
+        if (key == 0) key = compute_placement_key(statue);
+        if (r.msg.key == key) return &r;
+    }
+    return nullptr;
+}
+
+HookAction on_statue_set_anime(ModContext*, void* args, void*, void*) {
+    auto* statue = mods::arg<daCstatue_c*>(args, 0);
+    if (statue == nullptr || !carry_live()) return HOOK_CONTINUE;
+    const RemoteCarry* r = remote_statue(statue);
+    if (r == nullptr) return HOOK_CONTINUE;
+
+    const uint8_t want = r->msg.statueAnim;
+    if (want < 7 && want != statue->mCurrentAnim && statue->mpMorf != nullptr) {
+        auto* anm = static_cast<J3DAnmTransform*>(dComIfG_getObjectRes(
+            statue->mResName, daCstatue_c::m_bckIdxTable[statue->mType][want]));
+        if (anm != nullptr) {
+
+            const f32 start = want == 0 ? anm->getFrameMax() - 0.001f : 0.0f;
+            f32 speed = 1.0f;
+            if (statue->mSph != nullptr) {
+                if (want == 2) speed = 5.0f;
+                else if (want == 6 || want == 1) speed = 3.0f;
+            }
+            statue->mpMorf->setAnm(anm, -1, 3.0f, speed, start, -1.0f);
+            statue->mpMorf->setFrameF(start);
+            statue->mCurrentAnim = want;
+        }
+    }
+
+    if (want == statue->mCurrentAnim && statue->mpMorf != nullptr && want != 0) {
+        const f32 ours = statue->mpMorf->getFrame();
+        const f32 theirs = r->msg.statueFrame;
+        if (theirs < ours - 1.0f || theirs > ours + 6.0f) statue->mpMorf->setFrameF(theirs);
+    }
+
+    if ((statue->mStateFlg0 & 0x4) == 0) {
+        statue->initStartBrkBtk();
+    } else if (statue->mType != daCstatueType_Small) {
+        statue->mAnim1.play();
+    }
+    if (statue->mType == daCstatueType_Normal2) statue->mAnim1.play();
+    statue->mAnim2.play();
+    return HOOK_SKIP_ORIGINAL;
+}
+
+const int kMaxSeenCarryables = 64;
+struct SeenCarryable {
+    bool used = false;
+    fpc_ProcID id = fpcM_ERROR_PROCESS_ID_e;
+    uint32_t key = 0;
+    int8_t room = 0;
+    cXyz pos;
+    uint32_t seenTick = 0;
+};
+SeenCarryable s_seenCarryables[kMaxSeenCarryables];
+uint32_t s_brokenSent = 0;
+
+void capture_broken_carryables(BreakableList& list) {
+
+    for (int i = 0; i < list.count; ++i) {
+        fopAc_ac_c* actor = list.actors[i];
+        if (fopAcM_GetName(actor) != fpcNm_Obj_Carry_e) continue;
+        const fpc_ProcID id = fopAcM_GetID(actor);
+        SeenCarryable* slot = nullptr;
+        SeenCarryable* free = nullptr;
+        for (SeenCarryable& e : s_seenCarryables) {
+            if (e.used && e.id == id) { slot = &e; break; }
+            if (!e.used && free == nullptr) free = &e;
+        }
+        if (slot == nullptr) {
+            if (free == nullptr) continue;
+            slot = free;
+            *slot = SeenCarryable{};
+            slot->used = true;
+            slot->id = id;
+            slot->key = list.keys[i];
+            slot->room = list.rooms[i];
+        }
+        slot->pos = actor->current.pos;
+        slot->seenTick = s_tick;
+    }
+
+    for (SeenCarryable& e : s_seenCarryables) {
+        if (!e.used || e.seenTick == s_tick) continue;
+        const bool justGone = e.seenTick + 1 == s_tick;
+        const SeenCarryable was = e;
+        e = SeenCarryable{};
+        if (!justGone) continue;
+
+        if (fopAcM_SearchByID(was.id) != nullptr) continue;
+
+        if (was.room < 0 || !dComIfGp_roomControl_checkRoomDisp(was.room)) continue;
+        if (dComIfGp_isEnableNextStage()) continue;
+
+        if (carry_driven_here(was.room, was.key)) continue;
+
+        if (carry_driven_elsewhere(was.room, was.key)) continue;
+        if (!nearest_to(was.pos)) continue;
+        MsgCarry msg{};
+        msg.key = was.key;
+        msg.room = was.room;
+        msg.state = kCarryGone;
+        msg.pos[0] = was.pos.x;
+        msg.pos[1] = was.pos.y;
+        msg.pos[2] = was.pos.z;
+        coop_net_send(kMsgCarry, &msg, sizeof(msg));
+        ++s_brokenSent;
+        coop_log::info("coop_mod: [CARRY] pot {:#x} broke here - telling the others", was.key);
+    }
+}
+
+HookAction on_small_statue_set_anime(ModContext*, void* args, void*, void*) {
+    auto* statue = mods::arg<daCstaF_c*>(args, 0);
+    if (statue == nullptr || !carry_live()) return HOOK_CONTINUE;
+    const RemoteCarry* r = remote_statue(statue);
+    if (r == nullptr) return HOOK_CONTINUE;
+
+    const uint8_t want = r->msg.statueAnim;
+    if (want < 4 && want != statue->m_action && statue->mp_modelMorf != nullptr) {
+        auto* anm = static_cast<J3DAnmTransform*>(dComIfG_getObjectRes(
+            statue->m_arcName, daCstaF_c::m_bckIdxTable[statue->m_type].idx[want]));
+        if (anm != nullptr) {
+
+            statue->mp_modelMorf->setAnm(anm, -1, 3.0f, want == 0 ? 0.0f : 1.0f, 0.0f, -1.0f);
+            statue->m_action = want;
+        }
+    }
+    if (want == statue->m_action && statue->mp_modelMorf != nullptr && want != 0) {
+        const f32 ours = statue->mp_modelMorf->getFrame();
+        const f32 theirs = r->msg.statueFrame;
+        if (theirs < ours - 1.0f || theirs > ours + 6.0f) statue->mp_modelMorf->setFrameF(theirs);
+    }
+    if (!statue->m_isStartBrkBtkInit) {
+        statue->initStartBrkBtk();
+    } else {
+        statue->m_btk.play();
+    }
+    statue->m_brk.play();
+    return HOOK_SKIP_ORIGINAL;
+}
+
+void reset_carry() {
+    for (Carried& c : s_carried) c = Carried{};
+    for (RemoteCarry& r : s_remoteCarry) r = RemoteCarry{};
+    for (SeenCarryable& e : s_seenCarryables) e = SeenCarryable{};
 }
 
 void capture_landed_object_hits(BreakableList& list) {
@@ -2922,6 +4136,11 @@ void on_collision_move_post(ModContext*, void*, void*, void*) {
     rearm_disarmed_attacks();
     const bool enemiesOn = enemies_enabled_now();
     const bool objectsOn = objects_live();
+    if (carry_live()) {
+        capture_carried();
+        capture_torches();
+        tick_animals();
+    }
     if (!enemiesOn && !objectsOn) return;
     const bool hits = real_hits_enabled();
     EnemyList list;
@@ -2930,6 +4149,7 @@ void on_collision_move_post(ModContext*, void*, void*, void*) {
         collect_enemies_and_breakables(list, breakables);
         if (enemiesOn && hits) capture_landed_hits(list);
         if (hits && breakables_enabled()) capture_landed_object_hits(breakables);
+        if (breakables_enabled()) capture_broken_carryables(breakables);
 
         if (movers_enabled()) {
             capture_block_pushes(breakables);
@@ -3034,9 +4254,10 @@ void log_status(const EnemyList* list) {
         s_diagInstructed);
 
     coop_log::info("coop_mod: [OBJ] on={} objects={} blows(sent={} replayed={} lost={}) "
-                    "moving={} moves(sent={} applied={}) pushes(sent={} applied={})",
+                    "moving={} moves(sent={} received={} applied={}) pushes(sent={} applied={})",
         breakables_enabled() ? 1 : 0, s_diagBreakables, s_objHitsSent, s_objHitsApplied,
-        s_objHitsLost, s_diagMovers, s_movesSent, s_movesApplied, s_pushesSent, s_pushesApplied);
+        s_objHitsLost, s_diagMovers, s_movesSent, s_movesReceived, s_movesApplied, s_pushesSent,
+        s_pushesApplied);
 
     char worlds[128];
     int at = 0;
@@ -3161,6 +4382,11 @@ void enemies_init() {
     const ModResult post = mods::hook::add_post<EnemyExecuteHook>(on_proc_execute_post);
     const ModResult ccPre = mods::hook::add_pre<EnemyCollisionHook>(on_collision_move_pre);
     const ModResult ccPost = mods::hook::add_post<EnemyCollisionHook>(on_collision_move_post);
+    const ModResult statue = mods::hook::add_pre<CoopStatueSetAnimeHook>(on_statue_set_anime);
+    const ModResult small =
+        mods::hook::add_pre<CoopSmallStatueSetAnimeHook>(on_small_statue_set_anime);
+    coop_log::info("coop_mod: [CARRY] statue look hooks: big={} small={}", static_cast<int>(statue),
+        static_cast<int>(small));
     coop_log::info("coop_mod: [ENEMY] hooks: retargetPre={} retargetPost={} ccPre={} ccPost={}",
         static_cast<int>(pre), static_cast<int>(post), static_cast<int>(ccPre),
         static_cast<int>(ccPost));
@@ -3210,6 +4436,11 @@ void enemies_update() {
                 apply_pending_moves();
             }
         }
+        if (carry_live() || carry_gone_live()) {
+            apply_remote_carry();
+        } else {
+            reset_carry();
+        }
         log_status(nullptr);
         return;
     }
@@ -3231,6 +4462,8 @@ void enemies_update() {
         apply_pending_pushes();
         apply_pending_moves();
     }
+
+    if (carry_gone_live()) apply_remote_carry();
     run_self_test(list, host);
 
     decide_targets(list);
@@ -3247,7 +4480,8 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
 
     if (type == kMsgRoomClaim || type == kMsgRoomOwner) {
         if (!enemies_setting_on() && !bosses_setting_on()) return;
-    } else if (type == kMsgObjectHit || type == kMsgObjectMove) {
+    } else if (type == kMsgObjectHit || type == kMsgObjectMove || type == kMsgCarry ||
+               type == kMsgTorch || type == kMsgAnimal) {
         if (!breakables_enabled() && !movers_enabled()) return;
     } else if (!enemies_setting_on()) {
         return;
@@ -3407,10 +4641,32 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
         }
         return;
     }
+    case kMsgCarry: {
+        if (size < sizeof(MsgCarry)) return;
+        MsgCarry msg;
+        std::memcpy(&msg, payload, sizeof(msg));
+        carry_on_message(msg, from);
+        return;
+    }
+    case kMsgTorch: {
+        if (size < sizeof(MsgTorch) || !carry_live()) return;
+        MsgTorch msg;
+        std::memcpy(&msg, payload, sizeof(msg));
+        torch_on_message(msg);
+        return;
+    }
+    case kMsgAnimal: {
+        if (size < sizeof(MsgAnimal) || !carry_live()) return;
+        MsgAnimal msg;
+        std::memcpy(&msg, payload, sizeof(msg));
+        animal_on_message(msg);
+        return;
+    }
     case kMsgObjectMove: {
         if (size < sizeof(MsgObjectMove) || !movers_enabled()) return;
         MsgObjectMove msg;
         std::memcpy(&msg, payload, sizeof(msg));
+        ++s_movesReceived;
 
         for (int i = 0; i < kMaxMovers; ++i) {
             if (s_pendingMoves[i].used && s_pendingMoves[i].msg.key == msg.key &&

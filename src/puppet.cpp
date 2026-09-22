@@ -58,18 +58,23 @@ extern const HookService* svc_hook;
 DEFINE_HOOK(&daAlink_c::execute, PuppetAlinkExecuteHook);
 DEFINE_HOOK(&daAlink_c::draw, PuppetAlinkDrawHook);
 
-DEFINE_HOOK_SYMBOL("?exeKankyo@dScnKy_env_light_c@@QEAAXXZ", void(dScnKy_env_light_c*),
+DEFINE_HOOK_SYMBOL("dScnKy_env_light_c::exeKankyo", void(dScnKy_env_light_c*),
     PuppetKankyoExeHook);
 
+#if defined(_MSC_VER)
 DEFINE_HOOK_SYMBOL("??1daAlink_c@@UEAA@XZ", void(daAlink_c*), PuppetAlinkDtorHook);
+#else
+DEFINE_HOOK_SYMBOL("_ZN9daAlink_cD1Ev", void(daAlink_c*), PuppetAlinkDtorHook);
+#endif
 
-DEFINE_HOOK_SYMBOL("?getRes@dRes_control_c@@SAPEAXPEBD0PEAVdRes_info_c@@H@Z",
-    void*(const char*, const char*, dRes_info_c*, int), LocalSkinResByNameHook);
+DEFINE_HOOK((static_cast<void* (*)(const char*, const char*, dRes_info_c*, int)>(
+                &dRes_control_c::getRes)),
+    LocalSkinResByNameHook);
 
-DEFINE_HOOK_SYMBOL("?loadAramBmd@daAlink_c@@QEAAPEAVJ3DModelData@@GI@Z",
+DEFINE_HOOK_SYMBOL("daAlink_c::loadAramBmd",
     J3DModelData*(daAlink_c*, u16, u32), LocalAramBmdHook);
-DEFINE_HOOK_SYMBOL("?getRes@dRes_control_c@@SAPEAXPEBDHPEAVdRes_info_c@@H@Z",
-    void*(const char*, int, dRes_info_c*, int), LocalSkinResByIndexHook);
+DEFINE_HOOK((static_cast<void* (*)(const char*, s32, dRes_info_c*, int)>(&dRes_control_c::getRes)),
+    LocalSkinResByIndexHook);
 
 namespace {
 
@@ -132,7 +137,11 @@ uintptr_t s_liveAnmVtbl = 0;
 int s_deadAnmLogCount = 0;
 
 bool vtbl_looks_like_code(uintptr_t v) {
-    return v >= 0x00007ff000000000ull && v < 0x0000800000000000ull;
+    const daAlink_c* alink = daAlink_getAlinkActorClass();
+    if (alink == nullptr) return false;
+    const uintptr_t ref = *reinterpret_cast<const uintptr_t*>(alink);
+    const uintptr_t d = v > ref ? v - ref : ref - v;
+    return v != 0 && d < 0x10000000ull;
 }
 
 bool anim_is_live(mDoExt_bckAnm* bck) {
@@ -233,6 +242,10 @@ struct Puppet {
     s16 footAngles[4][3] = {};
     PuppetAttachSlot attachSlots[kPuppetAttachSlots];
     char rodArc[16] = {};
+    char rideArc[16] = {};
+
+    char rideArcBuilt[2][16] = {};
+    u16 rideIdxBuilt[2] = {0xFFFF, 0xFFFF};
     AttachedModelSnapshot attached[kPuppetAttachSlots];
     u8 chainKind = kPuppetChainNone;
     u8 chainCount = 0;
@@ -249,6 +262,20 @@ struct Puppet {
     f32 warpScroll = 0.0f;
     f32 warpDissolve = 0.0f;
     u32 shadowKey = 0;
+
+    HorseSnapshot horse{};
+    int horseAge = 1 << 20;
+
+    HorseSnapshot horsePrev{};
+    bool horsePrevValid = false;
+    int horseGap = 1;
+    J3DModel* horseModel = nullptr;
+    bool horseArcHeld = false;
+    mDoExt_3DlineMat1_c* horseReins = nullptr;
+    f32 horseIdleFrame = 0.0f;
+    u32 horseShadowKey = 0;
+    u16 horseIdleAnm = 0xFFFF;
+    uint32_t horseIdleSeq = 0;
 
     MidnaSnapshot midna{};
     bool midnaActive = false;
@@ -274,6 +301,10 @@ struct Puppet {
     PuppetItemData itemData[kPuppetHeldCount];
 
     u8 getItemNoCached = 0xFF;
+
+    char getItemArc[32] = "";
+    char getItemArcOld[32] = "";
+    int getItemArcOldTimer = 0;
     u8 pendingOutfit = kPuppetOutfitDefault;
     s16 hatPitch = 0;
     J3DModel* chainLinks[kChainLinkPool] = {};
@@ -281,6 +312,8 @@ struct Puppet {
     J3DModel* rodSegModels[kRodSegments] = {};
     u8 rodSegKind = kPuppetChainNone;
     bool peerVisible = true;
+
+    int8_t peerRoom = -1;
     bool lowHealth = false;
     bool releaseRequested = false;
 
@@ -620,6 +653,8 @@ void clear_installed_mtx_calc() {
     }
 }
 
+void retire_get_item_arc();
+
 void release_puppet_models_only() {
 
     release_midna_models();
@@ -667,6 +702,10 @@ void release_puppet() {
 
     release_midna_models();
     pup().midnaActive = false;
+
+    pup().horseAge = 1 << 20;
+    retire_get_item_arc();
+    pup().getItemNoCached = 0xFF;
     puppet_free_later(pup().model);
     puppet_free_later(pup().faceModel);
     puppet_free_later(pup().hatModel);
@@ -1333,6 +1372,8 @@ enum ItemSource {
     kItemSrcWireArc = 4,
 
     kItemSrcFieldItem = 5,
+
+    kItemSrcRideArc = 6,
 };
 
 struct HeldItemRes {
@@ -1370,7 +1411,22 @@ const HeldItemRes kHeldItemRes[kPuppetHeldCount] = {
       {0x34, 0, nullptr, kItemSrcAlink},
       {0x19, 0, nullptr, kItemSrcAlink},
       {0xFFFF, 0, nullptr, kItemSrcFieldItem},
+
+      {0x1E, 0, nullptr, kItemSrcAlink},
+      {0xFFFF, 0, nullptr, kItemSrcRideArc},
+      {0xFFFF, 0, nullptr, kItemSrcRideArc},
 };
+
+void retire_get_item_arc() {
+    if (pup().getItemArc[0] == '\0') return;
+    if (pup().getItemArcOld[0] != '\0' &&
+        std::strcmp(pup().getItemArcOld, pup().getItemArc) != 0) {
+        unloadObjectArchive(pup().getItemArcOld);
+    }
+    std::memcpy(pup().getItemArcOld, pup().getItemArc, sizeof(pup().getItemArcOld));
+    pup().getItemArcOldTimer = 60;
+    pup().getItemArc[0] = '\0';
+}
 
 J3DModelData* get_field_item_data(u8 itemNo) {
     PuppetItemData& slot = pup().itemData[kPuppetHeldGetItem];
@@ -1384,6 +1440,17 @@ J3DModelData* get_field_item_data(u8 itemNo) {
     const char* arc = dItem_data::getArcName(itemNo);
     const s16 bmd = dItem_data::getBmdName(itemNo);
     if (arc == nullptr || arc[0] == '\0' || bmd < 0) return nullptr;
+
+    if (std::strcmp(pup().getItemArc, arc) != 0) {
+        if (std::strcmp(pup().getItemArcOld, arc) == 0) {
+            pup().getItemArcOld[0] = '\0';
+        } else {
+            retire_get_item_arc();
+        }
+        std::strncpy(pup().getItemArc, arc, sizeof(pup().getItemArc) - 1);
+        pup().getItemArc[sizeof(pup().getItemArc) - 1] = '\0';
+    }
+    if (loadObjectArchive(arc) != 0) return nullptr;
     auto* data = static_cast<J3DModelData*>(dComIfG_getObjectRes(arc, bmd));
     if (data == nullptr) return nullptr;
     slot.data = data;
@@ -1398,9 +1465,33 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
     if (kind == kPuppetHeldNone || kind >= kPuppetHeldCount) return nullptr;
     if (kind == kPuppetHeldGetItem) return get_field_item_data(static_cast<u8>(wireIdx));
     PuppetItemData& slot = pup().itemData[kind];
+    if (slot.data != nullptr && (kind == kPuppetHeldRide || kind == kPuppetHeldRideExtra)) {
+        const int which = kind == kPuppetHeldRide ? 0 : 1;
+        if (pup().rideIdxBuilt[which] != wireIdx ||
+            std::strcmp(pup().rideArcBuilt[which], pup().rideArc) != 0) {
+            slot.data = nullptr;
+            drop_slot_models_of_kind(kind);
+        }
+    }
     if (slot.data != nullptr) return slot.data;
 
     const HeldItemRes& res = kHeldItemRes[kind];
+
+    if (res.source == kItemSrcRideArc) {
+
+        const int which = kind == kPuppetHeldRide ? 0 : 1;
+        if (pup().rideArc[0] == '\0' || wireIdx == 0xFFFF) return nullptr;
+        if (loadObjectArchive(pup().rideArc) != 0) return nullptr;
+        auto* data = static_cast<J3DModelData*>(dComIfG_getObjectRes(pup().rideArc, wireIdx));
+        if (data == nullptr) return nullptr;
+        slot.data = data;
+        slot.shared = true;
+        std::memcpy(pup().rideArcBuilt[which], pup().rideArc, sizeof(pup().rideArc));
+        pup().rideIdxBuilt[which] = wireIdx;
+        coop_log::info("coop_mod: [DIAG-ITEM] loaded kind={} from ride archive '{}' idx={}", kind,
+            pup().rideArc, wireIdx);
+        return slot.data;
+    }
 
     if (res.source == kItemSrcWireArc) {
         if (pup().rodArc[0] == '\0') return nullptr;
@@ -1531,7 +1622,9 @@ void drop_slot_models_of_kind(u8 kind) {
 J3DModel* get_slot_model(int slotIdx, u8 kind, u16 wireIdx) {
     PuppetAttachSlot& slot = pup().attachSlots[slotIdx];
 
-    const bool itemChanged = kind == kPuppetHeldGetItem && slot.wireIdx != wireIdx;
+    const bool itemChanged = (kind == kPuppetHeldGetItem || kind == kPuppetHeldRide ||
+                                 kind == kPuppetHeldRideExtra) &&
+                             slot.wireIdx != wireIdx;
     if (slot.kind == kind && slot.model != nullptr && !itemChanged) return slot.model;
     slot.wireIdx = wireIdx;
     if (slot.model != nullptr) {
@@ -2766,6 +2859,32 @@ void queue_boss_overlay_from_draw() {
 }
 
 void update_one_puppet(daAlink_c* alink);
+void horse_idle_tick();
+
+daAlink_c* s_builtAgainstAlink = nullptr;
+void* s_builtAgainstArcHeap = nullptr;
+
+bool puppets_lost_their_link(daAlink_c* alink) {
+    void* const arcHeap = static_cast<void*>(alink->mpArcHeap);
+    if (alink == s_builtAgainstAlink && arcHeap == s_builtAgainstArcHeap) return false;
+    const bool hadLink = s_builtAgainstAlink != nullptr;
+    const daAlink_c* was = s_builtAgainstAlink;
+    const void* wasHeap = s_builtAgainstArcHeap;
+    s_builtAgainstAlink = alink;
+    s_builtAgainstArcHeap = arcHeap;
+    if (!hadLink) return false;
+    bool released = false;
+    for (int i = 0; i < kMaxPuppets; ++i) {
+        PuppetScope scope(static_cast<uint8_t>(i));
+        if (pup().state == 0) continue;
+        coop_log::warn("coop_mod: [LINKSWAP] the player actor changed under player {}'s puppet "
+                        "(alink {} -> {}, arcHeap {} -> {}) - releasing",
+            i, static_cast<const void*>(was), static_cast<void*>(alink), wasHeap, arcHeap);
+        release_puppet();
+        released = true;
+    }
+    return released;
+}
 
 void on_alink_execute_puppet_post(ModContext*, void*, void*, void*) {
 
@@ -2786,6 +2905,8 @@ void on_alink_execute_puppet_post(ModContext*, void*, void*, void*) {
     }
     puppet_hold_for_shield_swap(alink);
 
+    if (puppets_lost_their_link(alink)) return;
+
     for (int i = 0; i < kMaxPuppets; ++i) {
         if (i == coop_net_local_id()) continue;
         PuppetScope scope(static_cast<uint8_t>(i));
@@ -2795,6 +2916,12 @@ void on_alink_execute_puppet_post(ModContext*, void*, void*, void*) {
 
 void update_one_puppet(daAlink_c* alink) {
     if (pup().midnaActive && ++pup().midnaAge > kMidnaStaleTicks) pup().midnaActive = false;
+    if (pup().horseAge < (1 << 20)) ++pup().horseAge;
+    horse_idle_tick();
+    if (pup().getItemArcOld[0] != '\0' && --pup().getItemArcOldTimer <= 0) {
+        unloadObjectArchive(pup().getItemArcOld);
+        pup().getItemArcOld[0] = '\0';
+    }
 
     if (pup().releaseRequested || (!pup().peerVisible && pup().state != 0)) {
         pup().releaseRequested = false;
@@ -2805,7 +2932,10 @@ void update_one_puppet(daAlink_c* alink) {
     const char* healStage = dComIfGp_getStartStageName();
     const bool healHere = healPeer.present && healPeer.inGame && healStage != nullptr &&
                           std::strncmp(healStage, healPeer.stage, 8) == 0;
-    if (pup().state == 0 && pup().peerVisible && !pup().respawnPending && healHere) {
+
+    const bool healWarping = dComIfGp_isEnableNextStage() != 0;
+    if (pup().state == 0 && pup().peerVisible && !pup().respawnPending && healHere &&
+        !healWarping) {
         pup().pendingOutfit = pup().outfit;
         pup().state = 1;
         coop_log::info("coop_mod: [PUPPET] player {} had no body and is here - rebuilding",
@@ -2832,23 +2962,6 @@ void update_one_puppet(daAlink_c* alink) {
                                (next != nullptr && next[0] != '\0' &&
                                 (stage == nullptr || std::strcmp(next, stage) != 0));
     const char* curStage = (stage != nullptr) ? stage : "";
-
-    {
-        static daAlink_c* s_lastAlink = nullptr;
-        static void* s_lastArcHeap = nullptr;
-        void* const arcHeap = static_cast<void*>(alink->mpArcHeap);
-        if (alink != s_lastAlink || arcHeap != s_lastArcHeap) {
-            if (s_lastAlink != nullptr && pup().state != 0) {
-                coop_log::warn("coop_mod: [LINKSWAP] the player actor changed under a live puppet "
-                                "(alink {} -> {}, arcHeap {} -> {}) - releasing",
-                    static_cast<void*>(s_lastAlink), static_cast<void*>(alink), s_lastArcHeap,
-                    arcHeap);
-                release_puppet();
-            }
-            s_lastAlink = alink;
-            s_lastArcHeap = arcHeap;
-        }
-    }
 
     const s32 room = fopAcM_GetRoomNo(alink);
     if (pup().state != 0 &&
@@ -2936,6 +3049,21 @@ void update_one_puppet(daAlink_c* alink) {
 
 }
 
+void puppet_hook_on_horse_snapshot(uint8_t playerId, const HorseSnapshot& snap) {
+    if (playerId >= kMaxPuppets || playerId == coop_net_local_id()) return;
+    PuppetScope scope(playerId);
+    if (!pup().peerVisible) return;
+
+    const HorseSnapshot& last = pup().horse;
+    pup().horsePrevValid = pup().horseAge <= 8 && last.jointCount == snap.jointCount &&
+                           (last.flags & kHorseFlagRiding) == (snap.flags & kHorseFlagRiding) &&
+                           (snap.flags & kHorseFlagIdle) == 0 && snap.jointCount > 0;
+    pup().horseGap = pup().horseAge < 1 ? 1 : (pup().horseAge > 8 ? 8 : pup().horseAge);
+    pup().horsePrev = last;
+    pup().horse = snap;
+    pup().horseAge = 0;
+}
+
 void puppet_hook_on_midna_snapshot(uint8_t playerId, const MidnaSnapshot& snap) {
     if (playerId >= kMaxPuppets || playerId == coop_net_local_id()) return;
     PuppetScope scope(playerId);
@@ -2983,12 +3111,14 @@ void puppet_hook_on_network_snapshot(uint8_t playerId, float x, float y, float z
     pup().warpOn = equipment.warpOn;
     pup().warpScroll = equipment.warpScroll;
     pup().warpDissolve = equipment.warpDissolve;
-    (void)roomNo;
+    pup().peerRoom = roomNo;
     pup().handL = handL;
     pup().handR = handR;
     for (int i = 0; i < kPuppetAttachSlots; ++i) pup().attached[i] = equipment.attached[i];
     std::strncpy(pup().rodArc, equipment.rodArc, sizeof(pup().rodArc) - 1);
     pup().rodArc[sizeof(pup().rodArc) - 1] = '\0';
+    std::strncpy(pup().rideArc, equipment.rideArc, sizeof(pup().rideArc) - 1);
+    pup().rideArc[sizeof(pup().rideArc) - 1] = '\0';
     pup().chainKind = equipment.chainKind;
     pup().chainCount = equipment.chainCount;
     pup().chainStopTime = equipment.chainStopTime;
@@ -3883,6 +4013,8 @@ void draw_puppet_shadow(daAlink_c* alink) {
 }
 
 void draw_one_puppet(daAlink_c* alink);
+void draw_puppet_horse(daAlink_c* alink);
+void horse_idle_tick();
 void warm_puppet_warp(daAlink_c* alink);
 
 void on_kankyo_exe_post(ModContext*, void*, void*, void*) {
@@ -3957,8 +4089,22 @@ void on_alink_draw_puppet_post(ModContext*, void*, void*, void*) {
         if (localInCutscene) continue;
         if (pup().state != 2 || pup().model == nullptr) continue;
 
-        warm_puppet_warp(alink);
-        draw_one_puppet(alink);
+        const int peerRoom = pup().peerRoom;
+        const bool peerShown =
+            !(peerRoom >= 0 && peerRoom < 64 && !dComIfGp_roomControl_checkRoomDisp(peerRoom));
+        if (peerShown) {
+
+            warm_puppet_warp(alink);
+            draw_one_puppet(alink);
+        }
+
+        const bool riding = (pup().horse.flags & kHorseFlagRiding) != 0;
+        const int horseRoom = pup().horse.room;
+        const bool horseShown =
+            riding ? peerShown
+                   : !(horseRoom >= 0 && horseRoom < 64 &&
+                         !dComIfGp_roomControl_checkRoomDisp(horseRoom));
+        if (horseShown) draw_puppet_horse(alink);
     }
 }
 
@@ -4458,6 +4604,246 @@ void draw_puppet_midna(daAlink_c* alink) {
     j3dSys.setDrawBuffer(saved1, 1);
 }
 
+const Mtx* s_horsePose[kHorseJoints] = {};
+const int kHorseStaleTicks = 20;
+
+const int kHorseStandingStaleTicks = 45;
+
+int horse_stale_limit() {
+    return (pup().horse.flags & kHorseFlagIdle) != 0 ? kHorseStandingStaleTicks : kHorseStaleTicks;
+}
+
+int horse_pose_callback(J3DJoint* joint, int phase) {
+    if (phase != 0) return 1;
+    const u16 j = joint->getJntNo();
+    if (j >= kHorseJoints || s_horsePose[j] == nullptr) return 1;
+    J3DModel* model = j3dSys.getModel();
+    if (model == nullptr) return 1;
+    Mtx m;
+    mDoMtx_copy(*s_horsePose[j], m);
+    model->setAnmMtx(j, m);
+    cMtx_copy(m, J3DSys::mCurrentMtx);
+    return 1;
+}
+
+void horse_joint_mtx(const HorseJointSnapshot& in, Mtx out) {
+    f32 x = in.q[0] / kHorseQuatScale;
+    f32 y = in.q[1] / kHorseQuatScale;
+    f32 z = in.q[2] / kHorseQuatScale;
+    f32 w = in.q[3] / kHorseQuatScale;
+    const f32 len = std::sqrt(x * x + y * y + z * z + w * w);
+    if (len > 0.0001f) {
+        x /= len;
+        y /= len;
+        z /= len;
+        w /= len;
+    } else {
+        w = 1.0f;
+    }
+    out[0][0] = 1.0f - 2.0f * (y * y + z * z);
+    out[0][1] = 2.0f * (x * y - z * w);
+    out[0][2] = 2.0f * (x * z + y * w);
+    out[1][0] = 2.0f * (x * y + z * w);
+    out[1][1] = 1.0f - 2.0f * (x * x + z * z);
+    out[1][2] = 2.0f * (y * z - x * w);
+    out[2][0] = 2.0f * (x * z - y * w);
+    out[2][1] = 2.0f * (y * z + x * w);
+    out[2][2] = 1.0f - 2.0f * (x * x + y * y);
+    for (int r = 0; r < 3; ++r) out[r][3] = in.p[r] / kHorsePosScale;
+}
+
+const u16 kHorseIdleAnm = 27;
+
+void horse_idle_joint(J3DJoint* joint, J3DAnmTransform* anm, const Mtx parent, Mtx* out, int count) {
+    for (; joint != nullptr; joint = joint->getYounger()) {
+        const u16 j = joint->getJntNo();
+        if (j >= count) continue;
+        J3DTransformInfo info = joint->getTransformInfo();
+        anm->getTransform(j, &info);
+        Mtx local;
+        J3DGetTranslateRotateMtx(info, local);
+        for (int r = 0; r < 3; ++r) {
+            local[r][0] *= info.mScale.x;
+            local[r][1] *= info.mScale.y;
+            local[r][2] *= info.mScale.z;
+        }
+        mDoMtx_concat(parent, local, out[j]);
+        horse_idle_joint(joint->getChild(), anm, out[j], out, count);
+    }
+}
+
+J3DAnmTransform* horse_idle_anm(u16 want, u16* which) {
+    *which = want < 0x100 ? want : kHorseIdleAnm;
+    auto* anm = static_cast<J3DAnmTransform*>(dComIfG_getObjectRes("Horse", *which));
+    if (anm == nullptr && *which != kHorseIdleAnm) {
+        *which = kHorseIdleAnm;
+        anm = static_cast<J3DAnmTransform*>(dComIfG_getObjectRes("Horse", *which));
+    }
+    return anm;
+}
+
+void horse_idle_tick() {
+    const HorseSnapshot& snap = pup().horse;
+    if ((snap.flags & kHorseFlagIdle) == 0 || pup().horseAge > horse_stale_limit()) return;
+    u16 which = 0;
+    J3DAnmTransform* anm = horse_idle_anm(snap.idleAnm, &which);
+    if (anm == nullptr) return;
+    const f32 end = anm->getFrameMax();
+    if (end <= 0.0f) return;
+    const f32 rate = std::isfinite(snap.idleRate) ? snap.idleRate : 1.0f;
+    f32 frame = pup().horseIdleFrame + rate;
+    const bool fresh = snap.seq != pup().horseIdleSeq;
+    if (which != pup().horseIdleAnm) {
+        pup().horseIdleAnm = which;
+        frame = snap.idleFrame;
+    } else if (fresh && std::isfinite(snap.idleFrame)) {
+        const f32 diff = snap.idleFrame - frame;
+        frame = (diff > 4.0f || diff < -4.0f) ? snap.idleFrame : frame + diff * 0.25f;
+    }
+    pup().horseIdleSeq = snap.seq;
+    if (!std::isfinite(frame)) frame = 0.0f;
+
+    while (frame >= end) frame -= end;
+    while (frame < 0.0f) frame += end;
+    pup().horseIdleFrame = frame;
+}
+
+bool horse_idle_pose(J3DModel* model, const Mtx base, Mtx* out, int count,
+    const HorseSnapshot& snap) {
+    u16 which = 0;
+    J3DAnmTransform* anm = horse_idle_anm(snap.idleAnm, &which);
+    J3DModelData* data = model->getModelData();
+    if (anm == nullptr || data == nullptr || data->getJointNum() == 0) return false;
+    if (which != pup().horseIdleAnm) return false;
+    anm->setFrame(pup().horseIdleFrame);
+    horse_idle_joint(data->getJointNodePointer(0), anm, base, out, count);
+    return true;
+}
+
+void horse_blend_joint(int j, Mtx out) {
+    const HorseJointSnapshot& b = pup().horse.joints[j];
+    if (!pup().horsePrevValid) {
+        horse_joint_mtx(b, out);
+        return;
+    }
+    f32 t = static_cast<f32>(pup().horseAge) / static_cast<f32>(pup().horseGap);
+    if (t > 1.0f) t = 1.0f;
+    if (t < 0.0f) t = 0.0f;
+    const HorseJointSnapshot& a = pup().horsePrev.joints[j];
+    f32 dot = 0.0f;
+    for (int k = 0; k < 4; ++k) dot += static_cast<f32>(a.q[k]) * static_cast<f32>(b.q[k]);
+    const f32 sign = dot < 0.0f ? -1.0f : 1.0f;
+    HorseJointSnapshot mix;
+    for (int k = 0; k < 4; ++k) {
+        const f32 v = a.q[k] * sign * (1.0f - t) + b.q[k] * t;
+        mix.q[k] = static_cast<int16_t>(v > 32767.0f ? 32767.0f : (v < -32767.0f ? -32767.0f : v));
+    }
+    for (int k = 0; k < 3; ++k) {
+        mix.p[k] = static_cast<int16_t>(a.p[k] * (1.0f - t) + b.p[k] * t);
+    }
+    horse_joint_mtx(mix, out);
+}
+
+void draw_puppet_horse(daAlink_c* alink) {
+    const HorseSnapshot& snap = pup().horse;
+    if (pup().horseAge > horse_stale_limit() || snap.jointCount == 0 ||
+        snap.jointCount > kHorseJoints) {
+        return;
+    }
+    if (pup().model == nullptr) return;
+    if (!pup().horseArcHeld) {
+
+        if (loadObjectArchive("Horse") != 0) return;
+        pup().horseArcHeld = true;
+    }
+    if (pup().horseModel == nullptr) {
+        pup().horseModel = loadBmdFromArcIdx("Horse", 0x26, cXyz(1.0f, 1.0f, 1.0f));
+        if (pup().horseModel == nullptr) return;
+    }
+    J3DModel* model = pup().horseModel;
+
+    Mtx rel;
+    unpack_mtx12(snap.baseMtx, rel);
+    Mtx base;
+    if ((snap.flags & kHorseFlagRiding) != 0) {
+
+        mDoMtx_concat(pup().model->getBaseTRMtx(), rel, base);
+    } else {
+        mDoMtx_copy(rel, base);
+    }
+    static Mtx joints[kHorseJoints];
+    const u16 modelJoints = model->getModelData()->getJointNum();
+    const int idleCount = modelJoints < kHorseJoints ? modelJoints : kHorseJoints;
+    const bool idle = (snap.flags & kHorseFlagIdle) != 0 &&
+                      horse_idle_pose(model, base, joints, idleCount, snap);
+    for (int j = 0; j < kHorseJoints; ++j) {
+        if (idle) {
+            s_horsePose[j] = j < idleCount ? &joints[j] : nullptr;
+        } else if (j < snap.jointCount) {
+            Mtx local;
+            horse_blend_joint(j, local);
+            mDoMtx_concat(base, local, joints[j]);
+            s_horsePose[j] = &joints[j];
+        } else {
+            s_horsePose[j] = nullptr;
+        }
+    }
+
+    PuppetGuard guard;
+    if (!puppet_guard_begin(model, guard)) return;
+    model->setBaseScale(cXyz(1.0f, 1.0f, 1.0f));
+    model->setBaseTRMtx(base);
+    J3DModelData* data = model->getModelData();
+    const u16 n = data->getJointNum() < kHorseJoints ? data->getJointNum() : kHorseJoints;
+    for (u16 j = 0; j < n; ++j) {
+        if (s_horsePose[j] != nullptr) data->getJointNodePointer(j)->setCallBack(horse_pose_callback);
+    }
+    model->calc();
+    for (u16 j = 0; j < n; ++j) {
+        if (s_horsePose[j] != nullptr) data->getJointNodePointer(j)->setCallBack(nullptr);
+        s_horsePose[j] = nullptr;
+    }
+    g_env_light.setLightTevColorType_MAJI(model, &alink->tevStr);
+    mDoExt_modelEntryDL(model);
+    puppet_guard_end(guard);
+
+    {
+        const cXyz feet(base[0][3], base[1][3], base[2][3]);
+        dBgS_GndChk gndChk;
+        cXyz probe(feet.x, feet.y + 100.0f, feet.z);
+        gndChk.SetPos(&probe);
+        const f32 groundY = dComIfG_Bgsp().GroundCross(&gndChk);
+        if (groundY > -G_CM3D_F_INF) {
+            cXyz center(feet.x, feet.y + 100.0f, feet.z);
+            pup().horseShadowKey = dComIfGd_setShadow(pup().horseShadowKey, 0, model, &center,
+                1000.0f, 0.0f, feet.y, groundY, gndChk, &alink->tevStr, 0, 1.0f,
+                dDlst_shadowControl_c::getSimpleTex());
+        }
+    }
+
+    if (snap.reinCount < 2 || snap.reinCount > kHorseReinPoints) return;
+    if (pup().horseReins == nullptr) {
+        auto* texture = static_cast<ResTIMG*>(dComIfG_getObjectRes("Horse", 0x2C));
+        if (texture == nullptr) return;
+        JKRHeap* heap = mDoExt_getZeldaHeap();
+        JKRHeap* previous = heap != nullptr ? heap->becomeCurrentHeap() : nullptr;
+        auto* line = JKR_NEW mDoExt_3DlineMat1_c();
+        const bool ok = line != nullptr && line->init(1, kHorseReinPoints, texture, 0) != 0;
+        if (previous != nullptr) previous->becomeCurrentHeap();
+        if (!ok) return;
+        pup().horseReins = line;
+    }
+    cXyz* points = pup().horseReins->getPos(0);
+    for (int i = 0; i < snap.reinCount; ++i) {
+        const cXyz local(snap.reins[i][0] / kHorsePosScale, snap.reins[i][1] / kHorsePosScale,
+            snap.reins[i][2] / kHorsePosScale);
+        mDoMtx_multVec(base, &local, &points[i]);
+    }
+    static GXColor reinColor = {0x00, 0x00, 0x00, 0xFF};
+    pup().horseReins->update(snap.reinCount, 1.5f, reinColor, 0, &alink->tevStr);
+    dComIfGd_set3DlineMat(pup().horseReins);
+}
+
 void draw_one_puppet(daAlink_c* alink) {
 
     if (alink->mClothesChangeWaitTimer != 0) return;
@@ -4615,6 +5001,7 @@ void draw_one_puppet(daAlink_c* alink) {
     }
 
     draw_puppet_midna(alink);
+
 }
 
 }
@@ -4701,6 +5088,9 @@ void puppet_hook_init() {
                     ++released;
                 }
             }
+
+            s_builtAgainstAlink = nullptr;
+            s_builtAgainstArcHeap = nullptr;
             coop_log::info("coop_mod: [LINKDTOR] player actor going away - released {} puppet(s) "
                             "before its archives are deleted",
                 released);
@@ -4710,4 +5100,16 @@ void puppet_hook_init() {
     coop_log::info("coop_mod: [DIAG] puppet_hook_init: execHook={} drawHook={} kankyoHook={}",
         static_cast<int>(execResult), static_cast<int>(drawResult),
         static_cast<int>(kankyoResult));
+}
+
+bool puppet_hook_sword_mtx(uint8_t playerId, float out[3][4], bool* master) {
+    if (playerId >= kMaxPuppets || playerId == coop_net_local_id()) return false;
+    PuppetScope scope(playerId);
+    if (pup().state != 2 || pup().swordModel == nullptr) return false;
+    MtxP m = pup().swordModel->getBaseTRMtx();
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 4; ++c) out[r][c] = m[r][c];
+    }
+    if (master != nullptr) *master = pup().swordId == kPuppetSwordMaster;
+    return true;
 }

@@ -486,6 +486,19 @@ bool tbox_bit_set(const uint8_t* bytes, int no) {
     return (bytes[byteIndex] & (1 << (no & 7))) != 0;
 }
 
+bool s_scrubbedByRemote[64] = {};
+
+uint8_t s_pendingChestBits[8] = {};
+char s_pendingChestStage[8] = {};
+
+void clear_tbox_bit(uint8_t* bytes, int no) {
+    if (bytes == nullptr || no < 0 || no >= 64) return;
+    const int word = no >> 5;
+    const int bitInWord = no & 0x1F;
+    const int byteIndex = word * 4 + (3 - (bitInWord >> 3));
+    bytes[byteIndex] = static_cast<uint8_t>(bytes[byteIndex] & ~(1 << (no & 7)));
+}
+
 void* open_matching_chest(void* proc, void* data) {
     auto* sweep = static_cast<ChestSweep*>(data);
     auto* actor = static_cast<fopAc_ac_c*>(proc);
@@ -496,8 +509,10 @@ void* open_matching_chest(void* proc, void* data) {
     if (!tbox_bit_set(sweep->wantedBits, no)) return nullptr;
 
     if (chest->mpAnm == nullptr) return nullptr;
-    if (chest->mpAnm->getFrame() > 0.0f) return nullptr;
+
+    if (chest->mpAnm->getFrame() > 0.0f && !s_scrubbedByRemote[no]) return nullptr;
     if (dComIfGp_event_runCheck()) return nullptr;
+    s_scrubbedByRemote[no] = false;
 
     if (chest->mpAnm != nullptr) chest->mpAnm->setFrame(chest->mpAnm->getEndFrame());
 
@@ -520,8 +535,30 @@ void* open_matching_chest(void* proc, void* data) {
             static_cast<int>(sizeof(daTbox_actionFn)), a, b);
     }
     chest->setAction(&daTbox_c::actionOpenWait);
+    clear_tbox_bit(s_pendingChestBits, no);
     ++sweep->count;
     return nullptr;
+}
+
+void retry_pending_chests() {
+    bool any = false;
+    for (int i = 0; i < 8; ++i) any = any || s_pendingChestBits[i] != 0;
+    if (!any) return;
+    const char* here = dComIfGp_getStartStageName();
+    if (here == nullptr || std::strncmp(here, s_pendingChestStage, 8) != 0) {
+        std::memset(s_pendingChestBits, 0, sizeof(s_pendingChestBits));
+        return;
+    }
+    uint8_t wanted[8];
+    std::memcpy(wanted, s_pendingChestBits, sizeof(wanted));
+    ChestSweep sweep;
+    sweep.wantedBits = wanted;
+    sweep.count = 0;
+    fopAcM_Search(open_matching_chest, &sweep);
+    if (sweep.count > 0) {
+        coop_log::info("coop_mod: [WORLD] {} chest(s) the other player emptied are shown open now",
+            sweep.count);
+    }
 }
 
 const int kChestAnmSlots = 3;
@@ -603,6 +640,8 @@ void drive_remote_chest_lids() {
         const f32 end = pick.best->mpAnm->getEndFrame();
         pick.best->mpAnm->setFrame(frame > end ? end : frame);
         pick.best->mpAnm->play();
+        const int no = pick.best->getTboxNo();
+        if (no >= 0 && no < 64) s_scrubbedByRemote[no] = true;
     }
 }
 
@@ -627,6 +666,13 @@ void open_chests_from_bits(const uint8_t* newlySet) {
         if (newlySet[i] != 0) { any = true; break; }
     }
     if (!any) return;
+
+    const char* here = dComIfGp_getStartStageName();
+    if (here != nullptr && std::strncmp(here, s_pendingChestStage, 8) != 0) {
+        std::memset(s_pendingChestBits, 0, sizeof(s_pendingChestBits));
+        std::strncpy(s_pendingChestStage, here, sizeof(s_pendingChestStage));
+    }
+    for (int i = 0; i < 8; ++i) s_pendingChestBits[i] |= newlySet[i];
     ChestSweep sweep;
     sweep.wantedBits = newlySet;
     sweep.count = 0;
@@ -1152,6 +1198,7 @@ void world_update() {
         return;
     }
     if (s_tick % 10 == 0) scan();
+    if (s_tick % 30 == 0 && daAlink_getAlinkActorClass() != nullptr) retry_pending_chests();
 
     drive_remote_chest_lids();
     if (s_tick % kDigestEveryTicks == 0) {

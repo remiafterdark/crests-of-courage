@@ -1,3 +1,4 @@
+#include "util.hpp"
 #include "models.hpp"
 #include "print.hpp"
 #include "d/d_com_inf_game.h"
@@ -224,7 +225,8 @@ J3DModel* loadBmdFromArc(const char* arcName, const char* bmdName, cXyz scale) {
 
 J3DModelData* loadBmdDataFromFile(const char* path) {
     if (path == nullptr) return nullptr;
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
+
+    std::ifstream file(path_ci(path), std::ios::binary | std::ios::ate);
     if (!file) {
         coop_log::warn("coop_mod: [models] cannot open '{}'", path);
         return nullptr;
