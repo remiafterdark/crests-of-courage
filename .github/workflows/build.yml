@@ -1,7 +1,5 @@
-# Builds Crests of Courage for every platform Dusklight runs on, and packs them into ONE
-# crests_of_courage.dusk - Dusklight loads lib/<platform>/ for whichever it is running on.
-# Based on TwilitRealm/mod-template's workflow.
-name: Build
+# builds every platform and packs them into one crests_of_courage.dusk
+name: build
 
 on:
   push:
@@ -12,7 +10,7 @@ on:
 
 jobs:
   build:
-    name: Build ${{matrix.platform}}
+    name: ${{matrix.platform}}
     runs-on: ${{matrix.runner}}
     strategy:
       fail-fast: false
@@ -46,42 +44,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read pinned Dusklight version
+      - name: dusklight version
         id: dusklight
         shell: bash
         run: echo "version=$(sed -n 's/.*set(DUSKLIGHT_VERSION "\([^"]*\)").*/\1/p' CMakeLists.txt)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache Dusklight sources
+      - name: cache dusklight
         uses: actions/cache@v4
         with:
           path: dusklight
           key: dusklight-${{runner.os}}-${{steps.dusklight.outputs.version}}
 
-      - name: Enable Visual Studio environment
+      - name: msvc env
         if: matrix.msvc_arch
-        uses: step-security/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: ${{matrix.msvc_arch}}
 
-      - name: Install ninja (Windows)
+      - name: ninja (windows)
         if: matrix.msvc_arch
         run: choco install ninja
 
-      - name: Install ninja (Linux)
+      - name: ninja (linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ninja-build
 
-      - name: Install ninja (macOS)
+      - name: ninja (macos)
         if: runner.os == 'macOS'
         run: brew install ninja
 
-      - name: Install Android NDK
+      - name: android ndk
         if: matrix.android_ndk
         uses: android-actions/setup-android@v3
         with:
           packages: ndk;${{matrix.android_ndk}}
 
-      - name: Configure CMake
+      - name: configure
         shell: bash
         run: |
           args=(-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDUSK_DIR="$PWD/dusklight" ${{matrix.cmake_args}})
@@ -94,10 +92,10 @@ jobs:
           fi
           cmake -B build "${args[@]}"
 
-      - name: Build
+      - name: build
         run: cmake --build build --parallel
 
-      - name: Upload artifact
+      - name: upload
         uses: actions/upload-artifact@v4
         with:
           name: mod-${{matrix.platform}}
@@ -105,32 +103,32 @@ jobs:
           if-no-files-found: error
 
   combine:
-    name: Combine bundles
+    name: combine
     needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download platform bundles
+      - name: download bundles
         uses: actions/download-artifact@v4
         with:
           pattern: mod-*
           path: dist
 
-      - name: Pack every platform, with the models, into one .dusk
+      - name: pack
         run: |
           args=()
           for f in dist/*/*.dusk; do args+=(--bundle "$f"); done
           python3 tools/package.py "${args[@]}" --models models --out combined/crests_of_courage.dusk
 
-      - name: Upload combined bundle
+      - name: upload combined
         uses: actions/upload-artifact@v4
         with:
           name: crests_of_courage
           path: combined/crests_of_courage.dusk
           if-no-files-found: error
 
-      - name: Attach to release
+      - name: release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{github.token}}
