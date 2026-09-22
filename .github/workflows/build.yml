@@ -106,6 +106,9 @@ jobs:
     name: combine
     needs: build
     runs-on: ubuntu-latest
+    # the release step creates a release with the workflow's own token
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
