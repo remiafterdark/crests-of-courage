@@ -92,6 +92,11 @@ def main():
     args = ap.parse_args()
 
     entries = [(os.path.join(HERE, 'mod.json'), 'mod.json')]
+    # The listing art, named by mod.json. The mod manager and the mod site both read these.
+    for art in ('icon.png', 'banner.png'):
+        full = os.path.join(HERE, 'res', art)
+        if os.path.isfile(full):
+            entries.append((full, 'res/' + art))
     # (bundle, name inside it, name inside ours) for the platform libraries taken from bundles.
     from_bundles = []
     platforms = set()
