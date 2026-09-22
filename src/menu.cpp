@@ -787,6 +787,11 @@ void build_models(UiElementHandle pane, SurfaceHandles& h, UiElementHandle detai
     svc_ui->pane_add_section(mod_ctx, pane, "Your models folder");
     if (skins_can_open_folder()) {
         add_button(pane, "Open the folder", [](ModContext*, void*) { skins_open_folder(); });
+    } else {
+
+        static std::string s_folder;
+        s_folder = skins_folder_path();
+        if (!s_folder.empty()) svc_ui->pane_add_text(mod_ctx, pane, s_folder.c_str(), nullptr);
     }
     add_button(pane, "Reload", [](ModContext*, void*) { skins_refresh(); }, nullptr,
         "Press after adding or changing a folder.");
