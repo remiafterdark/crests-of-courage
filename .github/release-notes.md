@@ -7,4 +7,5 @@ only windows has been played. mac, linux, android and ios are built here but unt
 enemy sync, boss sync and story progress are off by default under unfinished.
 
 this build:
-each player gives back the archive share it took, not one it guessed at
+everyone sees a model's own bow, clawshot, rod and iron ball, not just the player holding it
+the body draw borrows the shared materials for one call, like it already did the joints

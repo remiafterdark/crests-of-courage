@@ -902,6 +902,40 @@ void puppet_shield_swap_one(daAlink_c* alink) {
 
 const int kPuppetMaxMaterials = 64;
 
+struct MaterialGuard {
+    J3DModelData* modelData = nullptr;
+    u16 count = 0;
+    J3DMaterialAnm* saved[kPuppetMaxMaterials];
+};
+
+bool material_guard_begin(J3DModel* model, MaterialGuard& guard) {
+    J3DModelData* data = (model != nullptr) ? model->getModelData() : nullptr;
+    if (data == nullptr) return false;
+    const u16 num = data->getMaterialNum();
+    guard.modelData = data;
+    guard.count = num <= kPuppetMaxMaterials ? num : kPuppetMaxMaterials;
+    for (u16 i = 0; i < guard.count; ++i) {
+        J3DMaterial* material = data->getMaterialNodePointer(i);
+        if (material == nullptr) {
+            guard.saved[i] = nullptr;
+            continue;
+        }
+        guard.saved[i] = material->getMaterialAnm();
+        material->setMaterialAnm(nullptr);
+    }
+    return true;
+}
+
+void material_guard_end(MaterialGuard& guard) {
+    if (guard.modelData == nullptr) return;
+    for (u16 i = 0; i < guard.count; ++i) {
+        J3DMaterial* material = guard.modelData->getMaterialNodePointer(i);
+        if (material != nullptr) material->setMaterialAnm(guard.saved[i]);
+    }
+    guard.modelData = nullptr;
+    guard.count = 0;
+}
+
 struct PuppetGuard {
     J3DModelData* modelData = nullptr;
     u16 jointNum = 0;
@@ -1502,6 +1536,8 @@ J3DModelData* get_field_item_data(u8 itemNo) {
     return slot.data;
 }
 
+J3DModel* puppet_skin_equipment(const char* file, const cXyz& scale);
+
 J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
     if (kind == kPuppetHeldNone || kind >= kPuppetHeldCount) return nullptr;
     if (kind == kPuppetHeldGetItem) return get_field_item_data(static_cast<u8>(wireIdx));
@@ -1591,6 +1627,21 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
         coop_log::trace("coop_mod: [DIAG-ITEM] loaded kind={} from outfit archive '{}'", kind,
             res.outfitFile);
         return slot.data;
+    }
+
+    const char* skinFile = skins_aram_file_for_index(res.bmdResIdx);
+    if (skinFile != nullptr) {
+        J3DModel* skinModel = puppet_skin_equipment(skinFile, cXyz(1.0f, 1.0f, 1.0f));
+        if (skinModel != nullptr) {
+            slot.data = skinModel->getModelData();
+            slot.fromOutfit = false;
+            slot.shared = true;
+            prep_equipment_model(skinModel);
+            JKR_DELETE(skinModel);
+            coop_log::info("coop_mod: [SKIN] held item kind={} is their model's '{}'", kind,
+                skinFile);
+            return slot.data;
+        }
     }
 
     JKRArchive* anmArchive = dComIfGp_getAnmArchive();
@@ -3958,7 +4009,12 @@ void render_puppet_body_with_upper_split(J3DModel* model, const cXyz& pos, const
         g_env_light.setLightTevColorType_MAJI(model, &alink->tevStr);
     }
 
+    MaterialGuard matGuard;
+    const bool matGuarded = material_guard_begin(model, matGuard);
+
     mDoExt_modelUpdateDL(model);
+
+    if (matGuarded) material_guard_end(matGuard);
 
     for (int i = 0; i < 3; ++i) {
         if (borrowedJoints[i] < 0) continue;
