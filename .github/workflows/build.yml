@@ -153,4 +153,8 @@ jobs:
         env:
           GH_TOKEN: ${{github.token}}
         run: |
-          gh release create "$GITHUB_REF_NAME" combined/crests_of_courage.dusk --verify-tag             --title "$GITHUB_REF_NAME" --notes-file .github/release-notes.md
+          # re-tagging a version reruns this, so only make the release if it is not there yet
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file .github/release-notes.md
+          fi
+          gh release upload "$GITHUB_REF_NAME" combined/crests_of_courage.dusk --clobber
