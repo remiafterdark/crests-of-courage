@@ -323,6 +323,8 @@ struct Puppet {
 
     bool holdsArc = false;
 
+    char heldArc[16] = {};
+
     bool skinDirty = false;
 
     SkinChoices builtSkins = {};
@@ -623,11 +625,8 @@ bool arc_in_use_elsewhere(const char* arc) {
     for (int i = 0; i < kMaxPuppets; ++i) {
         if (i == s_pupId) continue;
         const Puppet& q = s_puppetSlots[i];
-        if (q.state != 0) {
-            const u8 outfit = (q.state == 1) ? q.pendingOutfit : q.outfit;
-            const char* theirs = outfit_files(outfit).arc;
-            if (theirs != nullptr && std::strcmp(theirs, arc) == 0) return true;
-        }
+
+        if (q.holdsArc && q.heldArc[0] != 0 && std::strcmp(q.heldArc, arc) == 0) return true;
         if (q.shieldArc[0] != '\0' && std::strcmp(q.shieldArc, arc) == 0) return true;
     }
     return false;
@@ -749,7 +748,10 @@ void release_puppet() {
 
     const u8 loadedOutfit = (pup().state == 1) ? pup().pendingOutfit : pup().outfit;
     if (pup().holdsArc) {
-        release_arc_share(outfit_files(loadedOutfit).arc);
+
+        release_arc_share(pup().heldArc[0] != 0 ? pup().heldArc
+                                                    : outfit_files(loadedOutfit).arc);
+        pup().heldArc[0] = 0;
         pup().holdsArc = false;
     }
     pup().state = 0;
@@ -3048,6 +3050,8 @@ void update_one_puppet(daAlink_c* alink) {
                 return;
             }
             pup().holdsArc = true;
+            std::strncpy(pup().heldArc, files.arc, sizeof(pup().heldArc) - 1);
+            pup().heldArc[sizeof(pup().heldArc) - 1] = 0;
         }
         pup().outfit = pup().pendingOutfit;
         pup().state = 2;

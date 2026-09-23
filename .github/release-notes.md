@@ -10,6 +10,13 @@ starts, and send Dusklight's log if it does not.
 Enemy sync, boss sync and story progress are off by default under Unfinished. Enemy sync in
 particular is rough.
 
+## Since 1.0.6
+
+- Each player now gives back exactly the archive share it took. Both ends of that used to work the
+  name out from whatever outfit the player had at the time, and those are not always the same
+  outfit: a change arriving in between handed back a claim belonging to somebody else while
+  leaking the one actually taken. Rare with one other player, constant with a room full of them.
+
 ## Since 1.0.5
 
 - A crash while drawing other players, found in a real crash log rather than guessed at. Materials
