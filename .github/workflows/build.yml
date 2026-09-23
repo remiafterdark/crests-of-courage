@@ -4,11 +4,15 @@ name: build
 env:
   SYMGEN_VERSION: v1.2.4
 
+# tags only, so a release builds once. use the Actions tab (run workflow) to build off a branch.
 on:
   push:
-    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+
+concurrency:
+  group: build-${{github.ref}}
+  cancel-in-progress: true
 
 jobs:
   build:
