@@ -7,7 +7,9 @@ only windows has been played. mac, linux, android and ios are built here but unt
 enemy sync, boss sync and story progress are off by default under unfinished.
 
 this build:
-a crash hunt. nothing a player model owns is ever freed on the spot any more, so the renderer
-can never be left reading something that was thrown away underneath it
-everyone sees a model's own bow, clawshot, rod and iron ball, not just the player holding it
-the body draw borrows the shared materials for one call, like it already did the joints
+enemy sync actually runs. neither game was describing a single enemy to the other, because each
+kept standing down and waiting for the other to do it
+the two games agree on who owns a room now, instead of quietly disagreeing forever
+a crash while recolouring another player, found by nozzly. a model could be left pointing at a
+texture that had already been freed
+players in another stage are no longer listed as paused

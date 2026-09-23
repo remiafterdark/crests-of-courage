@@ -2689,8 +2689,21 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     }
 
     if (g_ticksSinceRx < 0xFFFFFFFFu) ++g_ticksSinceRx;
+
+    const char* hereStage = dComIfGp_getStartStageName();
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         if (g_playerQuiet[i] < 0xFFFFFFFFu) ++g_playerQuiet[i];
+        bool expectSnapshots = true;
+        if (i != g_localId) {
+            const CoopPeer& them = features_peer_of(static_cast<uint8_t>(i));
+            expectSnapshots = them.present && them.inGame && hereStage != nullptr &&
+                              them.stage[0] != 0 &&
+                              std::strncmp(them.stage, hereStage, 8) == 0;
+        }
+        if (!expectSnapshots) {
+            g_playerWorldStill[i] = 0;
+            continue;
+        }
         if (g_playerWorldStill[i] < 0xFFFFFFFFu) ++g_playerWorldStill[i];
     }
 

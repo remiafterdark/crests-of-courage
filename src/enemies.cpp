@@ -356,10 +356,18 @@ bool room_is_loaded(int8_t room) {
 
 void note_loaded_rooms(dSv_info_c* info) {
     if (info == nullptr) return;
-    for (int i = 0; i < kRooms; ++i) s_roomLoaded[i] = false;
+    bool wasLoaded[kRooms];
+    for (int i = 0; i < kRooms; ++i) {
+        wasLoaded[i] = s_roomLoaded[i];
+        s_roomLoaded[i] = false;
+    }
     for (int i = 0; i < 32; ++i) {
         const int r = info->getZone(i).getRoomNo();
         if (r >= 0 && r < kRooms) s_roomLoaded[r] = true;
+    }
+
+    for (int i = 0; i < kRooms; ++i) {
+        if (wasLoaded[i] && !s_roomLoaded[i]) s_settledRoom[i] = false;
     }
     for (int i = 0; i < 32; ++i) {
         const int room = info->getZone(i).getRoomNo();
@@ -429,6 +437,15 @@ struct KeyCacheEntry {
 KeyCacheEntry s_keyCache[kKeyCacheMax];
 int s_keyCacheEvictions = 0;
 int s_unnamedLogged = 0;
+
+bool s_keyingLive = false;
+
+bool key_already_cached(fpc_ProcID id) {
+    for (int i = 0; i < kKeyCacheMax; ++i) {
+        if (s_keyCache[i].key != 0 && s_keyCache[i].id == id) return true;
+    }
+    return false;
+}
 
 uint32_t placement_key(fopAc_ac_c* actor) {
     const fpc_ProcID id = fopAcM_GetID(actor);
@@ -652,6 +669,9 @@ struct Tracked {
 
     uint32_t targetStamp = 0;
 
+    uint32_t describedStamp = 0;
+    bool describedEver = false;
+
     bool carriedByUs = false;
     f32 targetBlend = 0.0f;
 
@@ -800,12 +820,26 @@ bool room_stage(char out[8], int& saveNo) {
     return true;
 }
 
+void announce_room_owner(int room, uint8_t owner) {
+    if (!coop_net_is_host()) return;
+    char stage[8];
+    int saveNo = -1;
+    if (!room_stage(stage, saveNo)) return;
+    MsgRoomOwner msg{};
+    std::memcpy(msg.stage, stage, 8);
+    msg.saveNo = static_cast<int8_t>(saveNo);
+    msg.room = static_cast<int8_t>(room);
+    msg.owner = owner;
+    coop_net_send(kMsgRoomOwner, &msg, sizeof(msg));
+}
+
 void set_room_owner(int room, uint8_t owner) {
     if (room < 0 || room >= kRooms) return;
     if (s_rooms.owner[room] == owner) return;
     s_rooms.owner[room] = owner;
     coop_log::info("coop_mod: [ROOM] room {} is now owned by {}", room,
         owner == kRoomOwnerNone ? -1 : static_cast<int>(player_of_owner(owner)));
+    announce_room_owner(room, owner);
 }
 
 void update_room_claims(int myRoom) {
@@ -820,7 +854,8 @@ void update_room_claims(int myRoom) {
 
     const uint8_t us = our_owner_id();
     const bool wePaused = coop_player_paused(coop_net_local_id());
-    for (int r = 0; r < kRooms; ++r) {
+
+    for (int r = 0; coop_net_is_host() && r < kRooms; ++r) {
         const uint8_t owner = s_rooms.owner[r];
         if (owner == kRoomOwnerNone) continue;
         if (owner == us) {
@@ -840,6 +875,12 @@ void update_room_claims(int myRoom) {
         }
 
         s_rooms.claimed[r] = false;
+    }
+
+    if (!coop_net_is_host()) {
+        for (int r = 0; r < kRooms; ++r) {
+            if (s_rooms.owner[r] != kRoomOwnerNone) s_rooms.claimed[r] = false;
+        }
     }
 
     if (myRoom < 0 || myRoom >= kRooms) return;
@@ -903,11 +944,29 @@ uint8_t intended_owner(int8_t room, uint32_t key) {
     return player_of_owner(owner);
 }
 
+const uint32_t kOwnerlessTicks = 90;
+
 bool we_own(int8_t room, uint32_t key) {
     const uint8_t me = coop_net_local_id();
     if (me >= kCoopMaxPlayers) return true;
     const uint8_t owner = intended_owner(room, key);
     if (owner == me) return true;
+
+    if (room >= 0 && room < kRooms && room_ownership_enabled() &&
+        s_rooms.owner[room] == owner_of(me)) {
+        const Tracked* t = find_tracked(room, key);
+        const bool undescribed =
+            t == nullptr || !t->describedEver || s_tick - t->describedStamp > kOwnerlessTicks;
+        if (undescribed) {
+            static uint32_t s_saidTick = 0;
+            if (s_tick - s_saidTick > 300) {
+                s_saidTick = s_tick;
+                coop_log::info("coop_mod: [ENEMY] room {} key {:#010x} was nobody's - taking it, "
+                               "we own the room", static_cast<int>(room), key);
+            }
+            return true;
+        }
+    }
     if (player_is_live(owner)) return false;
 
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
@@ -2134,6 +2193,17 @@ HookAction on_proc_execute_pre(ModContext*, void* args, void*, void*) {
 
         if (proc != nullptr && alink != nullptr && proc->id == fopAcM_GetID(alink)) {
             ++s_worldFrames;
+        }
+    }
+
+    if (s_keyingLive) {
+        auto* proc = mods::arg<base_process_class*>(args, 0);
+
+        if (proc != nullptr && !key_already_cached(proc->id)) {
+            fopAc_ac_c* actor = fopAcM_SearchByID(proc->id);
+            if (actor != nullptr && fopAcM_GetGroup(actor) == fopAc_ENEMY_e) {
+                placement_key(actor);
+            }
         }
     }
 
@@ -4457,6 +4527,7 @@ void enemies_update() {
     if (dComIfGp_event_runCheck()) s_eventSettleTicks = kEventSettleTicks;
     else if (s_eventSettleTicks > 0) --s_eventSettleTicks;
 
+    s_keyingLive = coop_net_connected() && in_gameplay();
     if (!enemies_enabled_now()) {
         if (tables_busy()) reset_tables();
 
@@ -4572,6 +4643,10 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
             r->timerCount = entry.timerCount;
             r->extraState = entry.extraState;
             r->stamp = s_tick;
+            if (Tracked* t = find_tracked(entry.room, entry.key)) {
+                t->describedStamp = s_tick;
+                t->describedEver = true;
+            }
         }
         break;
     }

@@ -734,6 +734,20 @@ void apply_puppet_texture(PuppetModelColors& m, PuppetTexture& t) {
 }
 
 void release_model_colors(PuppetModelColors& m) {
+
+    if (m.model != nullptr && coop_ptr_looks_live(m.model)) {
+        J3DModelData* data = m.model->getModelData();
+        if (coop_ptr_looks_live(data)) {
+            J3DTexture* original = data->getTexture();
+            if (coop_ptr_looks_live(original)) {
+                const u16 matNum = data->getMaterialNum();
+                for (u16 i = 0; i < matNum; ++i) {
+                    J3DMatPacket* packet = m.model->getMatPacket(i);
+                    if (packet != nullptr) packet->setTexture(original);
+                }
+            }
+        }
+    }
     for (int i = 0; i < m.count; ++i) {
         PuppetTexture& t = m.tex[i];
         if (t.handle != 0 && svc_texture != nullptr) svc_texture->unregister(mod_ctx, t.handle);
