@@ -28,7 +28,7 @@ DEFINE_HOOK((static_cast<fopAc_ac_c* (*)(s16, u32, const cXyz*, int, const csXyz
 
 namespace {
 
-const int kMaxSpawns = 24;
+const int kMaxSpawns = kCoopMaxPlayers * 6;
 const int kSendEveryTicks = 2;
 const int kNoId = -1;
 
@@ -104,6 +104,16 @@ void read_roll(const int16_t* q, Mtx m) {
 bool bomb_model_available() {
     return dComIfG_getObjectRes(daAlink_c::getAlinkArcName(),
                kAlinkBombResIdx) != nullptr;
+}
+
+bool alink_arc_resident() {
+    dRes_info_c* info = dComIfG_getObjectResInfo(daAlink_c::getAlinkArcName());
+    if (info == nullptr) return false;
+    JKRArchive* archive = info->getArchive();
+    if (archive == nullptr) return false;
+
+    return JKRGetNameResource("zelda_v_cursor_new_yellow.blo", archive) != nullptr &&
+           JKRGetNameResource("zelda_v_cursor_new_yellow.bpk", archive) != nullptr;
 }
 
 void log_bomb_res_once() {
@@ -451,7 +461,7 @@ void neutralise_boomerang(daBoomerang_c* boom, const csXyz& angle) {
     boom->offStateFlg0(daBoomerang_c::FLG0_40);
 }
 
-const int kMaxRiddenBombs = 8;
+const int kMaxRiddenBombs = kCoopMaxPlayers;
 
 struct RiddenBomb {
     bool used = false;
@@ -783,7 +793,7 @@ struct FreshBoomBomb {
     uint32_t born = 0;
     cXyz pos;
 };
-const int kMaxFreshBoomBombs = 16;
+const int kMaxFreshBoomBombs = kCoopMaxPlayers * 2;
 FreshBoomBomb s_freshBoomBombs[kMaxFreshBoomBombs];
 const uint32_t kCatchDupTicks = 10;
 const f32 kCatchDupDist = 40.0f;
@@ -870,6 +880,11 @@ void spawns_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_
         if (find_replica(msg.netId) != nullptr) return;
         if (!should_replicate(msg.procName, msg.param, msg.param)) return;
         log_bomb_res_once();
+        if (msg.procName == fpcNm_BOOMERANG_e && !alink_arc_resident()) {
+            coop_log::info("coop_mod: [SPAWN] refusing netId={} - a boomerang needs Link's archive "
+                           "and it is not resident here", msg.netId);
+            return;
+        }
         if (msg.procName == fpcNm_NBOMB_e && !bomb_model_available()) {
 
             coop_log::info("coop_mod: [SPAWN] refusing netId={} - the bomb model is not resident "

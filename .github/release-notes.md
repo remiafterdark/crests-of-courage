@@ -10,6 +10,16 @@ starts, and send Dusklight's log if it does not.
 Enemy sync, boss sync and story progress are off by default under Unfinished. Enemy sync in
 particular is rough.
 
+## Since 1.0.4
+
+- A boomerang somebody else threw could kill your game outright if Link's own archive was not
+  resident where you were standing, which is exactly what being a wolf means. The engine builds a
+  boomerang's aiming cursor out of that archive without ever checking it is there. Now it is
+  checked, and the boomerang simply is not copied rather than taking the game with it.
+- Bombs, boomerangs and arrows all had pools sized for two players. Past them other people's
+  bombs and shots stopped appearing, and with arrows the list that tells your own shots from
+  copies could wrap mid-flight and send a copy back round the party.
+
 ## Since 1.0.3
 
 The crashes with more than a couple of players. Several things in here were sized back when one

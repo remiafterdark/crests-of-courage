@@ -16,7 +16,7 @@
 
 namespace {
 
-const int kTrackMax = 32;
+const int kTrackMax = kCoopMaxPlayers * 16;
 const fpc_ProcID kNoId = static_cast<fpc_ProcID>(-1);
 
 fpc_ProcID s_reported[kTrackMax];
@@ -31,7 +31,7 @@ struct PendingShot {
     int age = 0;
     MsgArrowShot shot{};
 };
-PendingShot s_pending[8];
+PendingShot s_pending[kCoopMaxPlayers * 2];
 
 void init_once() {
     if (s_inited) return;
@@ -54,15 +54,17 @@ void push_id(fpc_ProcID* list, int& next, fpc_ProcID id) {
     next = (next + 1) % kTrackMax;
 }
 
+const int kArrowListMax = kCoopMaxPlayers * 4;
+
 struct ArrowList {
-    daArrow_c* arrows[16];
+    daArrow_c* arrows[kArrowListMax];
     int count;
 };
 
 void* collect_arrows(void* proc, void* data) {
     auto* list = static_cast<ArrowList*>(data);
     auto* actor = static_cast<fopAc_ac_c*>(proc);
-    if (actor != nullptr && list->count < 16 && fopAcM_GetName(actor) == fpcNm_ARROW_e) {
+    if (actor != nullptr && list->count < kArrowListMax && fopAcM_GetName(actor) == fpcNm_ARROW_e) {
         list->arrows[list->count++] = static_cast<daArrow_c*>(actor);
     }
     return nullptr;
