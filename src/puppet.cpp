@@ -905,6 +905,12 @@ struct MaterialGuard {
     J3DModelData* modelData = nullptr;
     u16 count = 0;
     J3DMaterialAnm* saved[kPuppetMaxMaterials];
+
+    u8 savedTevStages[kPuppetMaxMaterials];
+    u32 savedTexGens[kPuppetMaxMaterials];
+    bool touchedStages[kPuppetMaxMaterials];
+    J3DAlphaComp savedAlpha[kPuppetMaxMaterials];
+    bool touchedAlpha[kPuppetMaxMaterials];
 };
 
 bool material_guard_begin(J3DModel* model, MaterialGuard& guard) {
@@ -913,7 +919,10 @@ bool material_guard_begin(J3DModel* model, MaterialGuard& guard) {
     const u16 num = data->getMaterialNum();
     guard.modelData = data;
     guard.count = num <= kPuppetMaxMaterials ? num : kPuppetMaxMaterials;
+    static const J3DAlphaCompInfo kAlwaysPassInfo = {GX_ALWAYS, 0, GX_AOP_OR, GX_ALWAYS, 0};
     for (u16 i = 0; i < guard.count; ++i) {
+        guard.touchedStages[i] = false;
+        guard.touchedAlpha[i] = false;
         J3DMaterial* material = data->getMaterialNodePointer(i);
         if (material == nullptr) {
             guard.saved[i] = nullptr;
@@ -921,6 +930,30 @@ bool material_guard_begin(J3DModel* model, MaterialGuard& guard) {
         }
         guard.saved[i] = material->getMaterialAnm();
         material->setMaterialAnm(nullptr);
+
+        J3DTevBlock* tevBlock = material->getTevBlock();
+        J3DTexGenBlock* texGenBlock = material->getTexGenBlock();
+        if (tevBlock != nullptr && texGenBlock != nullptr) {
+            const u8 stages = tevBlock->getTevStageNum();
+            const u32 gens = texGenBlock->getTexGenNum();
+            if (stages != 0 && gens != 0) {
+                J3DTevOrder* order = tevBlock->getTevOrder(stages - 1);
+                if (order != nullptr && order->getTexMap() == 3) {
+                    guard.savedTevStages[i] = stages;
+                    guard.savedTexGens[i] = gens;
+                    guard.touchedStages[i] = true;
+                    tevBlock->setTevStageNum(static_cast<u8>(stages - 1));
+                    texGenBlock->setTexGenNum(gens - 1);
+                }
+            }
+        }
+        J3DPEBlock* peBlock = material->getPEBlock();
+        J3DAlphaComp* alphaComp = (peBlock != nullptr) ? peBlock->getAlphaComp() : nullptr;
+        if (alphaComp != nullptr) {
+            guard.savedAlpha[i] = *alphaComp;
+            guard.touchedAlpha[i] = true;
+            alphaComp->setAlphaCompInfo(kAlwaysPassInfo);
+        }
     }
     return true;
 }
@@ -929,7 +962,19 @@ void material_guard_end(MaterialGuard& guard) {
     if (guard.modelData == nullptr) return;
     for (u16 i = 0; i < guard.count; ++i) {
         J3DMaterial* material = guard.modelData->getMaterialNodePointer(i);
-        if (material != nullptr) material->setMaterialAnm(guard.saved[i]);
+        if (material == nullptr) continue;
+        material->setMaterialAnm(guard.saved[i]);
+        if (guard.touchedStages[i]) {
+            J3DTevBlock* tevBlock = material->getTevBlock();
+            J3DTexGenBlock* texGenBlock = material->getTexGenBlock();
+            if (tevBlock != nullptr) tevBlock->setTevStageNum(guard.savedTevStages[i]);
+            if (texGenBlock != nullptr) texGenBlock->setTexGenNum(guard.savedTexGens[i]);
+        }
+        if (guard.touchedAlpha[i]) {
+            J3DPEBlock* peBlock = material->getPEBlock();
+            J3DAlphaComp* alphaComp = (peBlock != nullptr) ? peBlock->getAlphaComp() : nullptr;
+            if (alphaComp != nullptr) *alphaComp = guard.savedAlpha[i];
+        }
     }
     guard.modelData = nullptr;
     guard.count = 0;
@@ -2400,7 +2445,6 @@ J3DModel* puppet_skin_equipment(const char* file, const cXyz& scale) {
 
     J3DModel* model = modelFromData(data, scale);
     if (model != nullptr) {
-        force_warp_off_all_materials(model->getModelData());
         force_diff_recognizes_stage_count(model);
     }
     return model;
@@ -2412,7 +2456,6 @@ J3DModel* puppet_skin_part(int part, const cXyz& scale) {
     if (name == nullptr) return nullptr;
     J3DModel* model = skins_part_model(name, outfit, part, scale.x);
     if (model != nullptr) {
-        force_warp_off_all_materials(model->getModelData());
         force_diff_recognizes_stage_count(model);
     }
     return model;
@@ -2436,7 +2479,6 @@ void load_puppet_parts(const OutfitFiles& files) {
     for (int i = 0; i < 2; ++i) {
         pup().bootModels[i] = loadBmdFromArc(files.arc, "al_bootsH.bmd", unitScale);
         if (pup().bootModels[i] != nullptr) {
-            force_warp_off_all_materials(pup().bootModels[i]->getModelData());
             force_diff_recognizes_stage_count(pup().bootModels[i]);
         }
     }
@@ -2449,13 +2491,9 @@ void load_puppet_parts(const OutfitFiles& files) {
     }
 
     if (pup().faceModel != nullptr) {
-        force_warp_off_all_materials(pup().faceModel->getModelData());
-        force_alpha_always_pass(pup().faceModel->getModelData());
         force_diff_recognizes_stage_count(pup().faceModel);
     }
     if (pup().hatModel != nullptr) {
-        force_warp_off_all_materials(pup().hatModel->getModelData());
-        force_alpha_always_pass(pup().hatModel->getModelData());
         force_diff_recognizes_stage_count(pup().hatModel);
 
         if (files.hasKmdlHatTail) {
@@ -2463,8 +2501,6 @@ void load_puppet_parts(const OutfitFiles& files) {
         }
     }
     if (pup().handsModel != nullptr) {
-        force_warp_off_all_materials(pup().handsModel->getModelData());
-        force_alpha_always_pass(pup().handsModel->getModelData());
         force_diff_recognizes_stage_count(pup().handsModel);
     }
     breadcrumb("build: face/hat/hands done");
@@ -3117,9 +3153,7 @@ void update_one_puppet(daAlink_c* alink) {
         const bool doDiag = warp_diag_on();
         if (pup().model != nullptr) {
             if (doDiag) log_warp_state("body BEFORE", pup().model->getModelData());
-            force_warp_off_all_materials(pup().model->getModelData());
 
-            force_alpha_always_pass(pup().model->getModelData());
             force_diff_recognizes_stage_count(pup().model);
             if (doDiag) log_warp_state("body AFTER", pup().model->getModelData());
         }
@@ -4983,8 +5017,6 @@ void draw_one_puppet(daAlink_c* alink) {
         }
     }
 
-    force_warp_off_all_materials(pup().model->getModelData());
-    force_alpha_always_pass(pup().model->getModelData());
     BodyHandGuard bodyHands;
     const bool bodyHandsApplied =
         body_hand_shapes_apply(pup().model, pup().handL, pup().handR, bodyHands);
@@ -5014,8 +5046,6 @@ void draw_one_puppet(daAlink_c* alink) {
 
         PuppetGuard faceGuard;
         if (puppet_guard_begin(pup().faceModel, faceGuard)) {
-            force_warp_off_all_materials(pup().faceModel->getModelData());
-            force_alpha_always_pass(pup().faceModel->getModelData());
 
             renderModelAtMtx(pup().faceModel, pup().model->getAnmMtx(4), nullptr);
             puppet_guard_end(faceGuard);
@@ -5028,8 +5058,6 @@ void draw_one_puppet(daAlink_c* alink) {
         const bool guardOk = puppet_guard_begin(pup().hatModel, hatGuard);
         if (guardOk && hasSway) set_hat_tail_callbacks(pup().hatModel);
         if (guardOk) {
-            force_warp_off_all_materials(pup().hatModel->getModelData());
-            force_alpha_always_pass(pup().hatModel->getModelData());
             renderModelAtMtx(pup().hatModel, pup().model->getAnmMtx(4), nullptr);
             puppet_guard_end(hatGuard);
         }
@@ -5075,8 +5103,6 @@ void draw_one_puppet(daAlink_c* alink) {
 
         PuppetGuard handsGuard;
         if (puppet_guard_begin(pup().handsModel, handsGuard)) {
-            force_warp_off_all_materials(pup().handsModel->getModelData());
-            force_alpha_always_pass(pup().handsModel->getModelData());
             pup().handsModel->setBaseTRMtx(pup().model->getBaseTRMtx());
             pup().handsModel->calc();
             pup().handsModel->setAnmMtx(1, pup().model->getAnmMtx(9));
