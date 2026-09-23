@@ -488,7 +488,6 @@ int s_blendTrace = 0;
 
 void breadcrumb(const char* step) {
 
-    if (!features_debug_menu()) return;
     static std::ofstream file;
     if (!file.is_open()) {
 
@@ -3047,6 +3046,10 @@ void update_one_puppet(daAlink_c* alink) {
     }
 }
 
+}
+
+void coop_crash_trail(const char* step) {
+    breadcrumb(step);
 }
 
 void puppet_hook_on_horse_snapshot(uint8_t playerId, const HorseSnapshot& snap) {

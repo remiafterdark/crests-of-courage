@@ -10,6 +10,13 @@ starts, and send Dusklight's log if it does not.
 Enemy sync, boss sync and story progress are off by default under Unfinished. Enemy sync in
 particular is rough.
 
+## Since 1.0.2
+
+- The goats are no longer synced. Each game runs its own, which is the only version where the
+  herding minigame finishes.
+- When the game crashes it now leaves a `coop-crash-trail.txt` next to `dusklight.exe` saying what
+  it was doing. If you crash, send that file: it is the one thing that survives.
+
 ## Since 1.0.1
 
 - Everyone's colours are their own again. With three or more players they were shared: whoever

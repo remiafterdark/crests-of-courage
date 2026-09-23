@@ -346,6 +346,8 @@ void colors_reset_mine();
 
 void colors_attach_puppet_model(J3DModel* model, uint8_t owner);
 
+void coop_crash_trail(const char* step);
+
 void colors_attach_local_model(J3DModel* model);
 
 void colors_detach_local_models();

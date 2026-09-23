@@ -1185,7 +1185,37 @@ void features_toast(const char* title, const char* body) {
     toast(title != nullptr ? title : "", body != nullptr ? body : "");
 }
 
+bool worth_crumbing(uint8_t type) {
+    switch (type) {
+    case kMsgSounds:
+    case kMsgParticles:
+    case kMsgHorse:
+    case kMsgAnimal:
+    case kMsgTorch:
+    case kMsgEnemyState:
+    case kMsgEnemyTargets:
+    case kMsgActorState:
+    case kMsgObjectMove:
+    case kMsgBossState:
+    case kMsgGrassCut:
+    case kMsgPing:
+    case kMsgPong:
+    case kMsgSkipVote:
+    case kMsgPause:
+    case kMsgCarry:
+        return false;
+    default:
+        return true;
+    }
+}
+
 void features_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t from) {
+    if (worth_crumbing(type)) {
+        char line[64];
+        std::snprintf(line, sizeof(line), "msg type=%d from=%d size=%d", static_cast<int>(type),
+            static_cast<int>(from), static_cast<int>(size));
+        coop_crash_trail(line);
+    }
     switch (type) {
     case kMsgAssignId: {
         if (size < sizeof(MsgAssignId)) break;

@@ -39,7 +39,7 @@ load your save, then press Restore latest backup in Advanced.
 - What pots, grass and enemies drop. Same item for everyone, picking it up is still yours
 - Twilight bugs and Tears of Light
 - Anything you pick up and throw, bombs included
-- Pots, grass, flowers, pushed blocks, cuccos and goats
+- Pots, grass, flowers, pushed blocks and cuccos
 - Boss cutscenes skip once everyone has pressed skip
 - Time of day, and optional death link
 - Custom models, per player

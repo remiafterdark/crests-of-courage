@@ -3728,7 +3728,7 @@ void torch_on_message(const MsgTorch& msg) {
 
 bool is_animal(fopAc_ac_c* actor) {
     const s16 name = fopAcM_GetName(actor);
-    return name == fpcNm_NI_e || name == fpcNm_COW_e;
+    return name == fpcNm_NI_e;
 }
 
 struct AnimalSteer {
