@@ -10,6 +10,12 @@ starts, and send Dusklight's log if it does not.
 Enemy sync, boss sync and story progress are off by default under Unfinished. Enemy sync in
 particular is rough.
 
+## Since 1.0.1
+
+- Everyone's colours are their own again. With three or more players they were shared: whoever
+  sent theirs last painted the whole party.
+- Players past the fourth no longer turn up wearing your colours.
+
 ## Since 1.0.0
 
 - A chest somebody else opened can no longer be opened again, including the blue chests, which

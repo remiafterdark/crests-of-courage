@@ -3036,10 +3036,10 @@ void update_one_puppet(daAlink_c* alink) {
         }
         load_puppet_parts(files);
 
-        colors_attach_puppet_model(pup().model);
-        colors_attach_puppet_model(pup().hatModel);
-        colors_attach_puppet_model(pup().bootModels[0]);
-        colors_attach_puppet_model(pup().bootModels[1]);
+        colors_attach_puppet_model(pup().model, s_pupId);
+        colors_attach_puppet_model(pup().hatModel, s_pupId);
+        colors_attach_puppet_model(pup().bootModels[0], s_pupId);
+        colors_attach_puppet_model(pup().bootModels[1], s_pupId);
         coop_log::info("coop_mod: [DIAG] model={:p} outfit={} joints={} mats={}",
             static_cast<void*>(pup().model), pup().outfit,
             pup().model ? pup().model->getModelData()->getJointNum() : 0,

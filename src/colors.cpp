@@ -120,7 +120,8 @@ ConfigVarHandle s_vars[kSlotCount] = {};
 SlotColor s_cosmetics[kSlotCount];
 SlotColor s_lastSent[kSlotCount];
 bool s_needSend = false;
-SlotColor s_peer[kSlotCount];
+
+SlotColor s_peer[kCoopMaxPlayers][kSlotCount];
 
 bool parse_hex_color(const std::string& in, SlotColor& out) {
     std::string s = in;
@@ -673,6 +674,7 @@ struct PuppetModelColors {
     J3DModel* model = nullptr;
 
     bool mine = false;
+    uint8_t owner = kCoopNoPlayer;
     unsigned char* shadow = nullptr;
     TGXTexObj* texObjs = nullptr;
     u8** imgPtrs = nullptr;
@@ -681,16 +683,18 @@ struct PuppetModelColors {
     PuppetTexture tex[kMaxPuppetTextures];
 };
 
-const int kMaxPuppetModels = 16;
+const int kMaxPuppetModels = kCoopMaxPlayers * 4 + 4;
 PuppetModelColors s_models[kMaxPuppetModels];
 
-SlotColor peer_color(int slot) {
-    return (coop_net_connected() && slot >= 0 && slot < kSlotCount) ? s_peer[slot] : SlotColor{};
+SlotColor peer_color(uint8_t owner, int slot) {
+    if (!coop_net_connected() || slot < 0 || slot >= kSlotCount) return SlotColor{};
+    if (owner >= kCoopMaxPlayers) return SlotColor{};
+    return s_peer[owner][slot];
 }
 
 void apply_puppet_texture(PuppetModelColors& m, PuppetTexture& t) {
     if (svc_texture == nullptr) return;
-    const SlotColor want = m.mine ? effective_local(t.slot) : peer_color(t.slot);
+    const SlotColor want = m.mine ? effective_local(t.slot) : peer_color(m.owner, t.slot);
     if (t.registered && want == t.applied) return;
 
     std::vector<uint8_t> pixels(t.buffer, t.buffer + t.size);
@@ -831,28 +835,35 @@ void colors_update() {
 
 void colors_on_connected() {
     s_needSend = true;
-    for (SlotColor& c : s_peer) c = SlotColor{};
+    for (auto& row : s_peer) for (SlotColor& c : row) c = SlotColor{};
 }
 
 void colors_on_disconnected() {
-    for (SlotColor& c : s_peer) c = SlotColor{};
+    for (auto& row : s_peer) for (SlotColor& c : row) c = SlotColor{};
     for (SlotColor& c : s_lastSent) c = SlotColor{};
 }
 
-void colors_on_message(const uint8_t* payload, size_t size) {
+void colors_on_message(const uint8_t* payload, size_t size, uint8_t from) {
+    if (from >= kCoopMaxPlayers) return;
     const size_t count = size / sizeof(MsgColorEntry);
     for (size_t i = 0; i < count && i < static_cast<size_t>(kSlotCount); ++i) {
         MsgColorEntry entry;
         std::memcpy(&entry, payload + i * sizeof(MsgColorEntry), sizeof(entry));
-        s_peer[i].set = entry.set != 0;
-        s_peer[i].r = entry.r;
-        s_peer[i].g = entry.g;
-        s_peer[i].b = entry.b;
+        s_peer[from][i].set = entry.set != 0;
+        s_peer[from][i].r = entry.r;
+        s_peer[from][i].g = entry.g;
+        s_peer[from][i].b = entry.b;
     }
-    coop_log::info("coop_mod: [COLORS] received the other player's colors ({} slots)", count);
+
+    for (PuppetModelColors& m : s_models) {
+        if (m.model == nullptr || m.mine || m.owner != from) continue;
+        for (int i = 0; i < m.count; ++i) m.tex[i].registered = false;
+    }
+    coop_log::info("coop_mod: [COLORS] player {} sent their colors ({} slots)",
+        static_cast<int>(from), count);
 }
 
-void colors_attach_model(J3DModel* model, bool mine) {
+void colors_attach_model(J3DModel* model, bool mine, uint8_t owner = kCoopNoPlayer) {
     if (model == nullptr || svc_texture == nullptr) return;
     for (const PuppetModelColors& m : s_models) {
         if (m.model == model) return;
@@ -876,6 +887,8 @@ void colors_attach_model(J3DModel* model, bool mine) {
 
     PuppetModelColors m;
     m.model = model;
+    m.mine = mine;
+    m.owner = mine ? kCoopNoPlayer : owner;
     m.texNum = original->getNum();
     for (u16 i = 0; i < m.texNum && m.count < kMaxPuppetTextures; ++i) {
         const int slotIndex = slot_for_texture(names->getName(i));
@@ -933,8 +946,8 @@ void colors_attach_model(J3DModel* model, bool mine) {
         static_cast<void*>(model), slot->count);
 }
 
-void colors_attach_puppet_model(J3DModel* model) {
-    colors_attach_model(model, false);
+void colors_attach_puppet_model(J3DModel* model, uint8_t owner) {
+    colors_attach_model(model, false, owner);
 }
 
 void colors_attach_local_model(J3DModel* model) {

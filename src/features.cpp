@@ -1264,7 +1264,7 @@ void features_on_message(uint8_t type, const uint8_t* payload, size_t size, uint
     case kMsgPillarShake:
     case kMsgBossStem: boss_on_message(type, payload, size, from); break;
     case kMsgJoinSync: joinsync_on_message(payload, size); break;
-    case kMsgColors: colors_on_message(payload, size); break;
+    case kMsgColors: colors_on_message(payload, size, from); break;
     case kMsgArrowShot: projectiles_on_message(payload, size); break;
     case kMsgHorse: horse_on_message(payload, size, from); break;
     case kMsgGrassCut: grass_on_message(payload, size, from); break;

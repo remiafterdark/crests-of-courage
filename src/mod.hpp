@@ -337,14 +337,14 @@ void colors_init();
 void colors_update();
 void colors_on_connected();
 void colors_on_disconnected();
-void colors_on_message(const uint8_t* payload, size_t size);
+void colors_on_message(const uint8_t* payload, size_t size, uint8_t from);
 int colors_slot_count();
 const char* colors_slot_label(int slot);
 const char* colors_slot_group(int slot);
 ConfigVarHandle colors_slot_var(int slot);
 void colors_reset_mine();
 
-void colors_attach_puppet_model(J3DModel* model);
+void colors_attach_puppet_model(J3DModel* model, uint8_t owner);
 
 void colors_attach_local_model(J3DModel* model);
 
