@@ -348,27 +348,34 @@ const int kPendingFreeMax = kCoopMaxPlayers * 48;
 J3DModel* s_pendingFree[kPendingFreeMax];
 int s_pendingFreeCount = 0;
 
+J3DModel* s_pendingFreeOlder[kPendingFreeMax];
+int s_pendingFreeOlderCount = 0;
+
 void puppet_free_later(J3DModel*& model) {
     if (model == nullptr) return;
     if (s_pendingFreeCount < kPendingFreeMax) {
         s_pendingFree[s_pendingFreeCount++] = model;
     } else {
 
-        coop_log::warn("coop_mod: [PUPPET] deferred-free queue full - freeing a model immediately");
-        JKR_DELETE(model);
+        coop_log::warn("coop_mod: [PUPPET] deferred-free queue full - leaking one model on purpose");
     }
     model = nullptr;
 }
 
 void puppet_flush_pending_frees() {
-    if (s_pendingFreeCount == 0) return;
 
+    for (int i = 0; i < s_pendingFreeOlderCount; ++i) {
+
+        colors_detach_model(s_pendingFreeOlder[i]);
+        JKR_DELETE(s_pendingFreeOlder[i]);
+        s_pendingFreeOlder[i] = nullptr;
+    }
+    s_pendingFreeOlderCount = 0;
     for (int i = 0; i < s_pendingFreeCount; ++i) {
-
-        colors_detach_model(s_pendingFree[i]);
-        JKR_DELETE(s_pendingFree[i]);
+        s_pendingFreeOlder[i] = s_pendingFree[i];
         s_pendingFree[i] = nullptr;
     }
+    s_pendingFreeOlderCount = s_pendingFreeCount;
     s_pendingFreeCount = 0;
 }
 inline Puppet& pup() { return *s_pup; }
@@ -604,16 +611,10 @@ void release_midna_models() {
         pup().midnaInv[i].mpPackets = nullptr;
         pup().midnaInv[i].mModel = nullptr;
         pup().midnaInvReady[i] = false;
-        if (pup().midnaSolid[i] != nullptr) {
-            JKR_DELETE(pup().midnaSolid[i]);
-            pup().midnaSolid[i] = nullptr;
-        }
+        puppet_free_later(pup().midnaSolid[i]);
     }
     for (int i = 0; i < 5; ++i) {
-        if (pup().midnaShadow[i] != nullptr) {
-            JKR_DELETE(pup().midnaShadow[i]);
-            pup().midnaShadow[i] = nullptr;
-        }
+        puppet_free_later(pup().midnaShadow[i]);
     }
     pup().midnaSolidFailed = false;
     pup().midnaShadowFailed = false;
@@ -676,10 +677,8 @@ void release_puppet_models_only() {
     pup().sheathId = kPuppetSheathNone;
 
     for (int k = 0; k < kPuppetAttachSlots; ++k) {
-        if (pup().attachSlots[k].model != nullptr) {
-            JKR_DELETE(pup().attachSlots[k].model);
-            pup().attachSlots[k].model = nullptr;
-        }
+
+        puppet_free_later(pup().attachSlots[k].model);
         pup().attachSlots[k].kind = kPuppetHeldNone;
         pup().attachSlots[k].wireIdx = 0xFFFF;
     }
@@ -1688,10 +1687,7 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
 void release_outfit_item_data() {
 
     if (pup().swordId == kPuppetSwordWood) {
-        if (pup().swordModel != nullptr) {
-            JKR_DELETE(pup().swordModel);
-            pup().swordModel = nullptr;
-        }
+        puppet_free_later(pup().swordModel);
         pup().swordId = kPuppetSwordNone;
     }
     for (int i = 0; i < kPuppetHeldCount; ++i) {
@@ -1720,7 +1716,8 @@ J3DModel* get_slot_model(int slotIdx, u8 kind, u16 wireIdx) {
     if (slot.kind == kind && slot.model != nullptr && !itemChanged) return slot.model;
     slot.wireIdx = wireIdx;
     if (slot.model != nullptr) {
-        JKR_DELETE(slot.model);
+
+        puppet_free_later(slot.model);
         slot.model = nullptr;
     }
     slot.kind = kPuppetHeldNone;
@@ -3656,10 +3653,7 @@ void prep_equipment_model(J3DModel* model) {
 
 void sync_equipment_models() {
     if (pup().wantSword != pup().swordId) {
-        if (pup().swordModel != nullptr) {
-            JKR_DELETE(pup().swordModel);
-            pup().swordModel = nullptr;
-        }
+        puppet_free_later(pup().swordModel);
 
         int idx = -1;
         const char* outfitBmd = nullptr;
@@ -3727,10 +3721,7 @@ void sync_equipment_models() {
     }
 
     if (pup().wantSheath != pup().sheathId) {
-        if (pup().sheathModel != nullptr) {
-            JKR_DELETE(pup().sheathModel);
-            pup().sheathModel = nullptr;
-        }
+        puppet_free_later(pup().sheathModel);
         int idx = -1;
         const char* skinBmd = nullptr;
         switch (pup().wantSheath) {
@@ -3761,10 +3752,8 @@ void sync_equipment_models() {
     const bool archiveChanged = std::strncmp(pup().wantShieldArc, pup().shieldArc,
                                              sizeof(pup().shieldArc)) != 0;
     if (!wantShield || archiveChanged) {
-        if (pup().shieldModel != nullptr) {
-            JKR_DELETE(pup().shieldModel);
-            pup().shieldModel = nullptr;
-        }
+
+        puppet_free_later(pup().shieldModel);
         if (pup().shieldArc[0] != '\0') {
             release_arc_share(pup().shieldArc);
             pup().shieldArc[0] = '\0';
@@ -4876,7 +4865,9 @@ void draw_puppet_horse(daAlink_c* alink) {
         mDoMtx_copy(rel, base);
     }
     static Mtx joints[kHorseJoints];
-    const u16 modelJoints = model->getModelData()->getJointNum();
+    J3DModelData* horseData = model->getModelData();
+    if (horseData == nullptr) return;
+    const u16 modelJoints = horseData->getJointNum();
     const int idleCount = modelJoints < kHorseJoints ? modelJoints : kHorseJoints;
     const bool idle = (snap.flags & kHorseFlagIdle) != 0 &&
                       horse_idle_pose(model, base, joints, idleCount, snap);

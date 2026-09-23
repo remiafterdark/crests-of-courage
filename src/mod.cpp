@@ -2162,7 +2162,9 @@ void send_local_horse() {
 
     Mtx invBase;
     mDoMtx_inverse(base, invBase);
-    const u16 joints = model->getModelData()->getJointNum();
+    J3DModelData* horseData = model->getModelData();
+    if (horseData == nullptr) return;
+    const u16 joints = horseData->getJointNum();
     const int n = joints < kHorseJoints ? joints : kHorseJoints;
     static bool s_saidJoints = false;
     if (!s_saidJoints) {
