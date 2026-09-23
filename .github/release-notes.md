@@ -10,6 +10,21 @@ starts, and send Dusklight's log if it does not.
 Enemy sync, boss sync and story progress are off by default under Unfinished. Enemy sync in
 particular is rough.
 
+## Since 1.0.3
+
+The crashes with more than a couple of players. Several things in here were sized back when one
+other player was the only case, and they all gave way at about the same party size:
+
+- The animation cache held sixteen entries and every puppet shared it. Four players need more than
+  that, so loading the last puppet's animations threw away ones the first puppet was still using,
+  and the game read them anyway a moment later while drawing. That is the crash where several
+  people go down at once and whoever was alone does not.
+- The teardown queue held 64 models where one stage change with a full room needs hundreds. Past
+  the limit it freed models the frame was still drawing.
+- Held and thrown objects, and blows waiting to be replayed, had eight slots between everybody.
+  Past that they were silently dropped, which is why other people's pots and hits stopped landing
+  in a big group.
+
 ## Since 1.0.2
 
 - The goats are no longer synced. Each game runs its own, which is the only version where the

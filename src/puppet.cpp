@@ -122,16 +122,20 @@ u8 detect_local_outfit_for_a_press() {
     return kPuppetOutfitDefault;
 }
 
-const int kAnimCacheSize = 16;
+const int kAnimCacheSize = kCoopMaxPlayers * 8;
 struct PuppetAnimCacheEntry {
     u16 resIdx = 0xFFFF;
     mDoExt_bckAnm* bck = nullptr;
 
     u8* buf = nullptr;
     u32 lastUsed = 0;
+
+    u32 usedFrame = 0;
 };
 PuppetAnimCacheEntry s_puppetAnimCache[kAnimCacheSize];
 u32 s_puppetAnimCacheClock = 0;
+
+u32 s_puppetFrame = 0;
 
 uintptr_t s_liveAnmVtbl = 0;
 int s_deadAnmLogCount = 0;
@@ -338,7 +342,7 @@ Puppet s_puppetSlots[kMaxPuppets];
 
 Puppet* s_pup = &s_puppetSlots[0];
 
-const int kPendingFreeMax = 64;
+const int kPendingFreeMax = kCoopMaxPlayers * 48;
 J3DModel* s_pendingFree[kPendingFreeMax];
 int s_pendingFreeCount = 0;
 
@@ -1281,19 +1285,32 @@ bool alanm_guard_intact(const u8* buf, u32 bufSize) {
 }
 
 mDoExt_bckAnm* get_or_load_puppet_anim(daAlink_c* alink, u16 resIdx) {
-    int lruIdx = 0;
+    int lruIdx = -1;
     for (int i = 0; i < kAnimCacheSize; ++i) {
         if (s_puppetAnimCache[i].resIdx == resIdx && s_puppetAnimCache[i].bck != nullptr) {
             s_puppetAnimCache[i].lastUsed = ++s_puppetAnimCacheClock;
+            s_puppetAnimCache[i].usedFrame = s_puppetFrame;
             return s_puppetAnimCache[i].bck;
         }
-        if (s_puppetAnimCache[i].bck == nullptr) {
+
+        if (s_puppetAnimCache[i].bck != nullptr && s_puppetAnimCache[i].usedFrame == s_puppetFrame) {
+            continue;
+        }
+
+        if (lruIdx < 0) {
             lruIdx = i;
-        } else if (s_puppetAnimCache[i].lastUsed < s_puppetAnimCache[lruIdx].lastUsed) {
+        } else if (s_puppetAnimCache[lruIdx].bck != nullptr &&
+                   (s_puppetAnimCache[i].bck == nullptr ||
+                       s_puppetAnimCache[i].lastUsed < s_puppetAnimCache[lruIdx].lastUsed)) {
             lruIdx = i;
         }
     }
     if (alink == nullptr) return nullptr;
+    if (lruIdx < 0) {
+
+        coop_log::warn("coop_mod: [ANIM] cache full this frame - resIdx={} not loaded", resIdx);
+        return nullptr;
+    }
 
     u32 bufSize = 0;
     u8* buf = read_alanm_resource(resIdx, kPuppetBckBufferSize, &bufSize);
@@ -1345,6 +1362,7 @@ mDoExt_bckAnm* get_or_load_puppet_anim(daAlink_c* alink, u16 resIdx) {
     s_puppetAnimCache[lruIdx].resIdx = resIdx;
     s_puppetAnimCache[lruIdx].bck = bck;
     s_puppetAnimCache[lruIdx].lastUsed = ++s_puppetAnimCacheClock;
+    s_puppetAnimCache[lruIdx].usedFrame = s_puppetFrame;
     return bck;
 }
 
@@ -2886,6 +2904,7 @@ bool puppets_lost_their_link(daAlink_c* alink) {
 }
 
 void on_alink_execute_puppet_post(ModContext*, void*, void*, void*) {
+    ++s_puppetFrame;
 
     puppet_flush_pending_frees();
 

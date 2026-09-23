@@ -177,7 +177,8 @@ ConfigVarHandle s_breakablesVar = 0;
 ConfigVarHandle s_moversVar = 0;
 const int kHitRelayQuietTicks = 20;
 const int kCaptureQuietTicks = 8;
-const int kMaxPendingHits = 8;
+
+const int kMaxPendingHits = kCoopMaxPlayers * 4;
 const int16_t kProcNbomb = 0x221;
 
 struct PendingHit {
@@ -3135,7 +3136,7 @@ bool carry_live() {
     return session_live() && movers_enabled();
 }
 
-const int kMaxCarried = 8;
+const int kMaxCarried = kCoopMaxPlayers * 4;
 const int kCarrySendEvery = 2;
 const int kCarryRestTicks = 15;
 const int kCarryFlightMaxTicks = 300;
