@@ -1,6 +1,9 @@
 # builds every platform and packs them into one crests_of_courage.dusk
 name: build
 
+env:
+  SYMGEN_VERSION: v1.2.4
+
 on:
   push:
     branches: [main]
@@ -116,6 +119,17 @@ jobs:
         with:
           pattern: mod-*
           path: dist
+
+      # the mod site refuses a native package whose mod.json has no abi/imports/exports, and
+      # symgen reads those straight out of the built libraries
+      - name: mod metadata
+        run: |
+          curl -fsSL -o symgen             "https://github.com/encounter/symgen/releases/download/${SYMGEN_VERSION}/symgen-linux-x86_64"
+          chmod +x symgen
+          mkdir -p libs
+          for f in dist/*/*.dusk; do unzip -o -q "$f" 'lib/*' -d libs; done
+          ./symgen modmeta --check --update-json mod.json $(find libs -type f -name 'mod.*')
+          cat mod.json
 
       - name: pack
         run: |
