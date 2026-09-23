@@ -1101,14 +1101,32 @@ void apply_debug_epona_flags() {
 void apply_debug_give_kit() {
     static bool s_done = false;
     if (s_done || g_giveKitVar == 0 || !cfg_bool(g_giveKitVar, false)) return;
+
+    static bool s_wearDone = false;
+    if (!s_wearDone && dComIfGs_getSaveInfo() != nullptr) {
+        dComIfGs_setCollectClothes(KOKIRI_CLOTHES_FLAG);
+        dComIfGs_setSelectEquipClothes(dItemNo_WEAR_KOKIRI_e);
+        if (daAlink_getAlinkActorClass() != nullptr) {
+            s_wearDone = true;
+            coop_log::info("coop_mod: [DEBUG] hero's clothes on");
+        }
+    }
     if (daAlink_getAlinkActorClass() == nullptr || svc_item == nullptr) return;
     static const int kKit[] = {dItemNo_COPY_ROD_e, dItemNo_BOMB_BAG_LV1_e, dItemNo_KANTERA_e,
-        dItemNo_BOW_e, dItemNo_BOOMERANG_e};
+        dItemNo_BOW_e, dItemNo_BOOMERANG_e, dItemNo_HORSE_FLUTE_e};
     for (int item : kKit) {
         svc_item->give_item(mod_ctx, nullptr, static_cast<uint8_t>(item), ITEM_GIVE_SILENT);
     }
+
+    dComIfGs_setCollectSword(COLLECT_ORDON_SWORD);
+    dComIfGs_setCollectSword(COLLECT_MASTER_SWORD);
+    dComIfGs_setCollectShield(COLLECT_ORDON_SHIELD);
+    dComIfGs_setCollectShield(COLLECT_HYLIAN_SHIELD);
+    dComIfGs_setSelectEquipSword(dItemNo_MASTER_SWORD_e);
+    dComIfGs_setSelectEquipShield(dItemNo_HYLIA_SHIELD_e);
     s_done = true;
-    coop_log::info("coop_mod: [DEBUG] test kit given (rod, bombs, lantern, bow, boomerang)");
+    coop_log::info("coop_mod: [DEBUG] test kit given (rod, bombs, lantern, bow, boomerang, horse "
+                   "call, both swords, both shields)");
 }
 
 void send_local_snapshot() {

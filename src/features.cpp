@@ -1236,6 +1236,7 @@ void features_on_message(uint8_t type, const uint8_t* payload, size_t size, uint
     case kMsgWorldDelta:
     case kMsgWorldSyncRequest:
     case kMsgWorldFull:
+    case kMsgTbox2:
     case kMsgWorldDigest: world_on_message(type, payload, size, from); break;
     case kMsgEnemyState:
     case kMsgEnemyGone:

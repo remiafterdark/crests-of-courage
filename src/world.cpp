@@ -14,12 +14,19 @@
 #include "d/actor/d_a_obj_drop.h"
 #include "d/actor/d_a_obj_smallkey.h"
 #include "d/actor/d_a_tbox.h"
+#include "d/actor/d_a_tbox2.h"
+#include "d/d_tresure.h"
+#include "d/d_bg_w.h"
 #include "d/d_stage.h"
 #include "f_op/f_op_actor_iter.h"
+#include "mods/service.hpp"
+#include "mods/svc/hook.hpp"
 #include "f_op/f_op_actor_mng.h"
 
 #include <cstdio>
 #include <cstring>
+
+DEFINE_HOOK(&daTbox_c::actionOpenWait, TboxOpenWaitHook);
 
 namespace {
 
@@ -519,7 +526,7 @@ void* open_matching_chest(void* proc, void* data) {
     static bool reported = false;
     if (!reported) {
         reported = true;
-        daTbox_actionFn ours = &daTbox_c::actionOpenWait;
+        daTbox_actionFn ours = &daTbox_c::actionWait;
         unsigned char oursBytes[sizeof(daTbox_actionFn)];
         unsigned char theirs[sizeof(daTbox_actionFn)];
         std::memcpy(oursBytes, &ours, sizeof(oursBytes));
@@ -531,10 +538,19 @@ void* open_matching_chest(void* proc, void* data) {
             ai += std::snprintf(a + ai, sizeof(a) - ai, "%02x", oursBytes[i]);
             bi += std::snprintf(b + bi, sizeof(b) - bi, "%02x", theirs[i]);
         }
-        coop_log::info("coop_mod: [CHEST] pmf size={} ours(actionOpenWait)={} theirs(current)={}",
+        coop_log::info("coop_mod: [CHEST] pmf size={} ours(actionWait)={} theirs(current)={}",
             static_cast<int>(sizeof(daTbox_actionFn)), a, b);
     }
-    chest->setAction(&daTbox_c::actionOpenWait);
+
+    chest->setAction(&daTbox_c::actionWait);
+
+    coop_log::info("coop_mod: [CHEST] closing {} remotely: isTbox={}", no,
+        dComIfGs_isTbox(no) ? 1 : 0);
+    if (!dComIfGs_isTbox(no)) dComIfGs_onTbox(no);
+    dTres_c::offStatus(0, no, 1);
+
+    chest->setDzb();
+    if (chest->mpBgCollision != nullptr) chest->mpBgCollision->Move();
     clear_tbox_bit(s_pendingChestBits, no);
     ++sweep->count;
     return nullptr;
@@ -1161,6 +1177,127 @@ void run_self_test() {
         room, info->getMemory().getBit().isSwitch(kSelfTestSwitch) ? 1 : 0, zoneBit);
 }
 
+const int16_t kProcTbox2 = 0x0FC;
+const int kMaxTbox2 = 32;
+
+uint32_t tbox2_key(fopAc_ac_c* actor) {
+    uint32_t h = 2166136261u;
+    const int16_t name = fopAcM_GetName(actor);
+    const uint16_t setID = actor->setID;
+    auto mix = [&h](const void* p, size_t n) {
+        const auto* b = static_cast<const uint8_t*>(p);
+        for (size_t i = 0; i < n; ++i) {
+            h ^= b[i];
+            h *= 16777619u;
+        }
+    };
+    mix(&name, sizeof(name));
+    mix(&setID, sizeof(setID));
+    if (setID == 0xFFFF) {
+
+        const int32_t x = static_cast<int32_t>(actor->home.pos.x);
+        const int32_t y = static_cast<int32_t>(actor->home.pos.y);
+        const int32_t z = static_cast<int32_t>(actor->home.pos.z);
+        const uint32_t param = fopAcM_GetParam(actor);
+        mix(&param, sizeof(param));
+        mix(&x, sizeof(x));
+        mix(&y, sizeof(y));
+        mix(&z, sizeof(z));
+    }
+    return h != 0 ? h : 1u;
+}
+
+uint32_t s_tbox2Sent[kMaxTbox2] = {};
+char s_tbox2Stage[8] = {};
+
+struct Tbox2Find {
+    uint32_t key;
+    cXyz home;
+    daTbox2_c* found;
+    f32 bestDistSq;
+};
+
+void* collect_open_tbox2(void* proc, void* data) {
+    auto* actor = static_cast<fopAc_ac_c*>(proc);
+    if (actor == nullptr || fopAcM_GetName(actor) != kProcTbox2) return nullptr;
+    auto* chest = static_cast<daTbox2_c*>(actor);
+
+    if (chest->mAction == daTbox2_c::ACTION_OPEN_WAIT_e) return nullptr;
+    const uint32_t key = tbox2_key(actor);
+    for (uint32_t& sent : s_tbox2Sent) {
+        if (sent == key) return nullptr;
+    }
+    for (uint32_t& sent : s_tbox2Sent) {
+        if (sent != 0) continue;
+        sent = key;
+        MsgTbox2 msg{};
+        msg.key = key;
+        msg.room = static_cast<int8_t>(fopAcM_GetRoomNo(actor));
+        msg.procName = fopAcM_GetName(actor);
+        msg.home[0] = actor->home.pos.x;
+        msg.home[1] = actor->home.pos.y;
+        msg.home[2] = actor->home.pos.z;
+        coop_net_send(kMsgTbox2, &msg, sizeof(msg));
+        coop_log::info("coop_mod: [CHEST] told them about no-save chest {:#x}", key);
+        break;
+    }
+    return nullptr;
+}
+
+void* match_open_tbox2(void* proc, void* data) {
+    auto* find = static_cast<Tbox2Find*>(data);
+    auto* actor = static_cast<fopAc_ac_c*>(proc);
+    if (actor == nullptr || fopAcM_GetName(actor) != kProcTbox2) return nullptr;
+    auto* chest = static_cast<daTbox2_c*>(actor);
+    if (tbox2_key(actor) == find->key) {
+        find->found = chest;
+        find->bestDistSq = 0.0f;
+        return nullptr;
+    }
+
+    const f32 dx = actor->home.pos.x - find->home.x;
+    const f32 dy = actor->home.pos.y - find->home.y;
+    const f32 dz = actor->home.pos.z - find->home.z;
+    const f32 d = dx * dx + dy * dy + dz * dz;
+    if (find->found == nullptr || d < find->bestDistSq) {
+        if (d < 100.0f * 100.0f) {
+            find->found = chest;
+            find->bestDistSq = d;
+        }
+    }
+    return nullptr;
+}
+
+void open_tbox2_from_message(const MsgTbox2& msg) {
+    if (!coop_session(kSessDungeon, cfg_bool(s_dungeonVar, true))) return;
+    Tbox2Find find{msg.key, cXyz(msg.home[0], msg.home[1], msg.home[2]), nullptr, 0.0f};
+    fopAcM_Search(match_open_tbox2, &find);
+    if (find.found == nullptr) return;
+    daTbox2_c* chest = find.found;
+    if (chest->mAction != daTbox2_c::ACTION_OPEN_WAIT_e) return;
+
+    chest->mAction = daTbox2_c::ACTION_WAIT_e;
+    chest->openInit();
+    if (chest->mpBck != nullptr) {
+        chest->mpBck->setFrame(chest->mpBck->getEndFrame());
+        chest->mpBck->setPlaySpeed(0.0f);
+    }
+    coop_log::info("coop_mod: [CHEST] no-save chest {:#x} emptied in their game - closing ours",
+        msg.key);
+}
+
+void tbox2_update() {
+    if (!coop_net_connected() || !coop_session(kSessDungeon, cfg_bool(s_dungeonVar, true))) return;
+    const char* here = dComIfGp_getStartStageName();
+    if (here == nullptr) return;
+    if (std::strncmp(here, s_tbox2Stage, sizeof(s_tbox2Stage) - 1) != 0) {
+        std::strncpy(s_tbox2Stage, here, sizeof(s_tbox2Stage) - 1);
+        s_tbox2Stage[sizeof(s_tbox2Stage) - 1] = 0;
+        for (uint32_t& sent : s_tbox2Sent) sent = 0;
+    }
+    fopAcM_Search(collect_open_tbox2, nullptr);
+}
+
 }
 
 void world_register_vars() {
@@ -1181,6 +1318,25 @@ void world_register_vars() {
     selfTest.type = CONFIG_VAR_INT;
     selfTest.default_int = 0;
     if (svc_config->register_var(mod_ctx, &selfTest, &s_selfTestVar) != MOD_OK) s_selfTestVar = 0;
+
+    const ModResult r = mods::hook::add_pre<TboxOpenWaitHook>(
+        [](ModContext*, void* args, void* retval, void*) -> HookAction {
+            auto* chest = mods::arg<daTbox_c*>(args, 0);
+            if (chest == nullptr) return HOOK_CONTINUE;
+            const int no = chest->getTboxNo();
+            if (no < 0 || no >= 64) return HOOK_CONTINUE;
+
+            if (!dComIfGs_isTbox(no) && !s_scrubbedByRemote[no]) return HOOK_CONTINUE;
+
+            static bool said[64] = {};
+            if (!said[no]) {
+                said[no] = true;
+                coop_log::info("coop_mod: [CHEST] {} is already emptied - refusing to open it", no);
+            }
+            if (retval != nullptr) *static_cast<int*>(retval) = 1;
+            return HOOK_SKIP_ORIGINAL;
+        });
+    coop_log::info("coop_mod: [CHEST] open guard installed: {}", static_cast<int>(r));
 }
 
 ConfigVarHandle world_dungeon_var() {
@@ -1201,6 +1357,7 @@ void world_update() {
     if (s_tick % 30 == 0 && daAlink_getAlinkActorClass() != nullptr) retry_pending_chests();
 
     drive_remote_chest_lids();
+    tbox2_update();
     if (s_tick % kDigestEveryTicks == 0) {
         dSv_info_c* info = dComIfGs_getSaveInfo();
         char stage[8];
@@ -1230,6 +1387,13 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
         MsgWorldSyncRequest req;
         std::memcpy(&req, payload, sizeof(req));
         answer_sync_request(req);
+        return;
+    }
+    if (type == kMsgTbox2) {
+        if (size < sizeof(MsgTbox2)) return;
+        MsgTbox2 msg;
+        std::memcpy(&msg, payload, sizeof(msg));
+        open_tbox2_from_message(msg);
         return;
     }
     if (type == kMsgWorldDigest) {

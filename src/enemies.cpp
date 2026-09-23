@@ -17,6 +17,7 @@
 #include "d/actor/d_a_cstaF.h"
 #include "d/actor/d_a_crod.h"
 #include "d/actor/d_a_obj_carry.h"
+#include "d/d_lib.h"
 #include "d/actor/d_a_obj_lv6FurikoTrap.h"
 #include "d/actor/d_a_obj_lv6TogeRoll.h"
 #include "d/actor/d_a_obj_lv6TogeTrap.h"
@@ -3168,6 +3169,7 @@ struct RemoteCarry {
     f32 simGravity = -3.0f;
     int age = 0;
     bool spin = false;
+    bool trackPos = false;
 
     bool nudging = false;
     cXyz nudgeTo;
@@ -3373,7 +3375,12 @@ void carry_on_message(const MsgCarry& msg, uint8_t from) {
             r.msg.angle[0] = msg.angle[0];
             r.msg.angle[1] = msg.angle[1];
             r.msg.angle[2] = msg.angle[2];
+
+            r.msg.pos[0] = msg.pos[0];
+            r.msg.pos[1] = msg.pos[1];
+            r.msg.pos[2] = msg.pos[2];
             r.spin = true;
+            r.trackPos = true;
             r.heardTick = s_tick;
         }
         return;
@@ -3434,6 +3441,14 @@ void place(fopAc_ac_c* actor, const cXyz& at) {
     actor->speed.set(0.0f, 0.0f, 0.0f);
 }
 
+void hold_still(fopAc_ac_c* actor, bool isPot) {
+    if (!isPot) return;
+    auto* pot = static_cast<daObjCarry_c*>(actor);
+    pot->field_0xd3c = ZeroQuat;
+    pot->field_0xd4c = ZeroQuat;
+    pot->field_0xdec = actor->current.pos;
+}
+
 void apply_remote_carry() {
     const bool full = carry_live();
     daAlink_c* me = daAlink_getAlinkActorClass();
@@ -3484,6 +3499,7 @@ void apply_remote_carry() {
                     actor->shape_angle.y = static_cast<s16>(yaw + msg.relYaw);
                     actor->shape_angle.z = msg.angle[2];
                     actor->current.angle.y = actor->shape_angle.y;
+                    hold_still(actor, isPot);
                     break;
                 }
             }
@@ -3492,6 +3508,7 @@ void apply_remote_carry() {
             actor->shape_angle.y = msg.angle[1];
             actor->shape_angle.z = msg.angle[2];
             actor->current.angle.y = msg.angle[1];
+            hold_still(actor, isPot);
             break;
         }
 
@@ -3504,10 +3521,32 @@ void apply_remote_carry() {
                 actor->shape_angle.z = msg.angle[2];
             }
             if (r.applied) {
+                if (r.trackPos) {
+                    r.trackPos = false;
+                    const cXyz to(msg.pos[0], msg.pos[1], msg.pos[2]);
+                    const cXyz gap = to - actor->current.pos;
+
+                    if (gap.abs() > 2.0f) {
+                        actor->current.pos += gap * 0.35f;
+                        actor->old.pos = actor->current.pos;
+                    }
+                }
 
                 if (r.simulating && ++r.age < kCarryFlightMaxTicks) {
+                    actor->old.pos = actor->current.pos;
                     actor->current.pos += r.simSpeed;
                     r.simSpeed.y = std::max(r.simSpeed.y + r.simGravity, -100.0f);
+
+                    cXyz at = actor->current.pos;
+                    at.y += 50.0f;
+                    if (fopAcM_gc_c::gndCheck(&at)) {
+                        const f32 ground = fopAcM_gc_c::getGroundY();
+                        if (actor->current.pos.y < ground) {
+                            actor->current.pos.y = ground;
+                            actor->old.pos = actor->current.pos;
+                            r.simulating = false;
+                        }
+                    }
                 }
                 break;
             }

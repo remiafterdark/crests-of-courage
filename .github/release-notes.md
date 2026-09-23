@@ -9,3 +9,13 @@ starts, and send Dusklight's log if it does not.
 
 Enemy sync, boss sync and story progress are off by default under Unfinished. Enemy sync in
 particular is rough.
+
+## Since 1.0.0
+
+- A chest somebody else opened can no longer be opened again, including the blue chests, which
+  the game does not record in the save at all and which nothing was syncing.
+- Racing for the same chest no longer gives it to both of you.
+- Pots stay still in the other player's hands instead of rolling while they run.
+- Thrown objects land on the floor instead of sinking through it and snapping back, and a throw
+  keeps tracking the real one all the way to the ground.
+- New Hero of Time model, with the outfits and equipment the old one was missing.
