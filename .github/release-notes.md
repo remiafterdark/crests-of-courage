@@ -10,6 +10,17 @@ starts, and send Dusklight's log if it does not.
 Enemy sync, boss sync and story progress are off by default under Unfinished. Enemy sync in
 particular is rough.
 
+## Since 1.0.5
+
+- A crash while drawing other players, found in a real crash log rather than guessed at. Materials
+  are shared between every model built from the same archive, and the game hangs its texture and
+  colour animations on them while it draws. Ours could walk one of those after whoever entered it
+  had freed it. The guard that has always protected the shared joints now covers the shared
+  materials too.
+- Tears of Light counted once per player in the zone instead of once. Two separate ways of
+  announcing a tear somebody else had already collected, both from a stale picture of which ones
+  were taken.
+
 ## Since 1.0.4
 
 - A boomerang somebody else threw could kill your game outright if Link's own archive was not

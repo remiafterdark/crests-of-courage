@@ -898,6 +898,8 @@ void puppet_shield_swap_one(daAlink_c* alink) {
     }
 }
 
+const int kPuppetMaxMaterials = 64;
+
 struct PuppetGuard {
     J3DModelData* modelData = nullptr;
     u16 jointNum = 0;
@@ -905,6 +907,9 @@ struct PuppetGuard {
     int skipEnd = -1;
     J3DJointCallBack savedCb[kPuppetMaxJoints];
     J3DMtxCalc* savedCalc[kPuppetMaxJoints];
+
+    u16 materialNum = 0;
+    J3DMaterialAnm* savedMatAnm[kPuppetMaxMaterials];
 };
 
 bool puppet_guard_begin(J3DModel* model, PuppetGuard& guard, int skipStart = -1, int skipEnd = -1) {
@@ -916,6 +921,18 @@ bool puppet_guard_begin(J3DModel* model, PuppetGuard& guard, int skipStart = -1,
     guard.jointNum = jointNum;
     guard.skipStart = skipStart;
     guard.skipEnd = skipEnd;
+
+    const u16 materialNum = modelData->getMaterialNum();
+    guard.materialNum = materialNum <= kPuppetMaxMaterials ? materialNum : kPuppetMaxMaterials;
+    for (u16 m = 0; m < guard.materialNum; ++m) {
+        J3DMaterial* material = modelData->getMaterialNodePointer(m);
+        if (material == nullptr) {
+            guard.savedMatAnm[m] = nullptr;
+            continue;
+        }
+        guard.savedMatAnm[m] = material->getMaterialAnm();
+        material->setMaterialAnm(nullptr);
+    }
     for (u16 j = 0; j < jointNum; ++j) {
         if (static_cast<int>(j) >= skipStart && static_cast<int>(j) <= skipEnd) continue;
         J3DJoint* joint = modelData->getJointNodePointer(j);
@@ -929,6 +946,11 @@ bool puppet_guard_begin(J3DModel* model, PuppetGuard& guard, int skipStart = -1,
 
 void puppet_guard_end(PuppetGuard& guard) {
     if (guard.modelData == nullptr) return;
+    for (u16 m = 0; m < guard.materialNum; ++m) {
+        J3DMaterial* material = guard.modelData->getMaterialNodePointer(m);
+        if (material != nullptr) material->setMaterialAnm(guard.savedMatAnm[m]);
+    }
+    guard.materialNum = 0;
     for (u16 j = 0; j < guard.jointNum; ++j) {
         if (static_cast<int>(j) >= guard.skipStart && static_cast<int>(j) <= guard.skipEnd) continue;
         J3DJoint* joint = guard.modelData->getJointNodePointer(j);

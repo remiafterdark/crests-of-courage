@@ -34,6 +34,8 @@ bool s_tboxWas[64] = {};
 
 bool s_applying = false;
 
+bool s_resync = true;
+
 bool live() {
     return coop_net_connected() && daAlink_getAlinkActorClass() != nullptr &&
            dComIfGp_getStartStageName() != nullptr;
@@ -44,6 +46,7 @@ void reset_stage() {
     for (bool& t : s_tboxWas) t = false;
     s_lastCount = -1;
     s_lastArea = -1;
+    s_resync = true;
 }
 
 struct BugScan {
@@ -132,19 +135,22 @@ void watch_bugs() {
 void watch_tears() {
     const int area = dComIfGp_getStartStageDarkArea();
     if (area < 0 || area > 3) {
+
         s_lastArea = area;
+        s_resync = true;
         return;
     }
     const int count = dComIfGs_getLightDropNum(static_cast<u8>(area));
     bool flipped[64] = {};
     for (int i = 0; i < 64; ++i) {
         const bool now = dComIfGs_isTbox(i) != 0;
-        flipped[i] = now && !s_tboxWas[i];
+        flipped[i] = now && !s_tboxWas[i] && !s_resync;
         s_tboxWas[i] = now;
     }
-    const bool rose = area == s_lastArea && s_lastCount >= 0 && count > s_lastCount;
+    const bool rose = !s_resync && area == s_lastArea && s_lastCount >= 0 && count > s_lastCount;
     s_lastArea = area;
     s_lastCount = count;
+    s_resync = false;
     if (!rose) return;
 
     for (int i = 0; i < 64; ++i) {
@@ -226,7 +232,12 @@ void on_tear_got(const MsgTearGot& msg) {
     dComIfGs_setLightDropNum(msg.area, static_cast<u8>(count));
 
     if (msg.area == 2 && count == 15) dComIfGs_onEventBit(0x0180);
-    if (msg.area == s_lastArea) s_lastCount = count;
+
+    s_tboxWas[msg.save] = true;
+    s_lastArea = dComIfGp_getStartStageDarkArea();
+    if (s_lastArea >= 0 && s_lastArea <= 3) {
+        s_lastCount = dComIfGs_getLightDropNum(static_cast<u8>(s_lastArea));
+    }
     s_applying = false;
     coop_log::info("coop_mod: [TWILIGHT] somebody picked up tear {} ({} in area {})",
         static_cast<int>(msg.save), count, static_cast<int>(msg.area));
