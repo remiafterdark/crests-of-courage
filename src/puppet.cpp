@@ -359,6 +359,23 @@ int s_pendingFreeCount = 0;
 J3DModel* s_pendingFreeOlder[kPendingFreeMax];
 int s_pendingFreeOlderCount = 0;
 
+J3DModelData* s_pendingData[kPendingFreeMax];
+int s_pendingDataCount = 0;
+J3DModelData* s_pendingDataOlder[kPendingFreeMax];
+int s_pendingDataOlderCount = 0;
+J3DModelData* s_pendingDataOldest[kPendingFreeMax];
+int s_pendingDataOldestCount = 0;
+
+void puppet_free_data_later(J3DModelData*& data) {
+    if (data == nullptr) return;
+    if (s_pendingDataCount < kPendingFreeMax) {
+        s_pendingData[s_pendingDataCount++] = data;
+    } else {
+        coop_log::warn("coop_mod: [PUPPET] deferred-data queue full - leaking one on purpose");
+    }
+    data = nullptr;
+}
+
 void puppet_free_later(J3DModel*& model) {
     if (model == nullptr) return;
     if (s_pendingFreeCount < kPendingFreeMax) {
@@ -385,6 +402,22 @@ void puppet_flush_pending_frees() {
     }
     s_pendingFreeOlderCount = s_pendingFreeCount;
     s_pendingFreeCount = 0;
+
+    for (int i = 0; i < s_pendingDataOldestCount; ++i) {
+        private_arc_free_data(s_pendingDataOldest[i]);
+        s_pendingDataOldest[i] = nullptr;
+    }
+    s_pendingDataOldestCount = s_pendingDataOlderCount;
+    for (int i = 0; i < s_pendingDataOlderCount; ++i) {
+        s_pendingDataOldest[i] = s_pendingDataOlder[i];
+        s_pendingDataOlder[i] = nullptr;
+    }
+    s_pendingDataOlderCount = s_pendingDataCount;
+    for (int i = 0; i < s_pendingDataCount; ++i) {
+        s_pendingDataOlder[i] = s_pendingData[i];
+        s_pendingData[i] = nullptr;
+    }
+    s_pendingDataCount = 0;
 }
 inline Puppet& pup() { return *s_pup; }
 
@@ -756,10 +789,7 @@ void release_puppet() {
     const u8 loadedOutfit = (pup().state == 1) ? pup().pendingOutfit : pup().outfit;
 
     for (J3DModelData*& d : pup().privateData) {
-        if (d != nullptr) {
-            private_arc_free_data(d);
-            d = nullptr;
-        }
+        puppet_free_data_later(d);
     }
     for (auto& arc : pup().privateArcs) {
         if (arc[0] != 0) {
@@ -1694,6 +1724,11 @@ J3DModel* puppet_skin_equipment(const char* file, const cXyz& scale);
 J3DModel* puppet_private_part(const char* file, const cXyz& scale);
 J3DModel* puppet_private_part_idx(const char* arc, u32 index, const cXyz& scale);
 
+bool skin_fits_original(J3DModelData* mine, J3DModelData* theirs, const char* what);
+J3DModelData* guard_skin_data(J3DModelData* data, const char* what);
+J3DModelData* aram_original(u16 index);
+const char* puppet_skin_for(int slot);
+
 J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
     if (kind == kPuppetHeldNone || kind >= kPuppetHeldCount) return nullptr;
     if (kind == kPuppetHeldGetItem) return get_field_item_data(static_cast<u8>(wireIdx));
@@ -1786,16 +1821,26 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
 
     const char* skinFile = skins_aram_file_for_index(res.bmdResIdx);
     if (skinFile != nullptr) {
-        J3DModel* skinModel = puppet_skin_equipment(skinFile, cXyz(1.0f, 1.0f, 1.0f));
-        if (skinModel != nullptr) {
-            slot.data = skinModel->getModelData();
-            slot.fromOutfit = false;
-            slot.shared = true;
-            prep_equipment_model(skinModel);
-            JKR_DELETE(skinModel);
-            coop_log::info("coop_mod: [SKIN] held item kind={} is their model's '{}'", kind,
-                skinFile);
-            return slot.data;
+        const char* skinName = puppet_skin_for(skins_slot_for_equipment_file(skinFile));
+        if (skinName == nullptr) skinName = puppet_skin_for(kSkinChoiceEquipment);
+        J3DModelData* mine =
+            (skinName != nullptr) ? guard_skin_data(skins_equipment_data(skinName, skinFile),
+                                        skinFile)
+                                  : nullptr;
+        J3DModelData* theirs = aram_original(res.bmdResIdx);
+
+        if (mine != nullptr && theirs != nullptr && skin_fits_original(mine, theirs, skinFile)) {
+            J3DModel* skinModel = mDoExt_J3DModel__create(mine, 0x80000, 0x11000284);
+            if (skinModel != nullptr) {
+                slot.data = mine;
+                slot.fromOutfit = false;
+                slot.shared = true;
+                prep_equipment_model(skinModel);
+                JKR_DELETE(skinModel);
+                coop_log::info("coop_mod: [SKIN] held item kind={} is their model's '{}'", kind,
+                    skinFile);
+                return slot.data;
+            }
         }
     }
 
@@ -2586,33 +2631,37 @@ J3DModel* puppet_private_part(const char* file, const cXyz& scale) {
 
 J3DModel* puppet_private_part_idx(const char* arc, u32 index, const cXyz& scale) {
     if (arc == nullptr || arc[0] == 0) return nullptr;
-    if (!private_arc_request(arc)) return nullptr;
+
+    bool mine = false;
+    for (int i = 0; i < kPuppetMaxPrivateArcs; ++i) {
+        if (pup().privateArcs[i][0] != 0 && std::strcmp(pup().privateArcs[i], arc) == 0) {
+            mine = true;
+            break;
+        }
+    }
+    if (!mine) {
+        int slot = -1;
+        for (int i = 0; i < kPuppetMaxPrivateArcs; ++i) {
+            if (pup().privateArcs[i][0] == 0) { slot = i; break; }
+        }
+        if (slot < 0) return nullptr;
+        if (!private_arc_request(arc)) return nullptr;
+        std::strncpy(pup().privateArcs[slot], arc, sizeof(pup().privateArcs[slot]) - 1);
+        pup().privateArcs[slot][sizeof(pup().privateArcs[slot]) - 1] = 0;
+    }
     const int state = private_arc_poll(arc);
-    if (state <= 0) {
-        private_arc_release(arc);
-        return nullptr;
-    }
+    if (state == 0) return nullptr;
+    if (state < 0) return nullptr;
     J3DModelData* data = private_arc_load_idx(arc, index);
-    if (data == nullptr) {
-        private_arc_release(arc);
-        return nullptr;
-    }
+    if (data == nullptr) return nullptr;
     J3DModel* model = mDoExt_J3DModel__create(data, 0x80000, 0x11000284);
     if (model == nullptr) {
         private_arc_free_data(data);
-        private_arc_release(arc);
         return nullptr;
     }
     for (int i = 0; i < kPuppetMaxPrivateData; ++i) {
         if (pup().privateData[i] == nullptr) {
             pup().privateData[i] = data;
-            break;
-        }
-    }
-
-    for (int i = 0; i < kPuppetMaxPrivateArcs; ++i) {
-        if (pup().privateArcs[i][0] == 0) {
-            std::strncpy(pup().privateArcs[i], arc, sizeof(pup().privateArcs[i]) - 1);
             break;
         }
     }

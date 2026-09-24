@@ -3627,7 +3627,13 @@ void apply_remote_carry() {
             actor->current.angle.y = msg.angle[1];
             actor->speedF = msg.speedF;
             actor->speed.y = msg.speedY;
-            if (isPot) {
+
+            const bool gentle = msg.speedF < 1.5f && msg.speedY > -1.5f && msg.speedY < 1.5f;
+            if (gentle) {
+                actor->speedF = 0.0f;
+                actor->speed.set(0.0f, 0.0f, 0.0f);
+                r.simulating = false;
+            } else if (isPot) {
 
                 static_cast<daObjCarry_c*>(actor)->mode_init_drop(0);
             } else {
