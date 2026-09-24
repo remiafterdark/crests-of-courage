@@ -1,7 +1,6 @@
 online co op for twilight princess. 2 to 16 players in one world.
 
-grab crests_of_courage.dusk from assets below, NOT the source code zip. put it in dusklight's
-mods folder as it is, do not unzip it. a co op tab shows up in the menu bar.
+put crests_of_courage.dusk in dusklight's mods folder. a co op tab shows up in the menu bar.
 one player presses host and reads out the room, everyone else types it and presses join.
 
 only windows has been played. mac, linux, android and ios are built here but untested.
