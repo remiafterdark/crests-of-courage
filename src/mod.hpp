@@ -449,10 +449,27 @@ void skipvote_init();
 void skills_init();
 
 void rando_init();
+
+void checks_init();
+void checks_update();
+void checks_on_message(uint8_t type, const uint8_t* payload, size_t size);
+void checks_on_join_synced();
+std::vector<std::string> checks_debug_names_with(const char* prefix);
+
+void selftest_init();
+void selftest_update();
+void rando_debug_enter_randomizer();
+void rando_debug_set_local_seed(const char* hash);
+std::string rando_debug_local_seed();
+std::string rando_debug_any_seed();
+bool rando_debug_host_seed_ready();
+void features_debug_receive_item(uint8_t item, uint8_t from);
+bool checks_collected(const char* name);
 void rando_update();
 void rando_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t from);
 bool rando_active();
 bool rando_join_sync_allowed();
+bool rando_join_sync_wait();
 void game_mode_prompt_connect();
 void skills_update();
 void skills_on_message(const uint8_t* payload, size_t size);

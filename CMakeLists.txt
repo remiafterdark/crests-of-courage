@@ -28,6 +28,8 @@ add_mod(coop_mod
              src/twilight.cpp
              src/skills.cpp
              src/rando.cpp
+             src/checks.cpp
+             src/selftest.cpp
              src/private_arc.cpp
              src/projectiles.cpp
              src/effects.cpp

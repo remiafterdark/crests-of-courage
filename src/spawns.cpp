@@ -634,7 +634,11 @@ void apply_replicas() {
         if (r.procName == fpcNm_NBOMB_e && s_tick % 30 == 0) {
 
             const int fuse = static_cast<int>(static_cast<daNbomb_c*>(actor)->mExTime);
-            if (fuse <= 0) {
+
+            const u32 prm = fopAcM_GetParam(actor);
+            const bool exploding = prm == static_cast<u32>(dBomb_c::PRM_NORMAL_BOMB_EXPLODE) ||
+                                   prm == static_cast<u32>(dBomb_c::PRM_WATER_BOMB_EXPLODE);
+            if (fuse <= 0 && !exploding) {
                 coop_log::warn("coop_mod: [SPAWN-BOMB] netId={} has no fuse (param={}) - it will "
                                 "never explode and never free its slot", r.netId,
                     static_cast<int>(fopAcM_GetParam(actor)));

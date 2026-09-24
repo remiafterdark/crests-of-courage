@@ -1525,8 +1525,10 @@ void send_local_snapshot() {
             {
                 auto* itemBase = static_cast<daItemBase_c*>(gotItem);
                 if (itemBase->mpModel != nullptr && looks_like_live_data(itemBase->mpModel)) {
+
                     add_attachment(kPuppetHeldGetItem, itemBase->mpModel,
-                        nearest_hand_joint(itemBase->mpModel), itemBase->getItemNo(), 0.0f);
+                        nearest_hand_joint(itemBase->mpModel), itemBase->getDisplayItemNo(), 0.0f,
+                        itemBase->mpModel->getBaseScale()->x);
                 }
             }
         }
@@ -2681,6 +2683,8 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     skipvote_init();
     skills_init();
     rando_init();
+    checks_init();
+    selftest_init();
     drops_init();
 
     return MOD_OK;
@@ -2740,6 +2744,8 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     features_update();
 
     rando_update();
+    checks_update();
+    selftest_update();
 
     apply_debug_clear_twilight();
     apply_debug_epona_flags();

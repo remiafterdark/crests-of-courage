@@ -16,6 +16,7 @@
 #include "Z2AudioLib/Z2SeMgr.h"
 #include "d/actor/d_a_alink.h"
 #include "d/d_com_inf_game.h"
+#include "d/d_item.h"
 #include "m_Do/m_Do_main.h"
 #include "d/d_item_data.h"
 #include "d/actor/d_a_itembase.h"
@@ -185,6 +186,67 @@ bool item_is_relayed(uint8_t item) {
     default:
         return false;
     }
+}
+
+bool item_is_check_extra(uint8_t item) {
+    switch (item) {
+
+    case 0x14: case 0x15: case 0x39: case 0x3A: case 0x3B: case 0x3C: case 0x4D: case 0x4E:
+    case 0x52: case 0x57: case 0x8F: case 0xAE: case 0xAF: case 0xBF: case 0xE8:
+        return true;
+    default:
+        break;
+    }
+    if (item >= 0x85 && item <= 0x8E) return true;
+    if (item >= 0x92 && item <= 0x98) return true;
+    if (item >= 0x99 && item <= 0x9B) return true;
+    if (item >= 0xA8 && item <= 0xAD) return true;
+    if (item >= 0xB6 && item <= 0xBE) return true;
+    if (item >= 0xD8 && item <= 0xDB) return true;
+    if (item >= 0xE1 && item <= 0xE7) return true;
+
+    if ((item >= 0xF9 && item <= 0xFB) || item == 0xFD) return rando_active();
+    return false;
+}
+
+const uint8_t kChainSword[] = {0x3F, 0x28, 0x29, 0x49};
+const uint8_t kChainBow[] = {0x43, 0x55, 0x56};
+const uint8_t kChainClawshot[] = {0x44, 0x47};
+const uint8_t kChainRod[] = {0x46, 0x4C};
+const uint8_t kChainFishing[] = {0x4A, 0x3D};
+const uint8_t kChainWallet[] = {0x35, 0x36};
+const uint8_t kChainSkill[] = {0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7};
+const uint8_t kChainKeyShard[] = {0xF9, 0xFA, 0xFD};
+const uint8_t kChainMirror[] = {0xDB, 0xA5, 0xA6, 0xA7};
+const uint8_t kChainShadow[] = {0xD8, 0xD9, 0xDA};
+
+struct Chain {
+    const uint8_t* items;
+    int count;
+};
+#define COOP_CHAIN(a) {a, static_cast<int>(sizeof(a) / sizeof(a[0]))}
+const Chain kChains[] = {
+    COOP_CHAIN(kChainSword), COOP_CHAIN(kChainBow), COOP_CHAIN(kChainClawshot),
+    COOP_CHAIN(kChainRod), COOP_CHAIN(kChainFishing), COOP_CHAIN(kChainWallet),
+    COOP_CHAIN(kChainSkill), COOP_CHAIN(kChainKeyShard), COOP_CHAIN(kChainMirror),
+    COOP_CHAIN(kChainShadow),
+};
+#undef COOP_CHAIN
+
+uint8_t progressive_step(uint8_t item) {
+    if (!rando_active()) return item;
+    for (const Chain& chain : kChains) {
+        bool inChain = false;
+        for (int i = 0; i < chain.count; ++i) inChain = inChain || chain.items[i] == item;
+        if (!inChain) continue;
+
+        if (checkItemGet(item, 1) == 0) return item;
+        for (int i = 0; i < chain.count; ++i) {
+            if (checkItemGet(chain.items[i], 1) == 0) return chain.items[i];
+        }
+        return dItemNo_NONE_e;
+    }
+    return item;
 }
 
 bool item_is_stackable(uint8_t item) {
@@ -442,6 +504,14 @@ void on_item_given(ModContext*, const ItemGiveInfo* info, void*) {
     if (!coop_net_connected() || !coop_session(kSessItems, cfg_bool(s_vars.syncInventory, true))) return;
 
     if (info->item == dItemNo_UTAWA_HEART_e) s_heartGraceUntil = s_invTick + 120;
+
+    if (item_is_check_extra(info->item) && info->check_name != nullptr) {
+        MsgItem msg{info->item};
+        coop_net_send(kMsgItem, &msg, sizeof(msg));
+        coop_log::info("coop_mod: [INV] relayed {:#x} from check '{}'", info->item,
+            info->check_name);
+        return;
+    }
     if (!item_is_relayed(info->item)) return;
 
     if (!item_is_stackable(info->item)) return;
@@ -595,8 +665,22 @@ static void remove_local_heart_containers(uint8_t from) {
 void apply_remote_item(uint8_t item, uint8_t from) {
     if (!coop_session(kSessItems, cfg_bool(s_vars.syncInventory, true))) return;
     if (svc_item == nullptr) return;
-    if (!item_is_relayed(item)) return;
-    if (!item_is_stackable(item) && dComIfGs_isItemFirstBit(item)) return;
+    const bool extra = item_is_check_extra(item);
+    if (!item_is_relayed(item) && !extra) return;
+
+    const uint8_t relayed = item;
+    item = progressive_step(item);
+    if (item == dItemNo_NONE_e) {
+        coop_log::info("coop_mod: [INV] {:#x} from {} - we already have every tier", relayed,
+            sender_name(from));
+        return;
+    }
+    if (item != relayed) {
+        coop_log::info("coop_mod: [INV] {:#x} from {} while we had it already - both checks "
+                       "count, so {:#x}", relayed, sender_name(from), item);
+    } else if (!extra && !item_is_stackable(item) && dComIfGs_isItemFirstBit(item)) {
+        return;
+    }
 
     if (item == dItemNo_UTAWA_HEART_e && s_invTick < s_heartGraceUntil) {
 
@@ -613,7 +697,9 @@ void apply_remote_item(uint8_t item, uint8_t from) {
         remove_local_heart_containers(from);
     } else if (!grant_equipment_without_equipping(item)) {
         svc_item->give_item(mod_ctx, nullptr, item, ITEM_GIVE_SILENT);
-        if (!item_is_stackable(item)) s_invOwedSince[item] = s_invTick != 0 ? s_invTick : 1;
+        if (!item_is_stackable(item) && !extra) {
+            s_invOwedSince[item] = s_invTick != 0 ? s_invTick : 1;
+        }
     }
 
     s_invExpectUntil[item] = s_invTick + 1200;
@@ -813,10 +899,26 @@ PendingTeleport s_teleport;
 
 const uint32_t kTeleportTimeoutTicks = 60 * 30;
 const uint32_t kTeleportSettleTicks = 45;
+const uint32_t kTeleportMinTicks = 3;
 
 bool local_on_stage(const char* stage8) {
     const char* stage = dComIfGp_getStartStageName();
     return stage != nullptr && std::strncmp(stage, stage8, 8) == 0;
+}
+
+bool ground_under_player(uint8_t playerId) {
+    const CoopPeer& who = features_peer_of(playerId);
+    f32 x = who.x, y = who.y, z = who.z;
+    f32 live[3];
+    if (puppet_hook_get_pose_of(playerId, &live[0], &live[1], &live[2], nullptr, nullptr, nullptr)) {
+        x = live[0];
+        y = live[1];
+        z = live[2];
+    }
+    cXyz at(x, y + 60.0f, z);
+    if (!fopAcM_gc_c::gndCheck(&at)) return false;
+    const f32 ground = fopAcM_gc_c::getGroundY();
+    return ground > y - 400.0f && ground < y + 120.0f;
 }
 
 void place_at_player(daAlink_c* alink, uint8_t playerId) {
@@ -855,7 +957,11 @@ void update_pending_teleport() {
         return;
     }
 
-    if (++s_teleport.settledTicks < kTeleportSettleTicks) return;
+    ++s_teleport.settledTicks;
+    if (s_teleport.settledTicks < kTeleportMinTicks) return;
+    if (s_teleport.settledTicks < kTeleportSettleTicks && !ground_under_player(s_teleport.playerId)) {
+        return;
+    }
     s_teleport.active = false;
 
     const CoopPeer& who = features_peer_of(s_teleport.playerId);
@@ -1309,6 +1415,8 @@ void features_on_message(uint8_t type, const uint8_t* payload, size_t size, uint
     case kMsgRandoSeed:
     case kMsgRandoSeedRequest:
     case kMsgRandoChunk: rando_on_message(type, payload, size, from); break;
+    case kMsgCheckTaken:
+    case kMsgCheckList: checks_on_message(type, payload, size); break;
     case kMsgTwilightBug:
     case kMsgTearGot: twilight_on_message(type, payload, size); break;
     case kMsgActorSpawn:
@@ -1507,3 +1615,6 @@ bool features_reload_at_player(uint8_t playerId) {
     return true;
 }
 
+void features_debug_receive_item(uint8_t item, uint8_t from) {
+    apply_remote_item(item, from);
+}

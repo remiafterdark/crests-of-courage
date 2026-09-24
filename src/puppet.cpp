@@ -2275,6 +2275,70 @@ void render_boomerang_aim_wind(J3DModel* model, const Mtx world) {
     if (s_aimWindBtk != nullptr) s_aimWindBtk->setFrame(savedBtkFrame);
 }
 
+struct GetItemAnims {
+    u8 item = 0xFF;
+    J3DAnmTextureSRTKey* btk = nullptr;
+    J3DAnmTevRegKey* brk = nullptr;
+    J3DAnmTexPattern* btp = nullptr;
+    J3DModelData* boundTo = nullptr;
+    f32 frame = 0.0f;
+};
+GetItemAnims s_getItemAnims;
+
+template <typename T>
+T* item_anim_res(const char* arc, s16 idx) {
+    if (arc == nullptr || arc[0] == '\0' || idx < 0) return nullptr;
+    return static_cast<T*>(dComIfG_getObjectRes(arc, idx));
+}
+
+void render_get_item(J3DModel* model, const Mtx world, u8 item) {
+    J3DModelData* data = model->getModelData();
+    GetItemAnims& a = s_getItemAnims;
+    if (a.item != item) {
+        a = GetItemAnims{};
+        a.item = item;
+        const char* arc = dItem_data::getArcName(item);
+        a.btk = item_anim_res<J3DAnmTextureSRTKey>(arc, dItem_data::getBtkName(item));
+        a.brk = item_anim_res<J3DAnmTevRegKey>(arc, dItem_data::getBrkName(item));
+        a.btp = item_anim_res<J3DAnmTexPattern>(arc, dItem_data::getBtpName(item));
+    }
+    if (data != nullptr && a.boundTo != data) {
+        if (a.btk != nullptr) a.btk->searchUpdateMaterialID(data);
+        if (a.brk != nullptr) a.brk->searchUpdateMaterialID(data);
+        if (a.btp != nullptr) a.btp->searchUpdateMaterialID(data);
+        a.boundTo = data;
+    }
+    a.frame += 1.0f;
+    const s8 tevFrm = dItem_data::getTevFrm(item);
+    const s8 btpFrm = dItem_data::getBtpFrm(item);
+    f32 savedBtk = 0.0f, savedBrk = 0.0f, savedBtp = 0.0f;
+    const auto looped = [&](J3DAnmBase* anm) {
+        const f32 max = static_cast<f32>(anm->getFrameMax());
+        return max > 0.0f ? a.frame - max * static_cast<f32>(static_cast<int>(a.frame / max)) : 0.0f;
+    };
+    if (data != nullptr && a.btk != nullptr) {
+        data->entryTexMtxAnimator(a.btk);
+        savedBtk = a.btk->getFrame();
+        a.btk->setFrame(looped(a.btk));
+    }
+    if (data != nullptr && a.brk != nullptr) {
+        data->entryTevRegAnimator(a.brk);
+        savedBrk = a.brk->getFrame();
+        a.brk->setFrame(tevFrm >= 0 ? static_cast<f32>(tevFrm) : looped(a.brk));
+    }
+    if (data != nullptr && a.btp != nullptr) {
+        data->entryTexNoAnimator(a.btp);
+        savedBtp = a.btp->getFrame();
+        a.btp->setFrame(btpFrm >= 0 ? static_cast<f32>(btpFrm) : looped(a.btp));
+    }
+    Mtx worldCopy;
+    mDoMtx_copy(world, worldCopy);
+    renderModelAtMtx(model, worldCopy, nullptr);
+    if (a.btk != nullptr) a.btk->setFrame(savedBtk);
+    if (a.brk != nullptr) a.brk->setFrame(savedBrk);
+    if (a.btp != nullptr) a.btp->setFrame(savedBtp);
+}
+
 void draw_puppet_attachments(daAlink_c* alink) {
     if (pup().model == nullptr) return;
 
@@ -2320,6 +2384,16 @@ void draw_puppet_attachments(daAlink_c* alink) {
         }
         if (att.kind == kPuppetHeldBoomerangAimWind) {
             render_boomerang_aim_wind(model, world);
+            if (guarded) puppet_guard_end(guard);
+            continue;
+        }
+
+        if (att.kind == kPuppetHeldGetItem) {
+            ShapeVisGuard vis;
+            const bool visGuarded =
+                pup().itemData[att.kind].shared ? shape_vis_force_show(model, vis) : false;
+            render_get_item(model, world, static_cast<u8>(att.bckResIdx));
+            if (visGuarded) shape_vis_restore(vis);
             if (guarded) puppet_guard_end(guard);
             continue;
         }

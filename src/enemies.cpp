@@ -149,6 +149,10 @@ DEFINE_HOOK_SYMBOL("daCstatue_c::setAnime", void(daCstatue_c*), CoopStatueSetAni
 
 DEFINE_HOOK_SYMBOL("daCstaF_c::setAnime", void(daCstaF_c*), CoopSmallStatueSetAnimeHook);
 
+DEFINE_HOOK_SYMBOL("daCstatue_c::posMove", void(daCstatue_c*), CoopStatuePosMoveHook);
+DEFINE_HOOK_SYMBOL("daCstatue_c::setCollision", void(daCstatue_c*), CoopStatueCollisionHook);
+DEFINE_HOOK_SYMBOL("daCstatue_c::execute", int(daCstatue_c*), CoopStatueExecuteHook);
+
 DEFINE_HOOK(&dCcS::Move, EnemyCollisionHook);
 
 namespace {
@@ -3247,6 +3251,47 @@ struct RemoteCarry {
 };
 RemoteCarry s_remoteCarry[kMaxCarried];
 
+struct RemoteStatue {
+    fpc_ProcID id = fpcM_ERROR_PROCESS_ID_e;
+    bool inHands = false;
+};
+RemoteStatue s_remoteStatues[kMaxCarried];
+int s_remoteStatueCount = 0;
+
+const RemoteStatue* remote_statue_of(void* actor) {
+    if (actor == nullptr || s_remoteStatueCount == 0) return nullptr;
+    const fpc_ProcID id = fopAcM_GetID(static_cast<fopAc_ac_c*>(actor));
+    for (int i = 0; i < s_remoteStatueCount; ++i) {
+        if (s_remoteStatues[i].id == id) return &s_remoteStatues[i];
+    }
+    return nullptr;
+}
+
+void note_remote_statue(fopAc_ac_c* actor, bool inHands) {
+    if (actor == nullptr || s_remoteStatueCount >= kMaxCarried) return;
+    if (fopAcM_GetName(actor) != fpcNm_CSTATUE_e) return;
+    s_remoteStatues[s_remoteStatueCount].id = fopAcM_GetID(actor);
+    s_remoteStatues[s_remoteStatueCount].inHands = inHands;
+    ++s_remoteStatueCount;
+}
+
+HookAction on_statue_pos_move_pre(ModContext*, void* args, void*, void*) {
+    return remote_statue_of(mods::arg<void*>(args, 0)) != nullptr ? HOOK_SKIP_ORIGINAL
+                                                                   : HOOK_CONTINUE;
+}
+
+void on_statue_execute_post(ModContext*, void* args, void*, void*) {
+    auto* actor = mods::arg<fopAc_ac_c*>(args, 0);
+    if (remote_statue_of(actor) != nullptr) {
+        cLib_offBit<u32>(actor->attention_info.flags, fopAc_AttnFlag_CARRY_e);
+    }
+}
+
+HookAction on_statue_collision_pre(ModContext*, void* args, void*, void*) {
+    const RemoteStatue* r = remote_statue_of(mods::arg<void*>(args, 0));
+    return r != nullptr && r->inHands ? HOOK_SKIP_ORIGINAL : HOOK_CONTINUE;
+}
+
 void to_local(const cXyz& d, s16 yaw, f32* out) {
     const f32 c = cM_scos(yaw);
     const f32 sn = cM_ssin(yaw);
@@ -3523,6 +3568,7 @@ void hold_still(fopAc_ac_c* actor, bool isPot) {
 void apply_remote_carry() {
     const bool full = carry_live();
     daAlink_c* me = daAlink_getAlinkActorClass();
+    s_remoteStatueCount = 0;
     for (RemoteCarry& r : s_remoteCarry) {
         if (!r.used) continue;
         const MsgCarry& msg = r.msg;
@@ -3560,6 +3606,7 @@ void apply_remote_carry() {
             break;
 
         case kCarryHeld: {
+            note_remote_statue(actor, (msg.flags & kCarryFlagStatue) == 0);
             if ((msg.flags & kCarryFlagRelative) != 0) {
 
                 f32 px = 0.0f, py = 0.0f, pz = 0.0f;
@@ -3625,6 +3672,10 @@ void apply_remote_carry() {
             actor->current.pos.set(msg.pos[0], msg.pos[1], msg.pos[2]);
             actor->old.pos = actor->current.pos;
             actor->current.angle.y = msg.angle[1];
+
+            if (fopAcM_GetName(actor) == fpcNm_CSTATUE_e) {
+                static_cast<daCstatue_c*>(actor)->mMoveMode = daCstatue_MoveMode_1;
+            }
             actor->speedF = msg.speedF;
             actor->speed.y = msg.speedY;
 
@@ -4502,6 +4553,11 @@ void enemies_init() {
         mods::hook::add_pre<CoopSmallStatueSetAnimeHook>(on_small_statue_set_anime);
     coop_log::info("coop_mod: [CARRY] statue look hooks: big={} small={}", static_cast<int>(statue),
         static_cast<int>(small));
+    const ModResult statueMove = mods::hook::add_pre<CoopStatuePosMoveHook>(on_statue_pos_move_pre);
+    const ModResult statueCc = mods::hook::add_pre<CoopStatueCollisionHook>(on_statue_collision_pre);
+    const ModResult statueExec = mods::hook::add_post<CoopStatueExecuteHook>(on_statue_execute_post);
+    coop_log::info("coop_mod: [CARRY] statue hold hooks: move={} collision={} grab={}",
+        static_cast<int>(statueMove), static_cast<int>(statueCc), static_cast<int>(statueExec));
     coop_log::info("coop_mod: [ENEMY] hooks: retargetPre={} retargetPost={} ccPre={} ccPost={}",
         static_cast<int>(pre), static_cast<int>(post), static_cast<int>(ccPre),
         static_cast<int>(ccPost));

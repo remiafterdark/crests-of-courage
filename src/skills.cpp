@@ -159,6 +159,8 @@ void on_is_event_bit_post(ModContext*, void* args, void* retval, void*) {
     const uint16_t bit = static_cast<uint16_t>(1u << k);
     const uint16_t about = s_context == kCtxStone ? kAllHowls : kAllSkills;
     if (!(about & bit) || (s_earned & bit)) return;
+
+    if (about == kAllSkills && rando_active()) return;
     if (s_context == kCtxShade && label(k) != s_shadeDelFlag) return;
     *result = FALSE;
 }

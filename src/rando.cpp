@@ -9,6 +9,8 @@
 #include "mods/svc/host.h"
 #include "mods/svc/save.h"
 
+#include "d/actor/d_a_alink.h"
+
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -22,14 +24,17 @@ extern const HostService* svc_host;
 extern const GameModeService* svc_game_mode;
 extern const SaveService* svc_save;
 
+#if defined(_WIN32)
 DEFINE_HOOK_SYMBOL("dusk::mods::svc::`anonymous namespace'::save_set_blob",
-    ModResult(ModContext*, const char*, const void*, size_t), RandoSetBlob0);
+    ModResult(ModContext*, const char*, const void*, size_t), RandoSetBlob);
 DEFINE_HOOK_SYMBOL("dusk::mods::svc::`anonymous namespace'::save_get_blob",
-    ModResult(ModContext*, const char*, void*, size_t*), RandoGetBlob0);
+    ModResult(ModContext*, const char*, void*, size_t*), RandoGetBlob);
+#else
 DEFINE_HOOK_SYMBOL("dusk::mods::svc::(anonymous namespace)::save_set_blob",
-    ModResult(ModContext*, const char*, const void*, size_t), RandoSetBlob1);
+    ModResult(ModContext*, const char*, const void*, size_t), RandoSetBlob);
 DEFINE_HOOK_SYMBOL("dusk::mods::svc::(anonymous namespace)::save_get_blob",
-    ModResult(ModContext*, const char*, void*, size_t*), RandoGetBlob1);
+    ModResult(ModContext*, const char*, void*, size_t*), RandoGetBlob);
+#endif
 
 DEFINE_HOOK_SYMBOL("dusk::gamemode::GameModeManager::setCurrentGameMode",
     bool(void*, std::string&), RandoSetModeHook);
@@ -193,11 +198,36 @@ HookAction on_set_blob_pre(ModContext*, void* args, void*, void*) {
     return HOOK_CONTINUE;
 }
 
+bool s_answeredSize = false;
+
+bool host_seed_ready();
+
 void on_get_blob_post(ModContext*, void* args, void* retval, void*) {
-    if (retval == nullptr || *static_cast<ModResult*>(retval) != MOD_OK) return;
+    if (retval == nullptr) return;
+    const char* name = mods::arg<const char*>(args, 1);
+    void* buf = mods::arg<void*>(args, 2);
     size_t* size = mods::arg<size_t*>(args, 3);
-    if (size == nullptr) return;
-    capture_seed(mods::arg<const char*>(args, 1), mods::arg<void*>(args, 2), *size);
+    if (size == nullptr || name == nullptr || std::strcmp(name, kSeedBlob) != 0) return;
+    auto* result = static_cast<ModResult*>(retval);
+    if (host_seed_ready()) {
+        const std::string& hash = s_hostSeed.hash;
+        if (buf == nullptr) {
+            *size = hash.size();
+            *result = MOD_OK;
+            s_answeredSize = true;
+            return;
+        }
+        if (s_answeredSize) {
+            s_answeredSize = false;
+            std::memcpy(buf, hash.data(), hash.size());
+            *size = hash.size();
+            *result = MOD_OK;
+            capture_seed(name, buf, *size);
+            return;
+        }
+    }
+    s_answeredSize = false;
+    if (*result == MOD_OK && buf != nullptr) capture_seed(name, buf, *size);
 }
 
 void on_set_mode_post(ModContext*, void* args, void*, void*) {
@@ -251,6 +281,49 @@ bool in_rando_mode() {
     return s_manager != nullptr && s_manager->current == kRandoModeId;
 }
 
+bool s_hostSeedFileOk = false;
+
+bool host_seed_ready() {
+    return coop_net_connected() && !coop_net_is_host() && in_rando_mode() &&
+           !s_hostSeed.hash.empty() && s_hostSeedFileOk;
+}
+
+using InvokeFn = bool (*)(const void* self);
+InvokeFn s_invokeSaveLoaded = nullptr;
+int s_forceTries = 0;
+std::string s_forcedFrom;
+
+void force_host_seed() {
+    if (!host_seed_ready() || s_localSeed.empty() || s_localSeed == s_hostSeed.hash) return;
+    if (daAlink_getAlinkActorClass() == nullptr) return;
+    if (s_forcedFrom == s_localSeed && s_forceTries >= 3) return;
+    if (s_forcedFrom != s_localSeed) {
+        s_forcedFrom = s_localSeed;
+        s_forceTries = 0;
+    }
+    ++s_forceTries;
+    if (s_invokeSaveLoaded == nullptr && svc_hook != nullptr) {
+        void* addr = nullptr;
+        if (svc_hook->resolve(mod_ctx, "dusk::gamemode::GameMode::invokeOnSaveLoadedFunction", &addr,
+                nullptr) == MOD_OK) {
+            s_invokeSaveLoaded = reinterpret_cast<InvokeFn>(addr);
+        }
+    }
+    const auto it = s_manager->modes.find(kRandoModeId);
+    if (s_invokeSaveLoaded == nullptr || it == s_manager->modes.end()) {
+        coop_log::warn("coop_mod: [RANDO] cannot switch this file to the host's seed by itself");
+        return;
+    }
+
+    const void* mode = &it->second;
+    coop_log::info("coop_mod: [RANDO] this file was on '{}' - switching it to the host's '{}'",
+        s_localSeed, s_hostSeed.hash);
+    s_invokeSaveLoaded(mode);
+    if (s_localSeed == s_hostSeed.hash) {
+        coop_toast("Playing the host's seed", ("Switched to \"" + s_hostSeed.hash + "\".").c_str());
+    }
+}
+
 void announce_seed() {
     if (!coop_net_is_host() || !in_rando_mode() || s_localSeed.empty()) return;
     std::vector<uint8_t> data;
@@ -293,7 +366,8 @@ void on_seed_announced(const MsgRandoSeed& msg) {
         s_warnedMismatch = false;
         coop_log::info("coop_mod: [RANDO] the host plays seed '{}'", seed.hash);
     }
-    if (!s_requested && !have_seed(seed)) {
+    s_hostSeedFileOk = have_seed(seed);
+    if (!s_requested && !s_hostSeedFileOk) {
         s_requested = true;
         s_incoming.assign(seed.size, 0);
         s_incomingCrc = seed.crc;
@@ -304,7 +378,8 @@ void on_seed_announced(const MsgRandoSeed& msg) {
         coop_log::info("coop_mod: [RANDO] asking the host for seed '{}'", seed.hash);
     }
 
-    if (in_rando_mode() && !s_localSeed.empty() && s_localSeed != seed.hash && !s_warnedMismatch) {
+    if (in_rando_mode() && !s_localSeed.empty() && s_localSeed != seed.hash && !s_warnedMismatch &&
+        s_forceTries >= 3) {
         s_warnedMismatch = true;
         coop_toast("Different randomizer seed",
             ("The host is on \"" + seed.hash + "\". Make a new Randomizer file with that seed "
@@ -326,6 +401,7 @@ void on_chunk(const uint8_t* payload, size_t size) {
         s_requested = false;
     } else {
         write_seed(s_hostSeed.hash, s_incoming);
+        s_hostSeedFileOk = have_seed(s_hostSeed);
     }
     s_incoming.clear();
 }
@@ -336,17 +412,8 @@ void rando_init() {
     if (svc_hook == nullptr) return;
     bool set = false;
     bool get = false;
-
-    if (RandoSetBlob0::resolved_target() != nullptr) {
-        set = mods::hook::add_pre<RandoSetBlob0>(on_set_blob_pre) == MOD_OK;
-    } else if (RandoSetBlob1::resolved_target() != nullptr) {
-        set = mods::hook::add_pre<RandoSetBlob1>(on_set_blob_pre) == MOD_OK;
-    }
-    if (RandoGetBlob0::resolved_target() != nullptr) {
-        get = mods::hook::add_post<RandoGetBlob0>(on_get_blob_post) == MOD_OK;
-    } else if (RandoGetBlob1::resolved_target() != nullptr) {
-        get = mods::hook::add_post<RandoGetBlob1>(on_get_blob_post) == MOD_OK;
-    }
+    set = mods::hook::add_pre<RandoSetBlob>(on_set_blob_pre) == MOD_OK;
+    get = mods::hook::add_post<RandoGetBlob>(on_get_blob_post) == MOD_OK;
     const bool mode = mods::hook::add_post<RandoSetModeHook>(on_set_mode_post) == MOD_OK;
     coop_log::info("coop_mod: [RANDO] seed watch {}, mode watch {}",
         set && get ? "attached" : "FAILED", mode ? "attached" : "FAILED");
@@ -369,6 +436,9 @@ void rando_update() {
     if (!coop_net_connected()) {
         s_announcedRoster = 0;
         s_announcedSeed.clear();
+        s_hostSeedFileOk = false;
+        s_forceTries = 0;
+        s_forcedFrom.clear();
         s_hostSeed = SeedInfo{};
         s_requested = false;
         s_out = Outgoing{};
@@ -382,6 +452,7 @@ void rando_update() {
         announce_seed();
     }
     pump_outgoing();
+    if (s_tick % 30 == 0) force_host_seed();
 }
 
 void rando_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t from) {
@@ -409,9 +480,42 @@ bool rando_active() {
     return in_rando_mode();
 }
 
+bool rando_join_sync_wait() {
+    if (!in_rando_mode() || coop_net_is_host() || s_hostSeed.hash.empty()) return false;
+    if (!s_hostSeedFileOk) return true;
+    return !s_localSeed.empty() && s_localSeed != s_hostSeed.hash && s_forceTries < 3;
+}
+
 bool rando_join_sync_allowed() {
     if (!in_rando_mode()) return true;
 
     if (s_hostSeed.hash.empty() || s_localSeed.empty()) return true;
     return s_hostSeed.hash == s_localSeed;
+}
+
+void rando_debug_enter_randomizer() {
+    resolve_once();
+    forward_to_rando();
+}
+
+void rando_debug_set_local_seed(const char* hash) {
+    s_localSeed = hash != nullptr ? hash : "";
+}
+
+std::string rando_debug_local_seed() {
+    return s_localSeed;
+}
+
+std::string rando_debug_any_seed() {
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(seeds_dir(), ec)) {
+        if (!entry.is_directory()) continue;
+        std::error_code fec;
+        if (std::filesystem::exists(entry.path() / "seed.dat", fec)) return entry.path().filename().string();
+    }
+    return "";
+}
+
+bool rando_debug_host_seed_ready() {
+    return host_seed_ready();
 }

@@ -44,7 +44,8 @@ bool in_gameplay_settled() {
         s_settledTicks = 0;
         return false;
     }
-    return ++s_settledTicks >= 30;
+
+    return ++s_settledTicks >= 10;
 }
 
 int current_save_slot() {
@@ -320,6 +321,7 @@ void apply_snapshot() {
     dSv_info_c* info = dComIfGs_getSaveInfo();
     if (info == nullptr || s_pending.size() != kSaveSize) return;
 
+    if (rando_join_sync_wait()) return;
     if (!rando_join_sync_allowed()) {
         s_havePending = false;
         s_pending.clear();
@@ -336,6 +338,7 @@ void apply_snapshot() {
         coop_log::info("coop_mod: [JOIN] co-op save - taking the host's world without a backup");
     }
     load_host_save(info, s_pending.data());
+    checks_on_join_synced();
     s_carryingJoinedWorld = true;
     s_joinerApplied = true;
     s_havePending = false;
