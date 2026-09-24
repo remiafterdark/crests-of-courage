@@ -430,6 +430,7 @@ void spawns_on_disconnected();
 void spawns_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t from);
 
 bool spawns_replicates_procname(int16_t procName);
+bool spawns_is_replica(fopAc_ac_c* actor);
 
 void boss_register_vars();
 void boss_init();

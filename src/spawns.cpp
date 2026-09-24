@@ -751,6 +751,10 @@ void run_self_test() {
 
 }
 
+bool spawns_is_replica(fopAc_ac_c* actor) {
+    return actor != nullptr && is_replica(fopAcM_GetID(actor));
+}
+
 void spawns_register_vars() {
     ConfigVarDesc desc = CONFIG_VAR_DESC_INIT;
     desc.name = "sync_spawned_objects";

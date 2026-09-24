@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-const uint16_t kCoopProtocolVersion = 67;
+const uint16_t kCoopProtocolVersion = 68;
 
 const int kCoopMaxPlayers = 16;
 
@@ -78,6 +78,7 @@ enum CoopMsgType : uint8_t {
     kMsgRandoChunk = 58,
     kMsgCheckTaken = 59,
     kMsgCheckList = 60,
+    kMsgEnemyClaim = 61,
 };
 
 struct MsgTorch {
@@ -475,6 +476,11 @@ struct MsgWorldFull {
 struct MsgSkinChoices {
     char name[22][32];
     uint32_t hash[22];
+};
+
+struct MsgEnemyClaim {
+    uint32_t key;
+    int8_t room;
 };
 
 struct MsgEnemyHit {

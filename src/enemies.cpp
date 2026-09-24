@@ -18,6 +18,7 @@
 #include "d/actor/d_a_crod.h"
 #include "d/actor/d_a_obj_carry.h"
 #include "d/d_lib.h"
+#include "f_pc/f_pc_manager.h"
 #include "d/actor/d_a_obj_lv6FurikoTrap.h"
 #include "d/actor/d_a_obj_lv6TogeRoll.h"
 #include "d/actor/d_a_obj_lv6TogeTrap.h"
@@ -182,6 +183,8 @@ ConfigVarHandle s_moversVar = 0;
 const int kHitRelayQuietTicks = 20;
 const int kCaptureQuietTicks = 8;
 
+const uint32_t kHitClaimTicks = 150;
+
 const int kMaxPendingHits = kCoopMaxPlayers * 4;
 const int16_t kProcNbomb = 0x221;
 
@@ -278,6 +281,7 @@ int s_diagConflicts = 0;
 int s_diagLonely = 0;
 
 int s_diagInstructed = 0;
+int s_diagClaims = 0;
 
 uint32_t fnv(uint32_t hash, const void* data, size_t size) {
     const auto* bytes = static_cast<const uint8_t*>(data);
@@ -300,6 +304,39 @@ bool keyed_by_param(fopAc_ac_c* actor) {
     return is_ice_block(actor);
 }
 
+struct BirthRecord {
+    fpc_ProcID id = fpcM_ERROR_PROCESS_ID_e;
+    uint32_t param = 0;
+    f32 homeX = 0.0f, homeY = 0.0f, homeZ = 0.0f;
+    int16_t homeAngleY = 0;
+};
+const int kBirthMax = 256;
+BirthRecord s_birth[kBirthMax];
+int s_birthNext = 0;
+
+const BirthRecord* find_birth(fpc_ProcID id) {
+    for (const BirthRecord& b : s_birth) {
+        if (b.id == id) return &b;
+    }
+    return nullptr;
+}
+
+void record_birth(fopAc_ac_c* actor) {
+    const fpc_ProcID id = fopAcM_GetID(actor);
+    if (find_birth(id) != nullptr) return;
+    BirthRecord& b = s_birth[s_birthNext];
+    s_birthNext = (s_birthNext + 1) % kBirthMax;
+    b.id = id;
+    b.param = fopAcM_GetParam(actor);
+    b.homeX = actor->home.pos.x;
+    b.homeY = actor->home.pos.y;
+    b.homeZ = actor->home.pos.z;
+    b.homeAngleY = actor->home.angle.y;
+}
+
+const int kSeenSlots = 4096;
+fpc_ProcID s_seenProc[kSeenSlots];
+
 uint32_t compute_placement_key(fopAc_ac_c* actor) {
     uint32_t h = 2166136261u;
     const int16_t name = fopAcM_GetName(actor);
@@ -309,16 +346,18 @@ uint32_t compute_placement_key(fopAc_ac_c* actor) {
         h = fnv(h, &setID, sizeof(setID));
         return h != 0 ? h : 1u;
     }
-    const uint32_t param = fopAcM_GetParam(actor);
+
+    const BirthRecord* birth = find_birth(fopAcM_GetID(actor));
+    const uint32_t param = birth != nullptr ? birth->param : fopAcM_GetParam(actor);
     if (keyed_by_param(actor)) {
         h = fnv(h, &name, sizeof(name));
         h = fnv(h, &param, sizeof(param));
         return h != 0 ? h : 1u;
     }
-    const int32_t x = round_unit(actor->home.pos.x);
-    const int32_t y = round_unit(actor->home.pos.y);
-    const int32_t z = round_unit(actor->home.pos.z);
-    const int16_t angleY = actor->home.angle.y;
+    const int32_t x = round_unit(birth != nullptr ? birth->homeX : actor->home.pos.x);
+    const int32_t y = round_unit(birth != nullptr ? birth->homeY : actor->home.pos.y);
+    const int32_t z = round_unit(birth != nullptr ? birth->homeZ : actor->home.pos.z);
+    const int16_t angleY = birth != nullptr ? birth->homeAngleY : actor->home.angle.y;
     h = fnv(h, &name, sizeof(name));
     h = fnv(h, &param, sizeof(param));
     h = fnv(h, &setID, sizeof(setID));
@@ -585,6 +624,8 @@ void* collect_enemy(void* proc, void* data) {
     if (!syncable(actor)) return nullptr;
     if (list->count >= kMaxTracked) return nullptr;
 
+    if (fpcM_IsCreating(fopAcM_GetID(actor))) return nullptr;
+
     const uint32_t key = placement_key(actor);
     if (key == 0) return nullptr;
     const int idx = list->count++;
@@ -684,6 +725,10 @@ struct Tracked {
     int hitQuietTicks = 0;
 
     int captureQuietTicks = 0;
+
+    uint8_t hitClaimPlayer = kCoopNoPlayer;
+    uint32_t hitClaimUntil = 0;
+    uint32_t claimSentStamp = 0;
     bool goneSent = false;
     bool deleteAsked = false;
 };
@@ -726,6 +771,20 @@ Tracked* find_tracked(int8_t room, uint32_t key) {
         }
     }
     return nullptr;
+}
+
+void claim_after_hit(Tracked* t, uint8_t player) {
+    if (t == nullptr || player >= kCoopMaxPlayers) return;
+    const bool active = t->hitClaimPlayer != kCoopNoPlayer && s_tick < t->hitClaimUntil;
+    if (active && t->hitClaimPlayer < player) player = t->hitClaimPlayer;
+    if (!active || t->hitClaimPlayer != player) {
+        ++s_diagClaims;
+        coop_log::info("coop_mod: [ENEMY] room={} key={:#010x} goes to player {} until it recovers "
+                       "- they hit it{}", static_cast<int>(t->room), t->key,
+            static_cast<int>(player), player == coop_net_local_id() ? " (us)" : "");
+    }
+    t->hitClaimPlayer = player;
+    t->hitClaimUntil = s_tick + kHitClaimTicks;
 }
 
 bool key_is_runtime(fopAc_ac_c* actor) {
@@ -939,6 +998,11 @@ uint8_t intended_owner(int8_t room, uint32_t key) {
     Tracked* t = find_tracked(room, key);
 
     if (t != nullptr && t->carriedByUs) return coop_net_local_id();
+
+    if (t != nullptr && t->hitClaimPlayer != kCoopNoPlayer && s_tick < t->hitClaimUntil &&
+        player_is_live(t->hitClaimPlayer)) {
+        return t->hitClaimPlayer;
+    }
     if (t != nullptr && t->targetKnown && s_tick - t->targetStamp <= kTargetStaleTicks) {
         return t->targetPlayer;
     }
@@ -989,6 +1053,8 @@ bool we_own(int8_t room, uint32_t key) {
       (uint16_t)offsetof(cls, anmMember),                                       \
       sizeof(((cls*)nullptr)->anmMember) == 4, true, kEnemyArcIsLiteral, (arc), nullptr }
 
+#define ANM_ARCF(proc, cls, morfMember, anmMember, arcMember)                       { (int16_t)(proc), (uint16_t)offsetof(cls, morfMember),                           (uint16_t)offsetof(cls, anmMember),                                             sizeof(((cls*)nullptr)->anmMember) == 4, false,                                 (uint16_t)offsetof(cls, arcMember), nullptr, nullptr }
+
 #define ANM_NOID(proc, cls, morfMember, arc)                                        { (int16_t)(proc), (uint16_t)offsetof(cls, morfMember), kEnemyNoAnmIdOffset,       false, false, kEnemyArcIsLiteral, (arc), nullptr }
 
 #define ANM_NOID2(proc, cls, morfMember, arcA, arcB)                                { (int16_t)(proc), (uint16_t)offsetof(cls, morfMember), kEnemyNoAnmIdOffset,       false, false, kEnemyArcIsLiteral, (arcA), (arcB) }
@@ -1017,12 +1083,13 @@ struct EnemyAnmLayout {
 const EnemyAnmLayout kEnemyAnm[] = {
     ANM_NOID2(0x1F4, daE_YM_c,    mpMorf,       "E_TM", "E_YM"),
 
-    ANM_NOID(0x1BB, daE_GM_c,     mpModelMorf,  "E_gm"),
+    ANM_NOID2(0x1BB, daE_GM_c,    mpModelMorf,  "E_gm", "E_mg"),
     ANM_NOID(0x1BC, daE_MD_c,     mpModelMorf,  "E_MD"),
     ANM_NOID(0x1BE, e_sm2_class,  modelMorf,    "E_sm2"),
     ANM_NOID(0x1C1, daE_SB_c,     mpMorf,       "E_SB"),
     ANM_NOID(0x1CF, daE_HM_c,     mAnm_p,       "E_HM"),
-    ANM_NOID(0x1D6, e_rdy_class,  mpMorf,       "J_Tobi"),
+
+    ANM_NOID_ARCF(0x1D6, e_rdy_class, mpMorf, mpArcName),
     ANM_NOID(0x200, daE_DT_c,     mpMorf,       "E_DT"),
     ANM_NOID(0x201, daE_BG_c,     mpMorfSO,     "E_BG"),
     ANM_NOID(0x207, daE_DK_c,     mpMorfSO,     "E_DK"),
@@ -1047,7 +1114,7 @@ const EnemyAnmLayout kEnemyAnm[] = {
     ANM(0x1BA, daE_DF_c,      mpMorfSO,        mAnim,       "E_DF"),
     ANM_MCA(0x1C8, e_gb_class, anmP,           headAnmNo,   "E_gb"),
     ANM(0x1CC, e_yd_class,    mpMorf,          field_0x664, "E_yd"),
-    ANM(0x1D4, e_rd_class,    anm_p,           anm,         "E_rdb"),
+    ANM_ARCF(0x1D4, e_rd_class, anm_p,         anm,         resName),
     ANM_MCA(0x1D7, e_fm_class, mpFmModelMorf,  mAnm,        "E_fm"),
     ANM(0x1DF, daE_ZS_c,      mpMorf,          mResIndex,   "E_ZS"),
     ANM(0x1E0, daE_KK_c,      mpMorfSO,        field_0x764, "E_KK"),
@@ -1193,6 +1260,8 @@ const char* enemy_arc(fopAc_ac_c* actor, const EnemyAnmLayout* l) {
     return name;
 }
 
+const int kAnmArc2Flag = 0x4000;
+
 int enemy_anm_id(fopAc_ac_c* actor, const EnemyAnmLayout* l) {
 
     if (l->anmIdOffset == kEnemyNoAnmIdOffset) {
@@ -1200,7 +1269,8 @@ int enemy_anm_id(fopAc_ac_c* actor, const EnemyAnmLayout* l) {
         if (morf == nullptr) return -1;
         const int hit = anm_index_of(enemy_arc(actor, l), morf->getAnm());
         if (hit >= 0 || l->arc2 == nullptr) return hit;
-        return anm_index_of(l->arc2, morf->getAnm());
+        const int second = anm_index_of(l->arc2, morf->getAnm());
+        return second >= 0 ? (second | kAnmArc2Flag) : -1;
     }
     const uint8_t* at = reinterpret_cast<const uint8_t*>(actor) + l->anmIdOffset;
     if (l->anmIdIs32) {
@@ -1214,6 +1284,8 @@ int enemy_anm_id(fopAc_ac_c* actor, const EnemyAnmLayout* l) {
 }
 
 void set_enemy_anm_id(fopAc_ac_c* actor, const EnemyAnmLayout* l, int id) {
+
+    if (l == nullptr || l->anmIdOffset == kEnemyNoAnmIdOffset) return;
     uint8_t* at = reinterpret_cast<uint8_t*>(actor) + l->anmIdOffset;
     if (l->anmIdIs32) {
         int32_t v = id;
@@ -1234,7 +1306,8 @@ void read_enemy_anm(fopAc_ac_c* actor, MsgEnemyEntry& entry) {
     mDoExt_morf_c* morf = enemy_morf(actor, l);
     if (morf == nullptr) return;
     const int id = enemy_anm_id(actor, l);
-    if (id < 0 || id > 0x3FFF) return;
+
+    if (id < 0 || (id & ~kAnmArc2Flag) > 0x3FFF) return;
     entry.anmId = static_cast<int16_t>(id);
     entry.anmFrame = morf->getFrame();
     entry.anmRate = morf->getPlaySpeed();
@@ -1268,7 +1341,12 @@ void apply_enemy_anm(fopAc_ac_c* actor, int16_t anmId, f32 frame, f32 rate, uint
         if (mismatchFrames < 0xFF) ++mismatchFrames;
         if (mismatchFrames < kAnmSwitchAfterFrames) return;
         mismatchFrames = 0;
-        auto* bck = static_cast<J3DAnmTransform*>(dComIfG_getObjectRes(l->arc, anmId));
+
+        const bool second = (anmId & kAnmArc2Flag) != 0;
+        const char* arc = second ? l->arc2 : enemy_arc(actor, l);
+        if (arc == nullptr) return;
+        auto* bck =
+            static_cast<J3DAnmTransform*>(dComIfG_getObjectRes(arc, anmId & ~kAnmArc2Flag));
         if (bck == nullptr) return;
 
         enemy_set_anm(morf, l, bck, mode, 3.0f, rate);
@@ -1512,7 +1590,11 @@ struct EnemyTmrLayout {
 
 const int kEnemyTimerMax = 5;
 
+static_assert(offsetof(daE_OC_c, field_0x6c6) - offsetof(daE_OC_c, field_0x6c0) == 6,
+              "the Bokoblin's four countdowns are no longer side by side");
+
 const EnemyTmrLayout kEnemyTmr[] = {
+    { (int16_t)0x1FE, (uint16_t)offsetof(daE_OC_c, field_0x6c0), (uint8_t)4 },
 
     TMR_ONE(0x1FD, daE_WS_c,  mInvulnerabilityTimer),
     TMR_ONE(0x206, daE_TT_c,  mDamageCooldownTimer),
@@ -1633,6 +1715,8 @@ void send_state(EnemyList& list) {
         fopAc_ac_c* actor = list.actors[i];
         if (!syncable(actor)) continue;
         if (!we_own(list.rooms[i], list.keys[i])) continue;
+
+        if (Tracked* ot = find_tracked(list.rooms[i], list.keys[i])) ot->decisionKnown = false;
         MsgEnemyEntry entry{};
         entry.key = list.keys[i];
         entry.room = list.rooms[i];
@@ -1810,7 +1894,10 @@ void apply_remote(EnemyList& list) {
         if (!syncable(actor)) continue;
 
         if (we_own(r.room, r.key)) {
+            Tracked* ot = find_tracked(r.room, r.key);
             r = Remote{};
+
+            if (ot != nullptr) ot->decisionKnown = false;
             continue;
         }
 
@@ -2200,6 +2287,15 @@ HookAction on_proc_execute_pre(ModContext*, void* args, void*, void*) {
         }
     }
 
+    {
+        auto* proc = mods::arg<base_process_class*>(args, 0);
+        if (proc != nullptr && s_seenProc[static_cast<uint32_t>(proc->id) % kSeenSlots] != proc->id) {
+            s_seenProc[static_cast<uint32_t>(proc->id) % kSeenSlots] = proc->id;
+            fopAc_ac_c* actor = fopAcM_SearchByID(proc->id);
+            if (actor != nullptr && fopAcM_GetGroup(actor) == fopAc_ENEMY_e) record_birth(actor);
+        }
+    }
+
     if (s_keyingLive) {
         auto* proc = mods::arg<base_process_class*>(args, 0);
 
@@ -2307,6 +2403,24 @@ void rearm_disarmed_attacks() {
     s_disarmedCount = 0;
 }
 
+bool launched_by_us(fopAc_ac_c* thing) {
+    fopAc_ac_c* player = dComIfGp_getPlayer(0);
+    if (thing == nullptr || player == nullptr || thing == player) return false;
+    if (projectiles_is_remote(thing) || spawns_is_replica(thing)) return false;
+    return thing->parentActorID == fopAcM_GetID(player);
+}
+
+void claim_for_us(Tracked* t, int8_t room, uint32_t key) {
+    if (t == nullptr) return;
+    claim_after_hit(t, coop_net_local_id());
+    if (t->claimSentStamp != 0 && s_tick - t->claimSentStamp < 20) return;
+    t->claimSentStamp = s_tick;
+    MsgEnemyClaim msg{};
+    msg.key = key;
+    msg.room = room;
+    coop_net_send(kMsgEnemyClaim, &msg, sizeof(msg));
+}
+
 void capture_landed_hits(EnemyList& list) {
     dCcS* cc = dComIfG_Ccsp();
     if (cc == nullptr) return;
@@ -2330,7 +2444,11 @@ void capture_landed_hits(EnemyList& list) {
             if (atInf == nullptr) return false;
 
             fopAc_ac_c* attacker = inf->GetTgHitAc();
-            if (!blow_is_ours(attacker)) return false;
+            if (!blow_is_ours(attacker)) {
+
+                if (launched_by_us(attacker)) claim_for_us(t, room, key);
+                return false;
+            }
 
             MsgEnemyHit msg{};
             msg.key = key;
@@ -2351,6 +2469,8 @@ void capture_landed_hits(EnemyList& list) {
             coop_net_send(kMsgEnemyHit, &msg, sizeof(msg));
             t->hitQuietTicks = kHitRelayQuietTicks;
             t->captureQuietTicks = kCaptureQuietTicks;
+
+            claim_after_hit(t, coop_net_local_id());
             ++s_hitsSent;
             coop_log::info(
                 "coop_mod: [ENEMY] relaying our blow on room={} key={:#010x} type={:#x} atp={} spl={}",
@@ -4334,7 +4454,8 @@ void run_self_test(EnemyList& list, bool host) {
     if (++s_selfTestTicks < static_cast<uint32_t>(after)) return;
     s_selfTestTicks = 0;
 
-    for (int i = 0; i < list.count; ++i) {
+    for (int n = 0; n < list.count; ++n) {
+        const int i = host ? n : list.count - 1 - n;
         fopAc_ac_c* actor = list.actors[i];
         if (!syncable(actor) || actor->health <= 0) continue;
 
@@ -4362,6 +4483,8 @@ void run_self_test(EnemyList& list, bool host) {
         msg.at[2] = actor->current.pos.z;
 
         coop_net_send(kMsgEnemyHit, &msg, sizeof(msg));
+
+        claim_after_hit(find_tracked(msg.room, msg.key), coop_net_local_id());
         for (int q = 0; q < kMaxPendingHits; ++q) {
             if (s_pendingHits[q].used) continue;
             s_pendingHits[q].used = true;
@@ -4407,7 +4530,8 @@ void log_status(const EnemyList* list) {
     coop_log::info(
         "coop_mod: [ENEMY] {} stage='{}' room={} conn={} peer(present={} inGame={} stage='{:.8s}') "
         "gameplay={} here={} matched={} unmatched={} huntingOther={} blows(sent={} replayed={}) "
-        "own={} myRoomOwner={} conflicts={} disarmed={} peerLive={} lonely={} instructed={}",
+        "own={} myRoomOwner={} conflicts={} disarmed={} peerLive={} lonely={} instructed={} "
+        "claims={}",
         coop_net_is_host() ? "host" : "joiner", stage != nullptr ? stage : "?",
         alink != nullptr ? static_cast<int>(fopAcM_GetRoomNo(alink)) : -1,
         coop_net_connected() ? 1 : 0, peer.present ? 1 : 0, peer.inGame ? 1 : 0, peer.stage,
@@ -4417,7 +4541,7 @@ void log_status(const EnemyList* list) {
             ? static_cast<int>(s_rooms.owner[fopAcM_GetRoomNo(alink)])
             : -1,
         s_diagConflicts, s_diagDisarmed, peer_owner_is_live() ? 1 : 0, s_diagLonely,
-        s_diagInstructed);
+        s_diagInstructed, s_diagClaims);
 
     coop_log::info("coop_mod: [OBJ] on={} objects={} blows(sent={} replayed={} lost={}) "
                     "moving={} moves(sent={} received={} applied={}) pushes(sent={} applied={})",
@@ -4666,8 +4790,34 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
         for (int i = 0; i < count; ++i) {
             MsgEnemyEntry entry;
             std::memcpy(&entry, payload + 1 + i * sizeof(MsgEnemyEntry), sizeof(entry));
+
+            if (Tracked* dt = find_tracked(entry.room, entry.key)) {
+                if (from == intended_owner(entry.room, entry.key)) {
+                    dt->describedStamp = s_tick;
+                    dt->describedEver = true;
+                }
+            }
             if (we_own(entry.room, entry.key)) {
                 ++s_diagConflicts;
+
+                if (s_diagConflicts <= 12 || s_diagConflicts % 400 == 0) {
+                    const Tracked* ct = find_tracked(entry.room, entry.key);
+                    coop_log::info(
+                        "coop_mod: [ENEMY-CONFLICT] #{} key={:#010x} name={} from={} - ours by: "
+                        "tracked={} claim={}({}t left) target={}(known={} age={}) roomOwner={}",
+                        s_diagConflicts, entry.key, static_cast<int>(entry.procName),
+                        static_cast<int>(from), ct != nullptr ? 1 : 0,
+                        ct != nullptr ? static_cast<int>(ct->hitClaimPlayer) : -1,
+                        (ct != nullptr && s_tick < ct->hitClaimUntil)
+                            ? static_cast<int>(ct->hitClaimUntil - s_tick)
+                            : 0,
+                        ct != nullptr ? static_cast<int>(ct->targetPlayer) : -1,
+                        ct != nullptr && ct->targetKnown ? 1 : 0,
+                        ct != nullptr ? static_cast<int>(s_tick - ct->targetStamp) : -1,
+                        (entry.room >= 0 && entry.room < kRooms)
+                            ? static_cast<int>(s_rooms.owner[entry.room])
+                            : -1);
+                }
                 continue;
             }
             Remote* r = find_or_add_remote(entry.room, entry.key);
@@ -4771,9 +4921,12 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
         break;
     }
     case kMsgEnemyHit: {
-        if (size < sizeof(MsgEnemyHit) || !real_hits_enabled()) return;
+        if (size < sizeof(MsgEnemyHit)) return;
         MsgEnemyHit msg;
         std::memcpy(&msg, payload, sizeof(msg));
+
+        claim_after_hit(find_tracked(msg.room, msg.key), from);
+        if (!real_hits_enabled()) return;
         for (int i = 0; i < kMaxPendingHits; ++i) {
             if (s_pendingHits[i].used) continue;
             s_pendingHits[i].used = true;
@@ -4782,6 +4935,13 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
         }
         coop_log::info("coop_mod: [ENEMY] dropped a relayed blow - {} already queued",
             kMaxPendingHits);
+        break;
+    }
+    case kMsgEnemyClaim: {
+        if (size < sizeof(MsgEnemyClaim)) return;
+        MsgEnemyClaim msg;
+        std::memcpy(&msg, payload, sizeof(msg));
+        claim_after_hit(find_tracked(msg.room, msg.key), from);
         break;
     }
     case kMsgObjectHit: {

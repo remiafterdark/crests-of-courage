@@ -1400,6 +1400,7 @@ void features_on_message(uint8_t type, const uint8_t* payload, size_t size, uint
     case kMsgEnemyGone:
     case kMsgEnemyDamage:
     case kMsgEnemyHit:
+    case kMsgEnemyClaim:
     case kMsgObjectHit:
     case kMsgObjectMove:
     case kMsgCarry:

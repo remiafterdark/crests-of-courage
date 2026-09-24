@@ -6,11 +6,15 @@ one player presses host and reads out the room, everyone else types it and press
 only windows has been played. mac, linux, android and ios are built here but untested.
 enemy sync, boss sync and story progress are off by default under unfinished.
 
-this version connects to 1.4.0, so nobody has to update at the same time.
+everyone needs this version: it will not connect to 1.4.x.
 
 this build:
-- other players on your maps (off to start with, turn it on under local > map). their face and
-  name on the map screen and on dungeon maps, and an arrow each on the minimap. it works but
-  doesn't look great yet: the map uses the same link face as yours, and the arrows are plain
-  shapes. each player gets their own colour, and there are switches for names, sizes, other
-  floors and arrows at the edge of the minimap
+enemy sync (still under unfinished, but much better):
+- knockdowns look right. whoever lands the hit drives that enemy until it gets back up, so the
+  other screen no longer snaps it back up mid-fall or plays the fall twice. works for swords,
+  arrows, bombs and the boomerang
+- enemies no longer end up driven by both games at once after they switch who they're chasing
+- bulblins and twilit bulblins now copy the right animations, bokoblins wait and attack in step
+- fixed a memory bug that could crash the game when an enemy's animation was corrected
+- enemies get the same name in both games even if the host was in the room first
+
