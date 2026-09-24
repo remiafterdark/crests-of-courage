@@ -48,6 +48,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <cstring>
 #include <fstream>
@@ -80,6 +81,9 @@ namespace {
 
 const f32 kPuppetSpawnDist = 150.0f;
 const int kPuppetMaxJoints = 128;
+
+const int kPuppetMaxPrivateData = 24;
+const int kPuppetMaxPrivateArcs = 6;
 
 const int kUnderRootJoint = 0;
 const int kUpperBodyRootJoint = 1;
@@ -322,6 +326,10 @@ struct Puppet {
     bool releaseRequested = false;
 
     bool holdsArc = false;
+
+    J3DModelData* privateData[kPuppetMaxPrivateData] = {};
+
+    char privateArcs[kPuppetMaxPrivateArcs][16] = {};
 
     char heldArc[16] = {};
 
@@ -669,7 +677,7 @@ void release_puppet_models_only() {
     for (J3DModel** m : models) puppet_free_later(*m);
     for (int i = 0; i < 2; ++i) puppet_free_later(pup().bootModels[i]);
     if (pup().shieldArc[0] != '\0') {
-        release_arc_share(pup().shieldArc);
+        private_arc_release(pup().shieldArc);
         pup().shieldArc[0] = '\0';
     }
     release_outfit_item_data();
@@ -716,7 +724,7 @@ void release_puppet() {
     puppet_free_later(pup().sheathModel);
     puppet_free_later(pup().shieldModel);
     if (pup().shieldArc[0] != '\0') {
-        release_arc_share(pup().shieldArc);
+        private_arc_release(pup().shieldArc);
         pup().shieldArc[0] = '\0';
     }
     release_outfit_item_data();
@@ -746,10 +754,23 @@ void release_puppet() {
     pup().under.ratio[0] = 1.0f;
 
     const u8 loadedOutfit = (pup().state == 1) ? pup().pendingOutfit : pup().outfit;
+
+    for (J3DModelData*& d : pup().privateData) {
+        if (d != nullptr) {
+            private_arc_free_data(d);
+            d = nullptr;
+        }
+    }
+    for (auto& arc : pup().privateArcs) {
+        if (arc[0] != 0) {
+            private_arc_release(arc);
+            arc[0] = 0;
+        }
+    }
     if (pup().holdsArc) {
 
-        release_arc_share(pup().heldArc[0] != 0 ? pup().heldArc
-                                                    : outfit_files(loadedOutfit).arc);
+        private_arc_release(pup().heldArc[0] != 0 ? pup().heldArc
+                                                  : outfit_files(loadedOutfit).arc);
         pup().heldArc[0] = 0;
         pup().holdsArc = false;
     }
@@ -894,7 +915,7 @@ void puppet_shield_swap_one(daAlink_c* alink) {
 
     puppet_free_later(pup().shieldModel);
     if (pup().shieldArc[0] != '\0') {
-        release_arc_share(pup().shieldArc);
+        private_arc_release(pup().shieldArc);
         pup().shieldArc[0] = '\0';
     }
 }
@@ -1080,15 +1101,102 @@ void force_diff_recognizes_stage_count(J3DModel* model) {
     model->mDiffFlag |= J3DDiffFlag_KonstColor;
 }
 
-const int kHatJoint6 = 6;
-const int kHatJoint7 = 7;
+int kHatJoint6 = 6;
+int kHatJoint7 = 7;
+
+bool joint_name_split(const char* name, char* prefix, size_t prefixSize, int& number) {
+    if (name == nullptr) return false;
+    const size_t len = std::strlen(name);
+    size_t digits = 0;
+    while (digits < len && name[len - 1 - digits] >= '0' && name[len - 1 - digits] <= '9') ++digits;
+    if (digits == 0 || digits == len) return false;
+    const size_t keep = len - digits;
+    if (keep >= prefixSize) return false;
+    std::memcpy(prefix, name, keep);
+    prefix[keep] = 0;
+    number = std::atoi(name + keep);
+    return true;
+}
+
+void resolve_hat_tail_joints(J3DModelData* modelData) {
+    kHatJoint6 = -1;
+    kHatJoint7 = -1;
+    if (modelData == nullptr) return;
+    JUTNameTab* names = modelData->getJointName();
+    const u16 jointNum = modelData->getJointNum();
+    if (names == nullptr || jointNum < 2) return;
+
+    char bestPrefix[32] = {};
+    int bestStart = -1;
+    int bestLen = 0;
+    char prefix[32] = {};
+    char runPrefix[32] = {};
+    int runStart = -1;
+    int runLen = 0;
+    int runNext = 0;
+    for (u16 j = 0; j < jointNum; ++j) {
+        int number = 0;
+        const bool named = joint_name_split(names->getName(j), prefix, sizeof(prefix), number);
+        const bool continues = named && runStart >= 0 &&
+                               std::strcmp(prefix, runPrefix) == 0 && number == runNext;
+        if (continues) {
+            ++runLen;
+            ++runNext;
+        } else if (named) {
+            std::strncpy(runPrefix, prefix, sizeof(runPrefix) - 1);
+            runPrefix[sizeof(runPrefix) - 1] = 0;
+            runStart = static_cast<int>(j);
+            runLen = 1;
+            runNext = number + 1;
+        } else {
+            runStart = -1;
+            runLen = 0;
+            continue;
+        }
+
+        if (runLen >= 2 && runStart + runLen == static_cast<int>(jointNum) && runLen >= bestLen) {
+            bestLen = runLen;
+            bestStart = runStart;
+            std::strncpy(bestPrefix, runPrefix, sizeof(bestPrefix) - 1);
+            bestPrefix[sizeof(bestPrefix) - 1] = 0;
+        }
+    }
+
+    {
+        static u16 s_dumped[8] = {};
+        static int s_dumpCount = 0;
+        bool seen = false;
+        for (int i = 0; i < s_dumpCount; ++i) seen = seen || s_dumped[i] == jointNum;
+        if (!seen && s_dumpCount < 8) {
+            s_dumped[s_dumpCount++] = jointNum;
+            coop_log::info("coop_mod: [HAT] a {} joint head:", jointNum);
+            for (u16 j = 0; j < jointNum && j < 20; ++j) {
+                const char* n = names->getName(j);
+                coop_log::info("coop_mod: [HAT]   {} = '{}'", j, n != nullptr ? n : "?");
+            }
+        }
+    }
+    if (bestStart < 0) {
+
+        if (outfit_files(pup().outfit).hasKmdlHatTail && jointNum > 7) {
+            kHatJoint6 = 6;
+            kHatJoint7 = 7;
+            coop_log::info("coop_mod: [HAT] no tail matched on the hero's head - keeping 6 and 7");
+        }
+        return;
+    }
+    kHatJoint6 = bestStart;
+    kHatJoint7 = bestStart + 1;
+    coop_log::info("coop_mod: [HAT] tail '{}' is {} segments from joint {} - swaying {} and {}",
+        bestPrefix, bestLen, bestStart, kHatJoint6, kHatJoint7);
+}
 
 int puppet_hat_tail_callback(J3DJoint* joint, int param1) {
     if (param1 != 0 || joint == nullptr || pup().hatModel == nullptr || pup().model == nullptr) {
         return 1;
     }
     const int jointNo = joint->getJntNo();
-    if (jointNo != kHatJoint6 && jointNo != kHatJoint7) return 1;
+    if (kHatJoint6 < 0 || (jointNo != kHatJoint6 && jointNo != kHatJoint7)) return 1;
 
     if (jointNo == kHatJoint6) {
 
@@ -1281,6 +1389,7 @@ void install_hat_tail_sway(J3DModel* hatModel) {
     if (modelData == nullptr) return;
 
     pup().hatPitch = 0;
+    resolve_hat_tail_joints(modelData);
 }
 
 void set_hat_tail_callbacks(J3DModel* hatModel) {
@@ -1582,6 +1691,9 @@ J3DModelData* get_field_item_data(u8 itemNo) {
 
 J3DModel* puppet_skin_equipment(const char* file, const cXyz& scale);
 
+J3DModel* puppet_private_part(const char* file, const cXyz& scale);
+J3DModel* puppet_private_part_idx(const char* arc, u32 index, const cXyz& scale);
+
 J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
     if (kind == kPuppetHeldNone || kind >= kPuppetHeldCount) return nullptr;
     if (kind == kPuppetHeldGetItem) return get_field_item_data(static_cast<u8>(wireIdx));
@@ -1617,7 +1729,7 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
     if (res.source == kItemSrcWireArc) {
         if (pup().rodArc[0] == '\0') return nullptr;
         if (loadObjectArchive(pup().rodArc) != 0) return nullptr;
-        J3DModel* model = loadBmdFromArcIdx(pup().rodArc, res.bmdResIdx, cXyz(1.0f, 1.0f, 1.0f));
+        J3DModel* model = puppet_private_part_idx(pup().rodArc, res.bmdResIdx, cXyz(1.0f, 1.0f, 1.0f));
         if (model == nullptr) return nullptr;
         slot.data = model->getModelData();
         slot.shared = true;
@@ -1631,7 +1743,7 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
     if (res.source == kItemSrcOutfitIdx) {
         if (pup().state != 2) return nullptr;
         J3DModel* model =
-            loadBmdFromArcIdx(outfit_files(pup().outfit).arc, res.bmdResIdx, cXyz(1.0f, 1.0f, 1.0f));
+            puppet_private_part_idx(pup().heldArc, res.bmdResIdx, cXyz(1.0f, 1.0f, 1.0f));
         if (model == nullptr) return nullptr;
         slot.data = model->getModelData();
         slot.fromOutfit = true;
@@ -1645,7 +1757,7 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
 
     if (res.source == kItemSrcAlink) {
 
-        J3DModel* model = loadBmdFromArcIdx("Alink", res.bmdResIdx, cXyz(1.0f, 1.0f, 1.0f));
+        J3DModel* model = puppet_private_part_idx("Alink", res.bmdResIdx, cXyz(1.0f, 1.0f, 1.0f));
         if (model == nullptr) return nullptr;
         slot.data = model->getModelData();
         slot.fromOutfit = false;
@@ -1660,8 +1772,7 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
     if (res.outfitFile != nullptr) {
 
         if (pup().state != 2) return nullptr;
-        J3DModel* model = loadBmdFromArc(outfit_files(pup().outfit).arc, res.outfitFile,
-            cXyz(1.0f, 1.0f, 1.0f));
+        J3DModel* model = puppet_private_part(res.outfitFile, cXyz(1.0f, 1.0f, 1.0f));
         if (model == nullptr) return nullptr;
         slot.data = model->getModelData();
         slot.fromOutfit = true;
@@ -1878,7 +1989,7 @@ void draw_puppet_rod(const cXyz* pts, int count, bool uki) {
         release_rod_segments();
         for (int i = 0; i < kRodSegments; ++i) {
             J3DModel* model =
-                loadBmdFromArcIdx("Alink", rod_segment_res(uki, i), cXyz(1.0f, 1.0f, 1.0f));
+                puppet_private_part_idx("Alink", rod_segment_res(uki, i), cXyz(1.0f, 1.0f, 1.0f));
             if (model == nullptr) {
                 coop_log::warn("coop_mod: [DIAG-ROD] segment {} (Alink idx {}) failed to load", i,
                     rod_segment_res(uki, i));
@@ -2450,6 +2561,64 @@ J3DModel* puppet_skin_equipment(const char* file, const cXyz& scale) {
     return model;
 }
 
+J3DModel* puppet_private_part_from(const char* arc, const char* file, const cXyz& scale) {
+    if (file == nullptr || arc == nullptr || arc[0] == 0) return nullptr;
+    J3DModelData* data = private_arc_load(arc, file);
+    if (data == nullptr) return nullptr;
+    J3DModel* model = mDoExt_J3DModel__create(data, 0x80000, 0x11000284);
+    if (model == nullptr) {
+        private_arc_free_data(data);
+        return nullptr;
+    }
+
+    for (int i = 0; i < kPuppetMaxPrivateData; ++i) {
+        if (pup().privateData[i] == nullptr) {
+            pup().privateData[i] = data;
+            break;
+        }
+    }
+    return model;
+}
+
+J3DModel* puppet_private_part(const char* file, const cXyz& scale) {
+    return puppet_private_part_from(pup().heldArc, file, scale);
+}
+
+J3DModel* puppet_private_part_idx(const char* arc, u32 index, const cXyz& scale) {
+    if (arc == nullptr || arc[0] == 0) return nullptr;
+    if (!private_arc_request(arc)) return nullptr;
+    const int state = private_arc_poll(arc);
+    if (state <= 0) {
+        private_arc_release(arc);
+        return nullptr;
+    }
+    J3DModelData* data = private_arc_load_idx(arc, index);
+    if (data == nullptr) {
+        private_arc_release(arc);
+        return nullptr;
+    }
+    J3DModel* model = mDoExt_J3DModel__create(data, 0x80000, 0x11000284);
+    if (model == nullptr) {
+        private_arc_free_data(data);
+        private_arc_release(arc);
+        return nullptr;
+    }
+    for (int i = 0; i < kPuppetMaxPrivateData; ++i) {
+        if (pup().privateData[i] == nullptr) {
+            pup().privateData[i] = data;
+            break;
+        }
+    }
+
+    for (int i = 0; i < kPuppetMaxPrivateArcs; ++i) {
+        if (pup().privateArcs[i][0] == 0) {
+            std::strncpy(pup().privateArcs[i], arc, sizeof(pup().privateArcs[i]) - 1);
+            break;
+        }
+    }
+    return model;
+}
+
 J3DModel* puppet_skin_part(int part, const cXyz& scale) {
     const int outfit = puppet_skin_outfit();
     const char* name = puppet_skin_for(skins_slot_for_outfit(outfit));
@@ -2469,15 +2638,15 @@ void load_puppet_parts(const OutfitFiles& files) {
 
     const cXyz unitScale(1.0f, 1.0f, 1.0f);
     pup().faceModel = puppet_skin_part(kSkinPartFace, unitScale);
-    if (pup().faceModel == nullptr) pup().faceModel = loadBmdFromArc(files.arc, files.face, unitScale);
+    if (pup().faceModel == nullptr) pup().faceModel = puppet_private_part(files.face, unitScale);
     pup().hatModel = puppet_skin_part(kSkinPartHead, unitScale);
-    if (pup().hatModel == nullptr) pup().hatModel = loadBmdFromArc(files.arc, files.hat, unitScale);
+    if (pup().hatModel == nullptr) pup().hatModel = puppet_private_part(files.hat, unitScale);
     pup().handsModel = puppet_skin_part(kSkinPartHands, unitScale);
     if (pup().handsModel == nullptr) {
-        pup().handsModel = loadBmdFromArc(files.arc, files.hands, unitScale);
+        pup().handsModel = puppet_private_part(files.hands, unitScale);
     }
     for (int i = 0; i < 2; ++i) {
-        pup().bootModels[i] = loadBmdFromArc(files.arc, "al_bootsH.bmd", unitScale);
+        pup().bootModels[i] = puppet_private_part("al_bootsH.bmd", unitScale);
         if (pup().bootModels[i] != nullptr) {
             force_diff_recognizes_stage_count(pup().bootModels[i]);
         }
@@ -2496,9 +2665,7 @@ void load_puppet_parts(const OutfitFiles& files) {
     if (pup().hatModel != nullptr) {
         force_diff_recognizes_stage_count(pup().hatModel);
 
-        if (files.hasKmdlHatTail) {
-            install_hat_tail_sway(pup().hatModel);
-        }
+        install_hat_tail_sway(pup().hatModel);
     }
     if (pup().handsModel != nullptr) {
         force_diff_recognizes_stage_count(pup().handsModel);
@@ -3026,11 +3193,6 @@ void on_alink_execute_puppet_post(ModContext*, void*, void*, void*) {
         return;
     }
 
-    if (puppet_hold_for_clothes_swap(alink)) {
-        return;
-    }
-    puppet_hold_for_shield_swap(alink);
-
     if (puppets_lost_their_link(alink)) return;
 
     for (int i = 0; i < kMaxPuppets; ++i) {
@@ -3128,14 +3290,25 @@ void update_one_puppet(daAlink_c* alink) {
         const OutfitFiles& files = outfit_files(pup().pendingOutfit);
 
         if (!pup().holdsArc) {
-            const int arcStatus = loadObjectArchive(files.arc);
-            coop_log::info("coop_mod: [DIAG] loadObjectArchive('{}') = {}", files.arc, arcStatus);
-            if (arcStatus == 1) {
+
+            if (!private_arc_request(files.arc)) {
+                coop_log::warn("coop_mod: [PUPPET] no private '{}' - player {} stays invisible",
+                    files.arc, static_cast<int>(s_pupId));
+                pup().state = 0;
                 return;
             }
             pup().holdsArc = true;
             std::strncpy(pup().heldArc, files.arc, sizeof(pup().heldArc) - 1);
             pup().heldArc[sizeof(pup().heldArc) - 1] = 0;
+        }
+        const int arcStatus = private_arc_poll(pup().heldArc);
+        if (arcStatus == 0) return;
+        if (arcStatus < 0) {
+            private_arc_release(pup().heldArc);
+            pup().heldArc[0] = 0;
+            pup().holdsArc = false;
+            pup().state = 0;
+            return;
         }
         pup().outfit = pup().pendingOutfit;
         pup().state = 2;
@@ -3146,8 +3319,8 @@ void update_one_puppet(daAlink_c* alink) {
         pup().model = puppet_skin_part(kSkinPartBody, unit);
         if (pup().model == nullptr) {
             PuppetModelLoadScope scope;
-            pup().model = files.isWolf ? loadBmdFromArcIdx(files.arc, files.bodyResIdx, unit)
-                                       : loadBmdFromArc(files.arc, files.body, unit);
+            pup().model = files.isWolf ? puppet_private_part_idx(files.arc, files.bodyResIdx, unit)
+                                       : puppet_private_part(files.body, unit);
         }
 
         const bool doDiag = warp_diag_on();
@@ -3712,7 +3885,7 @@ void sync_equipment_models() {
             coop_log::trace("coop_mod: [DIAG-SWORD] wooden sword from outfit archive '{}'",
                 outfitBmd);
         } else if (idx >= 0) {
-            pup().swordModel = loadBmdFromArcIdx("Alink", idx, cXyz(1.0f, 1.0f, 1.0f));
+            pup().swordModel = puppet_private_part_idx("Alink", idx, cXyz(1.0f, 1.0f, 1.0f));
             prep_equipment_model(pup().swordModel);
 
             daAlink_c* la = daAlink_getAlinkActorClass();
@@ -3789,7 +3962,7 @@ void sync_equipment_models() {
 
         puppet_free_later(pup().shieldModel);
         if (pup().shieldArc[0] != '\0') {
-            release_arc_share(pup().shieldArc);
+            private_arc_release(pup().shieldArc);
             pup().shieldArc[0] = '\0';
         }
     }
@@ -3799,7 +3972,17 @@ void sync_equipment_models() {
         shieldAlink != nullptr && shieldAlink->mShieldChangeWaitTimer != 0;
     if (wantShield && pup().shieldModel == nullptr && !shieldSwapInFlight) {
 
-        const bool arcReady = loadObjectArchive(pup().wantShieldArc) != 1;
+        if (!private_arc_request(pup().wantShieldArc)) return;
+        const int shieldArcState = private_arc_poll(pup().wantShieldArc);
+        if (shieldArcState == 0) {
+            private_arc_release(pup().wantShieldArc);
+            return;
+        }
+        const bool arcReady = shieldArcState > 0;
+        if (!arcReady) {
+            private_arc_release(pup().wantShieldArc);
+            return;
+        }
 
         const char* shieldFile = shield_file_for_arc(pup().wantShieldArc);
         pup().shieldModel = (arcReady && shieldFile != nullptr)
@@ -3812,8 +3995,9 @@ void sync_equipment_models() {
                 shieldFile);
         }
         if (pup().shieldModel == nullptr && arcReady) {
-            pup().shieldModel =
-                loadBmdFromArcIdx(pup().wantShieldArc, 3, cXyz(1.0f, 1.0f, 1.0f));
+
+            pup().shieldModel = puppet_private_part_from(pup().wantShieldArc,
+                shield_file_for_arc(pup().wantShieldArc), cXyz(1.0f, 1.0f, 1.0f));
             prep_equipment_model(pup().shieldModel);
             std::strncpy(pup().shieldArc, pup().wantShieldArc, sizeof(pup().shieldArc) - 1);
             coop_log::trace("coop_mod: [DIAG-EQUIP] shield arc='{}' model={:p}",
@@ -5053,7 +5237,7 @@ void draw_one_puppet(daAlink_c* alink) {
     }
     if (pup().hatModel != nullptr) {
 
-        const bool hasSway = outfit_files(pup().outfit).hasKmdlHatTail;
+        const bool hasSway = kHatJoint6 >= 0;
         PuppetGuard hatGuard;
         const bool guardOk = puppet_guard_begin(pup().hatModel, hatGuard);
         if (guardOk && hasSway) set_hat_tail_callbacks(pup().hatModel);
@@ -5132,9 +5316,6 @@ void puppet_hook_init() {
     mods::hook::add_pre<PuppetAlinkExecuteHook>([](ModContext*, void*, void*, void*) -> HookAction {
         fx_owner_window(true);
 
-        if (daAlink_c* alink = daAlink_getAlinkActorClass()) {
-            if (alink->mShieldChangeWaitTimer != 0) puppet_hold_for_shield_swap(alink);
-        }
         return HOOK_CONTINUE;
     });
     const ModResult execResult =
@@ -5195,6 +5376,7 @@ void puppet_hook_init() {
             J3DModelData* mine = skins_local_part_data(kSkinOutfitWolf, kSkinPartBody);
             if (mine != nullptr) *result = mine;
         });
+
     const ModResult dtorResult = mods::hook::add_pre<PuppetAlinkDtorHook>(
         [](ModContext*, void*, void*, void*) -> HookAction {
             int released = 0;

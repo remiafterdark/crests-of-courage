@@ -26,6 +26,7 @@ add_mod(coop_mod
              src/skipvote.cpp
              src/drops.cpp
              src/twilight.cpp
+             src/private_arc.cpp
              src/projectiles.cpp
              src/effects.cpp
              src/pvp.cpp

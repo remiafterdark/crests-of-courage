@@ -348,6 +348,13 @@ void colors_attach_puppet_model(J3DModel* model, uint8_t owner);
 
 void coop_crash_trail(const char* step);
 
+bool private_arc_request(const char* name);
+int private_arc_poll(const char* name);
+void private_arc_release(const char* name);
+J3DModelData* private_arc_load(const char* name, const char* file);
+J3DModelData* private_arc_load_idx(const char* name, uint32_t index);
+void private_arc_free_data(J3DModelData* data);
+
 void colors_attach_local_model(J3DModel* model);
 
 void colors_detach_local_models();
