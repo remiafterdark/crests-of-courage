@@ -584,6 +584,41 @@ ModResult group_health(ModContext*, UiElementHandle pane, void*, ModError*) {
     return MOD_OK;
 }
 
+ModResult group_map(ModContext*, UiElementHandle pane, void*, ModError*) {
+    add_panel_header(pane, "Map");
+    svc_ui->pane_add_text(mod_ctx, pane,
+        "Early version, off to start with. It works, but it doesn't look great yet: the map uses "
+        "the same Link face as yours with a name under it, and the minimap arrows are plain "
+        "shapes.", nullptr);
+
+    svc_ui->pane_add_section(mod_ctx, pane, "Map screen");
+    add_toggle(pane, "Show players on the map", map_markers_full_var(),
+        "Their face where they are, on the field map. Players inside a building or a dungeon are "
+        "not on it.");
+    add_toggle(pane, "Show players on dungeon maps", map_markers_dungeon_var(),
+        "Everybody in the same dungeon, on the floor they are on.");
+    add_toggle(pane, "Their names", map_markers_names_var(), "Under each face.");
+    add_number(pane, "Name size", map_markers_name_size_var(), 50, 200, 10, "%", nullptr,
+        map_markers_names_var());
+
+    svc_ui->pane_add_section(mod_ctx, pane, "Minimap");
+    add_toggle(pane, "Show players on the minimap", map_markers_minimap_var(),
+        "An arrow for each player in the same area, pointing the way they face.");
+    add_number(pane, "Arrow size", map_markers_arrow_size_var(), 50, 250, 10, "%", nullptr,
+        map_markers_minimap_var());
+    add_toggle(pane, "Keep far players at the edge", map_markers_edge_var(),
+        "Somebody off the edge of the minimap stays on its border, pointing toward them.",
+        map_markers_minimap_var());
+
+    svc_ui->pane_add_section(mod_ctx, pane, "Both");
+    add_toggle(pane, "Show players on other floors", map_markers_other_floor_var(),
+        "Faded, so you can tell they are upstairs or down.");
+    static const char* const kColors[] = {"Each their own", "All white"};
+    add_dropdown(pane, "Colours", map_markers_colors_var(), kColors, 2,
+        "Each player gets a colour for their arrow and name, so you can tell who is who.");
+    return MOD_OK;
+}
+
 ModResult group_sound(ModContext*, UiElementHandle pane, void*, ModError*) {
     add_panel_header(pane, "Sound");
     const CoopFeatureVars& vars = features_vars();
@@ -604,6 +639,7 @@ ModResult group_messages(ModContext*, UiElementHandle pane, void*, ModError*) {
 void build_screen(UiElementHandle pane, UiElementHandle detail) {
     add_group_or_section(pane, detail, "Name tags", group_nametags);
     add_group_or_section(pane, detail, "Health", group_health);
+    add_group_or_section(pane, detail, "Map", group_map);
     add_group_or_section(pane, detail, "Sound", group_sound);
     add_group_or_section(pane, detail, "Messages", group_messages);
 }

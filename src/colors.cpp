@@ -762,6 +762,16 @@ void release_model_colors(PuppetModelColors& m) {
 
 }
 
+bool coop_config_json_value(const char* key, std::string* out) {
+    if (key == nullptr || out == nullptr) return false;
+    if (!s_haveConfigPath) find_config_json();
+    if (!s_haveConfigPath) return false;
+    std::ifstream file(s_configJsonPath, std::ios::binary);
+    if (!file) return false;
+    const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    return json_find_value(text, key, *out);
+}
+
 void colors_register_vars() {
     for (int i = 0; i < kSlotCount; ++i) {
         ConfigVarDesc desc = CONFIG_VAR_DESC_INIT;

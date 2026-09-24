@@ -29,6 +29,7 @@ add_mod(coop_mod
              src/skills.cpp
              src/rando.cpp
              src/checks.cpp
+             src/map_markers.cpp
              src/selftest.cpp
              src/private_arc.cpp
              src/projectiles.cpp

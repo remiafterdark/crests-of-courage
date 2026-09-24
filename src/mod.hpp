@@ -335,6 +335,8 @@ ConfigVarHandle squad_hud_world_size_var();
 
 class J3DModel;
 void colors_register_vars();
+
+bool coop_config_json_value(const char* key, std::string* out);
 void colors_init();
 void colors_update();
 void colors_on_connected();
@@ -451,6 +453,17 @@ void skills_init();
 void rando_init();
 
 void checks_init();
+
+void map_markers_init();
+ConfigVarHandle map_markers_full_var();
+ConfigVarHandle map_markers_dungeon_var();
+ConfigVarHandle map_markers_names_var();
+ConfigVarHandle map_markers_name_size_var();
+ConfigVarHandle map_markers_minimap_var();
+ConfigVarHandle map_markers_arrow_size_var();
+ConfigVarHandle map_markers_edge_var();
+ConfigVarHandle map_markers_other_floor_var();
+ConfigVarHandle map_markers_colors_var();
 void checks_update();
 void checks_on_message(uint8_t type, const uint8_t* payload, size_t size);
 void checks_on_join_synced();

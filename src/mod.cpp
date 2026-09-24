@@ -2684,6 +2684,7 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     skills_init();
     rando_init();
     checks_init();
+    map_markers_init();
     selftest_init();
     drops_init();
 
