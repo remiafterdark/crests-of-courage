@@ -172,7 +172,8 @@ uint32_t g_tickCounter = 0;
 constexpr uint16_t kPuppetHookTipBck = dRes_INDEX_ALANM_BCK_HS_TIP_OPEN_e;
 
 constexpr s16 kProcFieldItem = 0x218;
-constexpr s16 kProcDemoItem = 0x69;
+
+constexpr s16 kProcDemoItem = fpcNm_Demo_Item_e;
 
 constexpr uint16_t kEquipTransformEffect = 0x106;
 constexpr uint16_t kTransformEffectJoint = 4;
@@ -2678,6 +2679,8 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     ui_init();
     puppet_hook_init();
     skipvote_init();
+    skills_init();
+    rando_init();
     drops_init();
 
     return MOD_OK;
@@ -2735,6 +2738,8 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     update_pings();
     announce_local_pause();
     features_update();
+
+    rando_update();
 
     apply_debug_clear_twilight();
     apply_debug_epona_flags();

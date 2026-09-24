@@ -40,6 +40,8 @@ const f32 kDefaultScale = 0.55f;
 ConfigVarHandle s_enableVar = 0;
 ConfigVarHandle s_scaleVar = 0;
 ConfigVarHandle s_offsetYVar = 0;
+ConfigVarHandle s_offsetXVar = 0;
+ConfigVarHandle s_sideVar = 0;
 ConfigVarHandle s_hurtOnlyVar = 0;
 ConfigVarHandle s_hurtSecondsVar = 0;
 ConfigVarHandle s_hurtFadeVar = 0;
@@ -262,6 +264,15 @@ f32 pane_left(J2DPane* pane) {
     return v;
 }
 
+f32 pane_right(J2DPane* pane) {
+    f32 v = pane->getGlbVtx(0).x;
+    for (u8 i = 1; i < 4; ++i) {
+        const f32 x = pane->getGlbVtx(i).x;
+        if (x > v) v = x;
+    }
+    return v;
+}
+
 struct ParentSpace {
     f32 sx = 0.0f, sy = 0.0f, tx = 0.0f, ty = 0.0f;
     bool valid() const { return sx > 1e-4f || sx < -1e-4f; }
@@ -357,12 +368,14 @@ struct SquadMember {
     bool paused;
 };
 
-void draw_name(const std::string& name, f32 x, f32 y, f32 cell, u8 alpha, bool low, bool paused) {
+void draw_name(const std::string& name, f32 x, f32 y, f32 cell, u8 alpha, bool low, bool paused,
+    bool alignRight = false) {
     JUTFont* font = mDoExt_getMesgFont();
     if (font == nullptr || name.empty()) return;
     font->setGX();
     std::string text = name;
     if (paused) text += "  (menu)";
+    if (alignRight) x -= font->drawString_scale(0.0f, 0.0f, cell, cell, text.c_str(), false);
     const f32 shadow = cell * 0.08f;
     font->setCharColor(JUtility::TColor(0, 0, 0, static_cast<u8>(alpha * 0.7f)));
     font->drawString_scale(x + shadow, y + shadow, cell, cell, text.c_str(), true);
@@ -617,6 +630,21 @@ void draw_squad() {
     if (worldOn) draw_world_hearts(realGroup, real, graf, alphaRate);
     if (count == 0) return;
     const f32 left = pane_left(realFirst);
+
+    const bool onRight = cfg_int(s_sideVar, 0) == 1;
+    const f32 inset = static_cast<f32>(cfg_int(s_offsetXVar, 0));
+    f32 rightEdge = 0.0f;
+    f32 realPitch = 0.0f;
+    const f32 realSlotW = pane_right(realFirst) - pane_left(realFirst);
+    if (onRight) {
+        const auto* ortho = static_cast<J2DOrthoGraph*>(graf)->getOrtho();
+        rightEdge = ortho->f.x - (left - ortho->i.x) - inset;
+        J2DPane* realSecond =
+            real->mpLifeParts[1] != nullptr ? real->mpLifeParts[1]->getPanePtr() : nullptr;
+        if (realSecond != nullptr) realPitch = pane_left(realSecond) - left;
+        if (!(realPitch > 0.0f)) realPitch = realSlotW;
+    }
+    const f32 rowLeft = left + inset;
     f32 bottom = pane_bottom(realFirst);
     if (pane_bottom(realLast) > bottom) bottom = pane_bottom(realLast);
 
@@ -647,7 +675,8 @@ void draw_squad() {
     }
     const f32 k = baseK * kFitSteps[s_fitStep];
     const f32 ourSlotH = slotH * k;
-    const f32 gap = ourSlotH * 0.25f + static_cast<f32>(cfg_int(s_offsetYVar, 0));
+
+    const f32 gap = ourSlotH * 0.25f;
     const f32 nameCell = ourSlotH * 0.8f;
 
     s_ours.heartMgr->setAlphaRate(alphaRate);
@@ -671,7 +700,7 @@ void draw_squad() {
     }
 
     const u8 alpha = static_cast<u8>(255.0f * alphaRate);
-    f32 lineTop = bottom + gap;
+    f32 lineTop = bottom + gap + static_cast<f32>(cfg_int(s_offsetYVar, 0));
     bool compact = false;
     int textRows = 0;
     for (int n = 0; n < count; ++n) {
@@ -688,7 +717,8 @@ void draw_squad() {
 
                 std::snprintf(line, sizeof(line), "+%d more", count - n);
                 lineTop += nameCell * 1.15f;
-                draw_name(line, left, lineTop, nameCell, alpha, false, false);
+                draw_name(line, onRight ? rightEdge : rowLeft, lineTop, nameCell, alpha, false,
+                    false, onRight);
                 graf->setPort();
                 graf->setup2D();
                 break;
@@ -697,7 +727,8 @@ void draw_squad() {
             std::snprintf(line, sizeof(line), "%s  %u/%u", m.name.c_str(),
                 static_cast<unsigned>((m.life + 3) / 4), static_cast<unsigned>(m.maxLife / 5));
             lineTop += nameCell * 1.15f;
-            draw_name(line, left, lineTop, nameCell, alpha, m.low, m.paused);
+            draw_name(line, onRight ? rightEdge : rowLeft, lineTop, nameCell, alpha, m.low,
+                m.paused, onRight);
             graf->setPort();
             graf->setup2D();
             continue;
@@ -705,7 +736,14 @@ void draw_squad() {
 
         const f32 heartsTop = lineTop + nameCell;
         set_hearts(m.maxLife, m.life);
-        const f32 tx = ps.x(left) - s_anchorDx;
+        f32 rowX = rowLeft;
+        if (onRight) {
+            int perRow = m.maxLife / 5;
+            if (perRow < 1) perRow = 1;
+            if (perRow > kHeartsPerRow) perRow = kHeartsPerRow;
+            rowX = rightEdge - ((perRow - 1) * realPitch + realSlotW) * k;
+        }
+        const f32 tx = ps.x(rowX) - s_anchorDx;
         const f32 ty = ps.y(heartsTop) - s_anchorDy;
         s_ours.heartN->translate(tx, ty);
         s_ours.screen->draw(0.0f, 0.0f, graf);
@@ -731,8 +769,8 @@ void draw_squad() {
 
         graf->setPort();
         graf->setup2D();
-        draw_name(m.name, heartsLeft, heartsTopDrawn - nameCell * 0.12f, nameCell, alpha, m.low,
-            m.paused);
+        draw_name(m.name, onRight ? rightEdge : heartsLeft, heartsTopDrawn - nameCell * 0.12f,
+            nameCell, alpha, m.low, m.paused, onRight);
         graf->setPort();
         graf->setup2D();
 
@@ -805,6 +843,26 @@ void squad_hud_register_vars() {
     offset.type = CONFIG_VAR_INT;
     offset.default_int = 0;
     if (svc_config->register_var(mod_ctx, &offset, &s_offsetYVar) != MOD_OK) s_offsetYVar = 0;
+
+    ConfigVarDesc offsetX = CONFIG_VAR_DESC_INIT;
+    offsetX.name = "squad_health_offset_x";
+    offsetX.type = CONFIG_VAR_INT;
+    offsetX.default_int = 0;
+    if (svc_config->register_var(mod_ctx, &offsetX, &s_offsetXVar) != MOD_OK) s_offsetXVar = 0;
+
+    ConfigVarDesc side = CONFIG_VAR_DESC_INIT;
+    side.name = "squad_health_side";
+    side.type = CONFIG_VAR_INT;
+    side.default_int = 0;
+    if (svc_config->register_var(mod_ctx, &side, &s_sideVar) != MOD_OK) s_sideVar = 0;
+}
+
+ConfigVarHandle squad_hud_offset_x_var() {
+    return s_offsetXVar;
+}
+
+ConfigVarHandle squad_hud_side_var() {
+    return s_sideVar;
 }
 
 ConfigVarHandle squad_hud_enabled_var() {

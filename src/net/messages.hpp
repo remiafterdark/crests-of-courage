@@ -72,6 +72,10 @@ enum CoopMsgType : uint8_t {
     kMsgTorch = 52,
     kMsgAnimal = 53,
     kMsgTbox2 = 54,
+    kMsgSkills = 55,
+    kMsgRandoSeed = 56,
+    kMsgRandoSeedRequest = 57,
+    kMsgRandoChunk = 58,
 };
 
 struct MsgTorch {
@@ -99,6 +103,29 @@ struct MsgAnimal {
     float pos[3];
     float speedF;
     float dist;
+};
+
+struct MsgSkills {
+    uint16_t have;
+};
+
+const uint32_t kRandoChunkBytes = 6000;
+const uint32_t kRandoSeedMaxBytes = 8u * 1024u * 1024u;
+
+struct MsgRandoSeed {
+    char hash[64];
+    uint32_t size;
+    uint32_t crc;
+};
+
+struct MsgRandoSeedRequest {
+    char hash[64];
+};
+
+struct MsgRandoChunk {
+    uint32_t crc;
+    uint32_t offset;
+    uint16_t length;
 };
 
 struct MsgTwilightBug {

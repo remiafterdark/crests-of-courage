@@ -320,6 +320,16 @@ void apply_snapshot() {
     dSv_info_c* info = dComIfGs_getSaveInfo();
     if (info == nullptr || s_pending.size() != kSaveSize) return;
 
+    if (!rando_join_sync_allowed()) {
+        s_havePending = false;
+        s_pending.clear();
+        s_joinerApplied = true;
+        features_toast("Kept your own file",
+            "You and the host are on different randomizer seeds, so their progress was not "
+            "copied over.");
+        return;
+    }
+
     if (!game_mode_is_coop()) {
         write_backup(info);
     } else {

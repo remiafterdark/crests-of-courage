@@ -1725,8 +1725,10 @@ J3DModel* puppet_private_part(const char* file, const cXyz& scale);
 J3DModel* puppet_private_part_idx(const char* arc, u32 index, const cXyz& scale);
 
 bool skin_fits_original(J3DModelData* mine, J3DModelData* theirs, const char* what);
+bool skin_fits_counts(J3DModelData* mine, u16 joints, u16 mats, const char* what);
 J3DModelData* guard_skin_data(J3DModelData* data, const char* what);
-J3DModelData* aram_original(u16 index);
+void remember_aram_original(u16 index, J3DModelData* data);
+bool aram_original(u16 index, u16& joints, u16& mats);
 const char* puppet_skin_for(int slot);
 
 J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
@@ -1794,6 +1796,14 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
 
         J3DModel* model = puppet_private_part_idx("Alink", res.bmdResIdx, cXyz(1.0f, 1.0f, 1.0f));
         if (model == nullptr) return nullptr;
+
+        if (J3DModel* skinModel = puppet_skin_equipment(
+                private_arc_file_name("Alink", res.bmdResIdx), cXyz(1.0f, 1.0f, 1.0f))) {
+            JKR_DELETE(model);
+            model = skinModel;
+            coop_log::info("coop_mod: [SKIN] held item kind={} is their model's '{}'", kind,
+                private_arc_file_name("Alink", res.bmdResIdx));
+        }
         slot.data = model->getModelData();
         slot.fromOutfit = false;
         slot.shared = true;
@@ -1817,31 +1827,6 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
         coop_log::trace("coop_mod: [DIAG-ITEM] loaded kind={} from outfit archive '{}'", kind,
             res.outfitFile);
         return slot.data;
-    }
-
-    const char* skinFile = skins_aram_file_for_index(res.bmdResIdx);
-    if (skinFile != nullptr) {
-        const char* skinName = puppet_skin_for(skins_slot_for_equipment_file(skinFile));
-        if (skinName == nullptr) skinName = puppet_skin_for(kSkinChoiceEquipment);
-        J3DModelData* mine =
-            (skinName != nullptr) ? guard_skin_data(skins_equipment_data(skinName, skinFile),
-                                        skinFile)
-                                  : nullptr;
-        J3DModelData* theirs = aram_original(res.bmdResIdx);
-
-        if (mine != nullptr && theirs != nullptr && skin_fits_original(mine, theirs, skinFile)) {
-            J3DModel* skinModel = mDoExt_J3DModel__create(mine, 0x80000, 0x11000284);
-            if (skinModel != nullptr) {
-                slot.data = mine;
-                slot.fromOutfit = false;
-                slot.shared = true;
-                prep_equipment_model(skinModel);
-                JKR_DELETE(skinModel);
-                coop_log::info("coop_mod: [SKIN] held item kind={} is their model's '{}'", kind,
-                    skinFile);
-                return slot.data;
-            }
-        }
     }
 
     JKRArchive* anmArchive = dComIfGp_getAnmArchive();
@@ -1880,6 +1865,29 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
 
     slot.data = modelData;
     slot.buf = buf;
+
+    remember_aram_original(res.bmdResIdx, modelData);
+    const char* skinFile = skins_aram_file_for_index(res.bmdResIdx);
+    if (skinFile != nullptr) {
+        const char* skinName = puppet_skin_for(skins_slot_for_equipment_file(skinFile));
+        if (skinName == nullptr) skinName = puppet_skin_for(kSkinChoiceEquipment);
+        J3DModelData* mine =
+            (skinName != nullptr) ? guard_skin_data(skins_equipment_data(skinName, skinFile),
+                                        skinFile)
+                                  : nullptr;
+        if (mine != nullptr && skin_fits_original(mine, modelData, skinFile)) {
+            J3DModel* skinModel = mDoExt_J3DModel__create(mine, 0x80000, 0x11000284);
+            if (skinModel != nullptr) {
+                slot.data = mine;
+                slot.shared = true;
+                prep_equipment_model(skinModel);
+                JKR_DELETE(skinModel);
+                coop_log::info("coop_mod: [SKIN] held item kind={} is their model's '{}'", kind,
+                    skinFile);
+                return slot.data;
+            }
+        }
+    }
     coop_log::trace("coop_mod: [DIAG-ITEM] loaded kind={} bmdResIdx={} data={:p} mats={}", kind,
         res.bmdResIdx, static_cast<void*>(modelData), modelData->getMaterialNum());
     return modelData;
@@ -2497,10 +2505,13 @@ bool skin_data_looks_sane(J3DModelData* data) {
 
 bool skin_fits_original(J3DModelData* mine, J3DModelData* theirs, const char* what) {
     if (mine == nullptr || theirs == nullptr) return false;
+    return skin_fits_counts(mine, theirs->getJointNum(), theirs->getMaterialNum(), what);
+}
+
+bool skin_fits_counts(J3DModelData* mine, u16 theirJoints, u16 theirMats, const char* what) {
+    if (mine == nullptr) return false;
     const u16 myJoints = mine->getJointNum();
-    const u16 theirJoints = theirs->getJointNum();
     const u16 myMats = mine->getMaterialNum();
-    const u16 theirMats = theirs->getMaterialNum();
     if (myJoints == theirJoints && myMats == theirMats) return true;
     coop_log::warn("coop_mod: [SKIN] '{}' does not fit the game's own (joints {}/{}, materials"
                    " {}/{}) - using the game's",
@@ -2519,25 +2530,31 @@ J3DModelData* guard_skin_data(J3DModelData* data, const char* what) {
 
 struct AramOriginal {
     u16 index = 0xFFFF;
-    J3DModelData* data = nullptr;
+    u16 joints = 0;
+    u16 mats = 0;
 };
 AramOriginal s_aramOriginals[16];
 
 void remember_aram_original(u16 index, J3DModelData* data) {
+    if (data == nullptr) return;
     for (AramOriginal& slot : s_aramOriginals) {
         if (slot.index == index) return;
-        if (slot.data != nullptr) continue;
+        if (slot.index != 0xFFFF) continue;
         slot.index = index;
-        slot.data = data;
+        slot.joints = data->getJointNum();
+        slot.mats = data->getMaterialNum();
         return;
     }
 }
 
-J3DModelData* aram_original(u16 index) {
+bool aram_original(u16 index, u16& joints, u16& mats) {
     for (const AramOriginal& slot : s_aramOriginals) {
-        if (slot.index == index) return slot.data;
+        if (slot.index != index) continue;
+        joints = slot.joints;
+        mats = slot.mats;
+        return true;
     }
-    return nullptr;
+    return false;
 }
 
 J3DModelData* local_skin_for(const char* arcName, const char* resName) {
@@ -5391,11 +5408,13 @@ void puppet_hook_init() {
             J3DModelData** result = static_cast<J3DModelData**>(retval);
             if (result == nullptr || s_loadingPuppetModels) return HOOK_CONTINUE;
             const u16 index = mods::arg<u16>(args, 1);
-            J3DModelData* theirs = aram_original(index);
-            if (theirs == nullptr) return HOOK_CONTINUE;
+            u16 joints = 0;
+            u16 mats = 0;
+
+            if (!aram_original(index, joints, mats)) return HOOK_CONTINUE;
             J3DModelData* mine = skins_local_aram_data(index);
             const char* file = skins_aram_file_for_index(index);
-            if (mine == nullptr || !skin_fits_original(mine, theirs, file)) return HOOK_CONTINUE;
+            if (mine == nullptr || !skin_fits_counts(mine, joints, mats, file)) return HOOK_CONTINUE;
             *result = mine;
             breadcrumb2("local: held item", file);
             return HOOK_SKIP_ORIGINAL;

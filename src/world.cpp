@@ -190,6 +190,30 @@ void send_full(const char stage[8], int saveNo, WorldRegion region, int room, co
     coop_net_send(kMsgWorldFull, &msg, sizeof(msg));
 }
 
+void keep_private(uint8_t* bytes, const uint8_t* before, uint8_t (*mask_of)(int)) {
+    for (int b = 0; b < kEventSize; ++b) {
+        const uint8_t mask = mask_of(b);
+        if (mask != 0) bytes[b] = static_cast<uint8_t>((bytes[b] & ~mask) | (before[b] & mask));
+    }
+}
+
+void keep_private_tmp(uint8_t* tmp, const uint8_t* before) {
+    keep_private(tmp, before, skills_tmp_private);
+}
+
+void keep_private_event(uint8_t* ev, const uint8_t* before) {
+    keep_private(ev, before, skills_event_private);
+}
+
+uint32_t hash_bytes(const uint8_t* data, int size, int skipByte);
+
+uint32_t hash_shared(const uint8_t* bytes, uint8_t (*mask_of)(int)) {
+    uint8_t copy[kEventSize];
+    std::memcpy(copy, bytes, kEventSize);
+    for (int b = 0; b < kEventSize; ++b) copy[b] = static_cast<uint8_t>(copy[b] & ~mask_of(b));
+    return hash_bytes(copy, kEventSize, -1);
+}
+
 void diff_region(WorldRegion region, int8_t room, uint8_t* cur, uint8_t* base, int size,
     int skipByte = -1) {
     for (int start = 0; start < size; start += 32) {
@@ -459,7 +483,10 @@ void scan() {
 
     uint8_t* tmp = info->getTmp().mEvent;
     if (dungeon && s_base.haveTmp) {
-        diff_region(kRegionTmp, -1, tmp, s_base.tmp, kEventSize);
+        uint8_t view[kEventSize];
+        std::memcpy(view, tmp, kEventSize);
+        keep_private_tmp(view, s_base.tmp);
+        diff_region(kRegionTmp, -1, view, s_base.tmp, kEventSize);
     } else {
         s_base.haveTmp = true;
         std::memcpy(s_base.tmp, tmp, kEventSize);
@@ -472,7 +499,10 @@ void scan() {
 
     uint8_t* events = info->getSavedata().getEvent().mEvent;
     if (story && s_base.haveEvent) {
-        diff_region(kRegionEvent, -1, events, s_base.event, kEventSize);
+        uint8_t view[kEventSize];
+        std::memcpy(view, events, kEventSize);
+        keep_private_event(view, s_base.event);
+        diff_region(kRegionEvent, -1, view, s_base.event, kEventSize);
     } else {
         s_base.haveEvent = true;
         std::memcpy(s_base.event, events, kEventSize);
@@ -852,7 +882,7 @@ void send_digest(dSv_info_c* info, const char stage[8], int saveNo) {
     msg.danHash = dan.mStageNo == saveNo
                       ? hash_bytes(reinterpret_cast<uint8_t*>(&dan) + kDanOffset, kDanSize)
                       : 0u;
-    msg.tmpHash = hash_bytes(info->getTmp().mEvent, kEventSize);
+    msg.tmpHash = hash_shared(info->getTmp().mEvent, skills_tmp_private);
     const int here = dComIfGp_roomControl_getStayNo();
     msg.room = static_cast<int8_t>(here);
     msg.zoneHash = 0;
@@ -865,7 +895,7 @@ void send_digest(dSv_info_c* info, const char stage[8], int saveNo) {
     msg.visitedHash = visited_hash(info);
     msg.lightDropHash = light_drop_hash(info);
     msg.collectHash = collect_hash(info);
-    msg.eventHash = hash_bytes(info->getSavedata().getEvent().mEvent, kEventSize);
+    msg.eventHash = hash_shared(info->getSavedata().getEvent().mEvent, skills_event_private);
     msg.statusBHash = status_b_hash(info);
     coop_net_send(kMsgWorldDigest, &msg, sizeof(msg));
 }
@@ -889,7 +919,7 @@ void handle_digest(const MsgWorldDigest& msg, uint8_t from) {
     }
 
     if (!coop_session(kSessStory, cfg_bool(s_storyVar, false))) {
-        const uint32_t mine = hash_bytes(info->getSavedata().getEvent().mEvent, kEventSize);
+        const uint32_t mine = hash_shared(info->getSavedata().getEvent().mEvent, skills_event_private);
         if (mine == msg.eventHash) {
             s_storyDiffFor = 0;
             s_storyWarned = false;
@@ -917,7 +947,7 @@ void handle_digest(const MsgWorldDigest& msg, uint8_t from) {
     const uint32_t myDan = dan.mStageNo == saveNo
                                ? hash_bytes(reinterpret_cast<uint8_t*>(&dan) + kDanOffset, kDanSize)
                                : 0u;
-    const uint32_t myTmp = hash_bytes(info->getTmp().mEvent, kEventSize);
+    const uint32_t myTmp = hash_shared(info->getTmp().mEvent, skills_tmp_private);
 
     bool zoneDiffers = false;
     const int here = dComIfGp_roomControl_getStayNo();
@@ -942,7 +972,7 @@ void handle_digest(const MsgWorldDigest& msg, uint8_t from) {
     const uint32_t myLightDrop = light_drop_hash(info);
 
     const bool storyOn = coop_session(kSessStory, cfg_bool(s_storyVar, false));
-    const uint32_t myEvent = hash_bytes(info->getSavedata().getEvent().mEvent, kEventSize);
+    const uint32_t myEvent = hash_shared(info->getSavedata().getEvent().mEvent, skills_event_private);
     const bool eventOk = !storyOn || myEvent == msg.eventHash;
     if (mine == msg.memoryHash && myDan == msg.danHash && myTmp == msg.tmpHash &&
         myStatusB == msg.statusBHash && myCollect == msg.collectHash &&
@@ -1066,8 +1096,11 @@ void handle_full(const MsgWorldFull& msg) {
         const int off = static_cast<int>(msg.room) * 32;
         if (msg.size != 32 || off < 0 || off + 32 > kEventSize) return;
 
+        uint8_t before[kEventSize];
+        std::memcpy(before, info->getTmp().mEvent, kEventSize);
         merge_full(info->getTmp().mEvent + off,
             (baselineValid && s_base.haveTmp) ? s_base.tmp + off : nullptr, msg.data, 32, false);
+        keep_private_tmp(info->getTmp().mEvent, before);
         break;
     }
 
@@ -1108,9 +1141,12 @@ void handle_full(const MsgWorldFull& msg) {
         if (!coop_session(kSessStory, cfg_bool(s_storyVar, false))) return;
         const int off = static_cast<int>(msg.room) * 32;
         if (msg.size != 32 || off < 0 || off + 32 > kEventSize) return;
+        uint8_t before[kEventSize];
+        std::memcpy(before, info->getSavedata().getEvent().mEvent, kEventSize);
         merge_full(info->getSavedata().getEvent().mEvent + off,
             (baselineValid && s_base.haveEvent) ? s_base.event + off : nullptr, msg.data, 32,
             false);
+        keep_private_event(info->getSavedata().getEvent().mEvent, before);
         break;
     }
     case kRegionZone:
@@ -1540,14 +1576,20 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
     case kRegionTmp: {
 
         if (!here || msg.offset + msg.size > kEventSize) return;
+        uint8_t before[kEventSize];
+        std::memcpy(before, info->getTmp().mEvent, kEventSize);
         apply_bytes(info->getTmp().mEvent,
             (baselineValid && s_base.haveTmp) ? s_base.tmp : nullptr, msg);
+        keep_private_tmp(info->getTmp().mEvent, before);
         break;
     }
     case kRegionEvent: {
         if (msg.offset + msg.size > kEventSize) return;
+        uint8_t before[kEventSize];
+        std::memcpy(before, info->getSavedata().getEvent().mEvent, kEventSize);
         apply_bytes(info->getSavedata().getEvent().mEvent,
             (s_base.have && s_base.haveEvent) ? s_base.event : nullptr, msg);
+        keep_private_event(info->getSavedata().getEvent().mEvent, before);
         break;
     }
     default:

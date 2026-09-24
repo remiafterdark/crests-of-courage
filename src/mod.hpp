@@ -206,7 +206,7 @@ void skins_outfit_list(int index, std::vector<std::string>& out);
 
 std::string skins_folder_path();
 
-const char* const kCoopShippedModelsVersion = "2";
+const char* const kCoopShippedModelsVersion = "3";
 
 void skins_cycle_update();
 
@@ -324,6 +324,8 @@ void squad_hud_queue();
 ConfigVarHandle squad_hud_enabled_var();
 ConfigVarHandle squad_hud_size_var();
 ConfigVarHandle squad_hud_offset_var();
+ConfigVarHandle squad_hud_offset_x_var();
+ConfigVarHandle squad_hud_side_var();
 
 ConfigVarHandle squad_hud_hurt_only_var();
 
@@ -353,6 +355,7 @@ int private_arc_poll(const char* name);
 void private_arc_release(const char* name);
 J3DModelData* private_arc_load(const char* name, const char* file);
 J3DModelData* private_arc_load_idx(const char* name, uint32_t index);
+const char* private_arc_file_name(const char* name, uint32_t index);
 void private_arc_free_data(J3DModelData* data);
 
 void colors_attach_local_model(J3DModel* model);
@@ -443,6 +446,20 @@ void boss_queue_overlay();
 bool boss_local_demo_running();
 
 void skipvote_init();
+void skills_init();
+
+void rando_init();
+void rando_update();
+void rando_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t from);
+bool rando_active();
+bool rando_join_sync_allowed();
+void game_mode_prompt_connect();
+void skills_update();
+void skills_on_message(const uint8_t* payload, size_t size);
+
+uint8_t skills_tmp_private(int byte);
+
+uint8_t skills_event_private(int byte);
 
 void drops_init();
 

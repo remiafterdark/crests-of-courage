@@ -97,6 +97,15 @@ void copy_name(char* dst, const std::string& name) {
     std::strncpy(dst, name.c_str(), kCoopNameMax - 1);
 }
 
+std::string s_knownName[kCoopMaxPlayers];
+bool s_nameGapLogged[kCoopMaxPlayers] = {};
+
+void remember_name(uint8_t from, const std::string& name) {
+    if (from >= kCoopMaxPlayers || name.empty()) return;
+    s_knownName[from] = name;
+    s_nameGapLogged[from] = false;
+}
+
 std::string wire_name(const char* buf) {
     const void* end = std::memchr(buf, '\0', kCoopNameMax);
     const size_t len = (end != nullptr) ? static_cast<size_t>(static_cast<const char*>(end) - buf)
@@ -467,7 +476,7 @@ bool local_on_stage(const char* stage8);
 const int16_t kProcItem = 0x218;
 const int16_t kProcLifeContainer = 0x21B;
 
-const int16_t kProcDemoItem = 0x69;
+const int16_t kProcDemoItem = fpcNm_Demo_Item_e;
 
 bool is_field_item(fopAc_ac_c* actor) {
     if (actor == nullptr) return false;
@@ -747,6 +756,7 @@ void on_hello(const uint8_t* payload, size_t size, uint8_t from) {
     std::memcpy(&msg, payload, sizeof(msg));
     peer_slot(from).present = true;
     peer_slot(from).name = wire_name(msg.name);
+    remember_name(from, peer_slot(from).name);
     coop_log::info("coop_mod: hello from '{}' (protocol {})", peer_slot(from).name, msg.version);
     if (msg.version != kCoopProtocolVersion) {
 
@@ -769,6 +779,7 @@ void on_presence(const uint8_t* payload, size_t size, uint8_t from) {
     std::memcpy(&msg, payload, sizeof(msg));
     peer_slot(from).present = true;
     peer_slot(from).name = wire_name(msg.name);
+    remember_name(from, peer_slot(from).name);
     std::memcpy(peer_slot(from).stage, msg.stage, sizeof(msg.stage));
     peer_slot(from).stage[8] = '\0';
     peer_slot(from).inGame = msg.inGame != 0;
@@ -1061,6 +1072,7 @@ void features_update() {
     grass_update();
     joinsync_update();
     skipvote_update();
+    skills_update();
     twilight_update();
     const bool connected = coop_net_connected();
 
@@ -1075,8 +1087,18 @@ void features_update() {
             visible = p.inGame && local_on_stage(p.stage);
         }
         puppet_hook_set_player_visible(id, visible);
-        puppet_hook_set_player_nametag(id, p.present ? p.name.c_str() : "Player", nametagsOn,
-            nametagsFar);
+        const char* tag = "Player";
+        if (p.present) {
+            tag = p.name.c_str();
+        } else if (!s_knownName[i].empty()) {
+            tag = s_knownName[i].c_str();
+            if (connected && coop_net_player_present(id) && !s_nameGapLogged[i]) {
+                s_nameGapLogged[i] = true;
+                coop_log::info("coop_mod: player {} ('{}') is in the roster but we have no "
+                               "presence for them - keeping their name up", i, s_knownName[i]);
+            }
+        }
+        puppet_hook_set_player_nametag(id, tag, nametagsOn, nametagsFar);
 
         const bool low = p.lifeKnown && p.maxLife >= 5 && p.life <= p.maxLife / 5;
         puppet_hook_set_player_low_health(id, low);
@@ -1283,6 +1305,10 @@ void features_on_message(uint8_t type, const uint8_t* payload, size_t size, uint
     case kMsgEnemyTargets: enemies_on_message(type, payload, size, from); break;
 
     case kMsgSkipVote: skipvote_on_message(payload, size, from); break;
+    case kMsgSkills: skills_on_message(payload, size); break;
+    case kMsgRandoSeed:
+    case kMsgRandoSeedRequest:
+    case kMsgRandoChunk: rando_on_message(type, payload, size, from); break;
     case kMsgTwilightBug:
     case kMsgTearGot: twilight_on_message(type, payload, size); break;
     case kMsgActorSpawn:

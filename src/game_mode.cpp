@@ -182,6 +182,10 @@ void game_mode_init() {
     coop_log::info("coop_mod: [MODE] co-op registered, saving to '{}'", kSaveName);
 }
 
+void game_mode_prompt_connect() {
+    open_connect_window(nullptr, nullptr);
+}
+
 bool game_mode_is_coop() {
     if (!s_active && svc_game_mode != nullptr) {
 

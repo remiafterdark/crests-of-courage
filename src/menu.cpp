@@ -143,6 +143,24 @@ void add_number(UiElementHandle pane, const char* label, ConfigVarHandle var, in
     add_control(pane, desc);
 }
 
+void add_dropdown(UiElementHandle pane, const char* label, ConfigVarHandle var,
+    const char* const* options, size_t count, const char* help = nullptr, ConfigVarHandle needs = 0) {
+    if (var == 0) return;
+    UiControlDesc desc = UI_CONTROL_DESC_INIT;
+    desc.kind = UI_CONTROL_DROPDOWN;
+    desc.label = label;
+    desc.binding = UI_BINDING_CONFIG_VAR;
+    desc.config_var = var;
+    desc.options = options;
+    desc.option_count = count;
+    if (needs != 0) {
+        desc.is_disabled = depends_on;
+        desc.user_data = as_data(needs);
+    }
+    desc.help_rml = help;
+    add_control(pane, desc);
+}
+
 const char* const kColorPresets[] = {
     "ab706e", "6382a0", "94749a", "ec8644", "b9ab00", "ec9fc8", "505154", "f8f7f4", "91723e",
 };
@@ -543,8 +561,15 @@ ModResult group_health(ModContext*, UiElementHandle pane, void*, ModError*) {
         "Everybody's hearts under your own. Past three players the rest become one line each.");
     add_number(pane, "Size", squad_hud_size_var(), 20, 100, 5, "%",
         "How big theirs are next to your own hearts.", squad_hud_enabled_var());
-    add_number(pane, "Distance below yours", squad_hud_offset_var(), 0, 200, 2, nullptr,
-        "Nudge the party down if it crowds your own hearts.", squad_hud_enabled_var());
+    static const char* const kSides[] = {"Left", "Right"};
+    add_dropdown(pane, "Side", squad_hud_side_var(), kSides, 2,
+        "Left sits under your own hearts. Right mirrors it on the other edge of the screen.",
+        squad_hud_enabled_var());
+    add_number(pane, "Distance down", squad_hud_offset_var(), 0, 300, 2, nullptr,
+        "Moves the whole list down. The space between players stays the same.",
+        squad_hud_enabled_var());
+    add_number(pane, "Distance from the side", squad_hud_offset_x_var(), -40, 400, 2, nullptr,
+        "Moves the whole list in from the edge of the screen it is on.", squad_hud_enabled_var());
     return MOD_OK;
 }
 

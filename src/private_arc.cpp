@@ -128,6 +128,14 @@ J3DModelData* private_arc_load_idx(const char* name, u32 index) {
     return private_arc_build(archive, name, index, raw);
 }
 
+const char* private_arc_file_name(const char* name, u32 index) {
+    PrivateArc* a = find_arc(name);
+    if (a == nullptr || a->archive == nullptr) return nullptr;
+    JKRArchive* archive = a->archive;
+    if (index >= archive->countFile() || archive->mStringTable == nullptr) return nullptr;
+    return archive->mStringTable + archive->mFiles[index].getNameOffset();
+}
+
 J3DModelData* private_arc_load(const char* name, const char* file) {
     PrivateArc* a = find_arc(name);
     if (a == nullptr || a->archive == nullptr || file == nullptr) return nullptr;

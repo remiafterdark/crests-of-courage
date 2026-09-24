@@ -64,8 +64,10 @@ You do not have to wear a whole model. Each part is chosen on its own:
 Voices are per player too, so two people can sound different to each other with no restart.
 Dialogue is the exception: text is not per player, so that switch only changes your own game.
 
-Linkle, Dark Link and the Hero of Time ship with the mod. Add your own; a folder with the same name
-as a shipped one wins.
+Nine models ship with the mod: Linkle, Dark Link, the Hero of Time, the Hero of Time (Child
+Timeline), the Hero of the Sky, Hyrule Warriors Link, Ordon Warrior Link (with and without the
+hat) and Tears of the Kingdom Beta Link. Add your own; a folder with the same name as a shipped
+one wins.
 
 ## Experimental
 

@@ -9,7 +9,12 @@ their permission.
 | --- | --- |
 | Dark Link | **LoadingError** |
 | Hero of Time | **SkilarBabcock** |
+| Hero of Time (Child Timeline) | **SkilarBabcock** |
+| Hero of the Sky | **SkilarBabcock** |
+| Hyrule Warriors Link | **SkilarBabcock** |
 | Linkle | **Ditrey**, concept art by **ThenMichael**, modelling help from **SkilarBabcock** |
+| Ordon Warrior Link, with and without the hat | **SkilarBabcock** |
+| Tears of the Kingdom Beta Link | **SkilarBabcock** |
 
 Every model folder carries a `model.txt` naming its author, and that is what the Models tab shows
 in game, so the credit travels with the model.

@@ -26,6 +26,9 @@ DEFINE_HOOK((static_cast<fopAc_ac_c* (*)(s16, u32, const cXyz*, int, const csXyz
                 createFunc, void*, u32, u8)>(&fopAcM_fastCreate)),
     FastCreateHook);
 
+DEFINE_HOOK_SYMBOL("src/d/actor/d_a_nbomb.cpp#daNbomb_createHeap", int(fopAc_ac_c*),
+    BombCreateHeapHook);
+
 namespace {
 
 const int kMaxSpawns = kCoopMaxPlayers * 6;
@@ -42,6 +45,8 @@ int s_diagOwned = 0;
 int s_diagReplicas = 0;
 
 int s_creatingReplica = 0;
+
+uint8_t s_replicaBombKind = 0xFF;
 
 const int kAlinkBombResIdx = 0x1E;
 
@@ -138,6 +143,11 @@ bool should_replicate(s16 name, u32 bornParam, u32 liveParam) {
         return false;
     }
 
+    if (name == fpcNm_NBOMB_e && (param == static_cast<u32>(dBomb_c::PRM_NORMAL_BOMB_EXPLODE) ||
+                                  param == static_cast<u32>(dBomb_c::PRM_WATER_BOMB_EXPLODE))) {
+        return false;
+    }
+
     if (name == fpcNm_BOOMERANG_e && param == 0) return false;
     return true;
 }
@@ -149,7 +159,26 @@ uint8_t read_actor_kind(fopAc_ac_c* actor, s16 name) {
 
 void write_actor_kind(fopAc_ac_c* actor, s16 name, uint8_t kind) {
     if (actor == nullptr || name != fpcNm_NBOMB_e) return;
-    static_cast<daNbomb_c*>(actor)->mType = kind;
+    auto* bomb = static_cast<daNbomb_c*>(actor);
+    if (kind == daNbomb_c::TYPE_WATER_PLAYER && bomb->mType == daNbomb_c::TYPE_WATER_PLAYER) {
+        bomb->onStateFlg0(daNbomb_c::FLG0_WATER_BOMB);
+    }
+}
+
+u32 create_param_for_kind(s16 name, u32 param, uint8_t kind) {
+    if (name == fpcNm_NBOMB_e && kind == daNbomb_c::TYPE_INSECT_PLAYER) {
+        return static_cast<u32>(dBomb_c::PRM_INSECT_BOMB_PLAYER);
+    }
+    return param;
+}
+
+HookAction on_bomb_create_heap_pre(ModContext*, void* args, void*, void*) {
+    if (s_replicaBombKind != daNbomb_c::TYPE_WATER_PLAYER) return HOOK_CONTINUE;
+    auto* bomb = static_cast<daNbomb_c*>(mods::arg<fopAc_ac_c*>(args, 0));
+    if (bomb != nullptr && bomb->mType == daNbomb_c::TYPE_NORMAL_PLAYER) {
+        bomb->mType = daNbomb_c::TYPE_WATER_PLAYER;
+    }
+    return HOOK_CONTINUE;
 }
 
 int16_t read_actor_state(fopAc_ac_c* actor, s16 name) {
@@ -747,6 +776,9 @@ void spawns_init() {
     const ModResult post = mods::hook::add_post<FastCreateHook>(on_fast_create_post);
     coop_log::info("coop_mod: [SPAWN] fastCreate hook: pre={} post={}", static_cast<int>(pre),
         static_cast<int>(post));
+    const ModResult heap = mods::hook::add_pre<BombCreateHeapHook>(on_bomb_create_heap_pre);
+    coop_log::info("coop_mod: [SPAWN] bomb type hook: {}",
+        heap == MOD_OK ? "attached" : "FAILED - water bomb replicas will look like plain ones");
     int64_t bombTicks = 0;
     if (s_selfTestVar != 0) svc_config->get_int(mod_ctx, s_selfTestVar, &bombTicks);
     if (bombTicks != 0) {
@@ -900,8 +932,11 @@ void spawns_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_
         const cXyz pos(msg.pos[0], msg.pos[1], msg.pos[2]);
         const csXyz angle(msg.angle[0], msg.angle[1], msg.angle[2]);
         ++s_creatingReplica;
-        fopAc_ac_c* actor = fopAcM_fastCreate(msg.procName, msg.param, &pos,
+        s_replicaBombKind = msg.procName == fpcNm_NBOMB_e ? msg.kind : 0xFF;
+        fopAc_ac_c* actor = fopAcM_fastCreate(msg.procName,
+            create_param_for_kind(msg.procName, msg.param, msg.kind), &pos,
             static_cast<int>(msg.room), &angle, nullptr, -1, nullptr, nullptr);
+        s_replicaBombKind = 0xFF;
         --s_creatingReplica;
         if (actor == nullptr) {
             coop_log::info("coop_mod: [SPAWN] could not create netId={} name={:#x}", msg.netId,
