@@ -12,9 +12,13 @@
 #include "JSystem/J3DGraphAnimator/J3DMaterialAnm.h"
 #include "JSystem/J3DGraphLoader/J3DModelLoader.h"
 
+#include "d/d_resorce.h"
+#include "mods/svc/hook.hpp"
+
 #include <cstdio>
 #include <fstream>
 #include <cstring>
+#include <unordered_set>
 
 static const u32 kCoopDifferedDlistFlags = 0x11000284u | J3DDiffFlag_KonstColor | J3DDiffFlag_TexGen;
 
@@ -223,6 +227,26 @@ J3DModel* loadBmdFromArc(const char* arcName, const char* bmdName, cXyz scale) {
 
 #include "JSystem/J3DGraphLoader/J3DAnmLoader.h"
 
+std::unordered_set<J3DModelData*> s_looseData;
+
+DEFINE_HOOK(&dRes_info_c::onWarpMaterial, WarpOnHook);
+DEFINE_HOOK(&dRes_info_c::offWarpMaterial, WarpOffHook);
+
+DEFINE_HOOK_SYMBOL("dRes_info_c::setWarpSRT", void(J3DModelData*, cXyz&, f32, f32), WarpSrtHook);
+
+HookAction skip_if_ours(ModContext*, void* args, void*, void*) {
+    return s_looseData.count(mods::arg<J3DModelData*>(args, 0)) != 0 ? HOOK_SKIP_ORIGINAL
+                                                                     : HOOK_CONTINUE;
+}
+
+void models_warp_guard_init() {
+    const bool on = mods::hook::add_pre<WarpOnHook>(skip_if_ours) == MOD_OK;
+    const bool off = mods::hook::add_pre<WarpOffHook>(skip_if_ours) == MOD_OK;
+    const bool srt = mods::hook::add_pre<WarpSrtHook>(skip_if_ours) == MOD_OK;
+    coop_log::info("coop_mod: [models] warp guard {}", on && off && srt ? "attached" : "FAILED - "
+        "warping in a custom model can crash");
+}
+
 J3DModelData* loadBmdDataFromFile(const char* path) {
     if (path == nullptr) return nullptr;
 
@@ -292,6 +316,35 @@ J3DModelData* loadBmdDataFromFile(const char* path) {
 
     coop_log::info("coop_mod: [models] loaded '{}' ({} joints, {} materials)", path,
         data->getJointNum(), data->getMaterialNum());
+    s_looseData.insert(data);
+    return data;
+}
+
+J3DModelData* loadBmdDataForLink(const char* path) {
+    if (path == nullptr) return nullptr;
+    std::ifstream file(path_ci(path), std::ios::binary | std::ios::ate);
+    if (!file) return nullptr;
+    const std::streamoff size = file.tellg();
+    if (size <= 64 || size > 64 * 1024 * 1024) return nullptr;
+    file.seekg(0);
+    ensure_system_heap_capacity();
+    JKRHeap* heap = JKRHeap::getRootHeap();
+    if (heap == nullptr) heap = JKRHeap::getSystemHeap();
+    if (heap == nullptr) return nullptr;
+    void* buffer = heap->alloc(static_cast<u32>(size), 32);
+    if (buffer == nullptr) return nullptr;
+    if (!file.read(static_cast<char*>(buffer), size) || std::memcmp(buffer, "J3D2", 4) != 0) {
+        return nullptr;
+    }
+    JKRHeap* previous = heap->becomeCurrentHeap();
+    J3DModelData* data = dRes_info_c::loaderBasicBmd('BMWR', buffer);
+    if (previous != nullptr) previous->becomeCurrentHeap();
+    if (data == nullptr || data->getMaterialNum() == 0 || data->getMaterialNodePointer(0) == nullptr) {
+        coop_log::warn("coop_mod: [models] '{}' did not load as Link's own - using the plain copy",
+            path);
+        return nullptr;
+    }
+    coop_log::info("coop_mod: [models] loaded '{}' for you, with the warp material", path);
     return data;
 }
 

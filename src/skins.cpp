@@ -67,6 +67,7 @@ struct LoadedPart {
     std::string skin;
     int outfit = 0;
     int part = 0;
+    bool forLink = false;
     J3DModelData* data = nullptr;
     bool failed = false;
 };
@@ -309,6 +310,7 @@ void skins_outfit_cycle_update() {
 }
 
 void skins_init() {
+    models_warp_guard_init();
     unpack_shipped_models();
     for (int i = 0; i < kSkinChoiceCount; ++i) {
         ConfigVarDesc desc = CONFIG_VAR_DESC_INIT;
@@ -778,14 +780,23 @@ bool skins_have(const char* name, uint32_t hash) {
     return skin != nullptr && skin->hash == hash;
 }
 
+J3DModelData* part_data(const char* name, int outfit, int part, bool forLink);
+
 J3DModelData* skins_part_data(const char* name, int outfit, int part) {
+    return part_data(name, outfit, part, false);
+}
+
+J3DModelData* part_data(const char* name, int outfit, int part, bool forLink) {
     if (part < 0 || part >= kSkinPartCount) return nullptr;
     if (outfit < 0 || outfit >= kSkinOutfitCount) return nullptr;
     const Skin* skin = find(name);
     if (skin == nullptr || !skin->has[outfit][part]) return nullptr;
 
     for (const LoadedPart& loaded : s_loadedParts) {
-        if (loaded.part != part || loaded.outfit != outfit || loaded.skin != skin->name) continue;
+        if (loaded.part != part || loaded.outfit != outfit || loaded.skin != skin->name ||
+            loaded.forLink != forLink) {
+            continue;
+        }
         if (loaded.failed) return nullptr;
         return loaded.data;
     }
@@ -798,7 +809,10 @@ J3DModelData* skins_part_data(const char* name, int outfit, int part) {
     loaded.skin = skin->name;
     loaded.outfit = outfit;
     loaded.part = part;
-    loaded.data = loadBmdDataFromFile(file.c_str());
+    loaded.forLink = forLink;
+
+    loaded.data = forLink ? loadBmdDataForLink(file.c_str()) : nullptr;
+    if (loaded.data == nullptr) loaded.data = loadBmdDataFromFile(file.c_str());
     loaded.failed = loaded.data == nullptr;
     s_loadedParts.push_back(loaded);
     if (loaded.failed) {
@@ -846,14 +860,21 @@ J3DModelData* skins_local_part_data(int outfit, int part) {
     if (skins_local_disabled()) return nullptr;
     const std::string mine = skins_local_slot(skins_slot_for_outfit(outfit));
     if (mine.empty()) return nullptr;
-    return skins_part_data(mine.c_str(), outfit, part);
+    return part_data(mine.c_str(), outfit, part, true);
 }
 
+J3DModelData* equipment_data(const char* name, const char* file, bool forLink);
+
 J3DModelData* skins_equipment_data(const char* name, const char* file) {
+    return equipment_data(name, file, false);
+}
+
+J3DModelData* equipment_data(const char* name, const char* file, bool forLink) {
     if (file == nullptr || file[0] == '\0') return nullptr;
     const Skin* skin = find(name);
     if (skin == nullptr) return nullptr;
-    const std::string key = std::string(skin->name) + "/equipment/" + file;
+    const std::string key =
+        std::string(skin->name) + (forLink ? "/equipment-link/" : "/equipment/") + file;
     for (const LoadedCutscene& loaded : s_loadedCutscenes) {
         if (loaded.skin != key) continue;
         return loaded.failed ? nullptr : loaded.data;
@@ -863,7 +884,8 @@ J3DModelData* skins_equipment_data(const char* name, const char* file) {
     LoadedCutscene loaded;
     loaded.skin = key;
     if (exists_ci(path, ec) && !ec) {
-        loaded.data = loadBmdDataFromFile(path.string().c_str());
+        if (forLink) loaded.data = loadBmdDataForLink(path.string().c_str());
+        if (loaded.data == nullptr) loaded.data = loadBmdDataFromFile(path.string().c_str());
     }
     loaded.failed = loaded.data == nullptr;
     s_loadedCutscenes.push_back(loaded);
@@ -935,7 +957,7 @@ J3DModelData* skins_local_equipment_data(const char* file) {
 
     if (std::strcmp(file, "footmark.bmd") == 0) {
         const std::string worn = skins_local_slot(skins_slot_for_outfit(local_skin_outfit()));
-        return worn.empty() ? nullptr : skins_equipment_data(worn.c_str(), file);
+        return worn.empty() ? nullptr : equipment_data(worn.c_str(), file, true);
     }
 
     const int slot = skins_slot_for_equipment_file(file);
@@ -944,7 +966,7 @@ J3DModelData* skins_local_equipment_data(const char* file) {
         mine = skins_local_slot(kSkinChoiceEquipment);
     }
     if (mine.empty()) return nullptr;
-    return skins_equipment_data(mine.c_str(), file);
+    return equipment_data(mine.c_str(), file, true);
 }
 
 bool skins_covers_outfit(const char* name, int outfit) {

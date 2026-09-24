@@ -1,2 +1,0 @@
-name = Ordon Warrior Link (No Hat)
-by = SkilarBabcock

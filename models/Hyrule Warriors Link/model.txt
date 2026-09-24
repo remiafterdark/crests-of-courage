@@ -1,2 +1,0 @@
-name = Hyrule Warriors Link
-by = SkilarBabcock

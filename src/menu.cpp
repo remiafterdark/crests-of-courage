@@ -36,6 +36,14 @@ struct SurfaceHandles {
 
     std::vector<uint8_t> rowIds;
     std::vector<std::string> rowLabels;
+
+    std::vector<UiElementHandle> presetHas;
+    std::vector<UiElementHandle> presetOther;
+    UiElementHandle presetHasHead = 0;
+    UiElementHandle presetOtherHead = 0;
+    UiElementHandle presetOtherRow = 0;
+    int presetOutfit = -1;
+    std::string presetHasText;
 };
 
 SurfaceHandles s_panel;
@@ -294,6 +302,8 @@ void push_players(SurfaceHandles& h) {
     svc_ui->list_set_items(mod_ctx, h.players, items.data(), items.size());
 }
 
+void sort_presets(SurfaceHandles& h);
+
 void refresh(SurfaceHandles& h) {
     if (h.status != 0) {
         const std::string text = status_text();
@@ -316,6 +326,7 @@ void refresh(SurfaceHandles& h) {
             svc_ui->elem_set_text(mod_ctx, h.models, h.lastModels.c_str());
         }
     }
+    sort_presets(h);
     if (h.invite != 0) {
         const std::string text = invite_text();
         if (text != h.lastInvite) {
@@ -748,6 +759,39 @@ ModResult build_equipment_detail(ModContext*, UiElementHandle pane, void*, ModEr
     return MOD_OK;
 }
 
+const char* outfit_heading(int outfit) {
+    switch (outfit) {
+    case kSkinOutfitOrdon: return "Has Ordon clothes";
+    case kSkinOutfitZora: return "Has Zora armor";
+    case kSkinOutfitMagic: return "Has Magic armor";
+    case kSkinOutfitWolf: return "Has a wolf";
+    default: return "Has the Hero's clothes";
+    }
+}
+
+void sort_presets(SurfaceHandles& h) {
+    if (h.presetHas.empty() || h.presetHas.size() != h.presetOther.size()) return;
+    const int outfit = local_skin_outfit();
+    if (outfit == h.presetOutfit) return;
+    h.presetOutfit = outfit;
+    int others = 0;
+    for (size_t i = 0; i < h.presetHas.size(); ++i) {
+
+        const bool has = i == 0 ||
+            (i - 1 < s_modelNames.size() && skins_covers_outfit(s_modelNames[i - 1].c_str(), outfit));
+        if (h.presetHas[i] != 0) svc_ui->elem_set_visible(mod_ctx, h.presetHas[i], has);
+        if (h.presetOther[i] != 0) svc_ui->elem_set_visible(mod_ctx, h.presetOther[i], !has);
+        if (!has) ++others;
+    }
+    h.presetHasText = outfit_heading(outfit);
+    if (h.presetHasHead != 0) {
+        svc_ui->elem_set_text(mod_ctx, h.presetHasHead, h.presetHasText.c_str());
+    }
+
+    if (h.presetOtherHead != 0) svc_ui->elem_set_visible(mod_ctx, h.presetOtherHead, others > 0);
+    if (h.presetOtherRow != 0) svc_ui->elem_set_visible(mod_ctx, h.presetOtherRow, others > 0);
+}
+
 void build_models(UiElementHandle pane, SurfaceHandles& h, UiElementHandle detail) {
 
     s_modelNames.clear();
@@ -763,21 +807,47 @@ void build_models(UiElementHandle pane, SurfaceHandles& h, UiElementHandle detai
     svc_ui->pane_add_text(mod_ctx, pane, h.lastModels.c_str(), &h.models);
 
     svc_ui->pane_add_section(mod_ctx, pane, "Presets");
-    add_choice(pane, "Link", [](ModContext*, void*) { skins_set_local_all(""); }, nullptr,
-        [](ModContext*, void*) { return skins_all_same(""); }, "Link as the game draws him.");
-    for (size_t i = 0; i < s_modelNames.size(); ++i) {
-        add_choice(pane, s_modelTitles[i].c_str(),
-            [](ModContext*, void* d) {
-                const int index = model_of(d);
-                if (index >= 0) skins_set_local_all(s_modelNames[index].c_str());
-            },
-            pack_model(static_cast<int>(i)),
-            [](ModContext*, void* d) {
-                const int index = model_of(d);
-                return index >= 0 && skins_all_same(s_modelNames[index].c_str());
-            },
-            s_modelAbout[i].c_str());
-    }
+
+    h.presetHas.clear();
+    h.presetOther.clear();
+    h.presetOutfit = -1;
+    h.presetHasText = outfit_heading(local_skin_outfit());
+    const auto add_group = [&](UiElementHandle& head, const char* title, UiElementHandle* rowOut,
+                               std::vector<UiElementHandle>& into) {
+        svc_ui->pane_add_text(mod_ctx, pane, title, &head);
+        if (head != 0) svc_ui->elem_set_class(mod_ctx, head, "coop-preset-head", true);
+        if (rowOut != nullptr) *rowOut = 0;
+        const UiElementHandle parent = pane;
+        for (size_t i = 0; i <= s_modelNames.size(); ++i) {
+            UiControlDesc desc = UI_CONTROL_DESC_INIT;
+            desc.kind = UI_CONTROL_BUTTON;
+            if (i == 0) {
+                desc.label = "Link";
+                desc.help_rml = "Link as the game draws him.";
+                desc.on_pressed = [](ModContext*, void*) { skins_set_local_all(""); };
+                desc.is_selected = [](ModContext*, void*) { return skins_all_same(""); };
+            } else {
+                desc.label = s_modelTitles[i - 1].c_str();
+                desc.help_rml = s_modelAbout[i - 1].c_str();
+                desc.user_data = pack_model(static_cast<int>(i - 1));
+                desc.on_pressed = [](ModContext*, void* d) {
+                    const int index = model_of(d);
+                    if (index >= 0) skins_set_local_all(s_modelNames[index].c_str());
+                };
+                desc.is_selected = [](ModContext*, void* d) {
+                    const int index = model_of(d);
+                    return index >= 0 && skins_all_same(s_modelNames[index].c_str());
+                };
+            }
+            UiElementHandle control = 0;
+            svc_ui->pane_add_control(mod_ctx, parent, &desc, &control);
+            if (control != 0) svc_ui->elem_set_class(mod_ctx, control, "coop-preset", true);
+            into.push_back(control);
+        }
+    };
+    add_group(h.presetHasHead, h.presetHasText.c_str(), nullptr, h.presetHas);
+    add_group(h.presetOtherHead, "Other models", &h.presetOtherRow, h.presetOther);
+    sort_presets(h);
     if (s_modelNames.empty()) {
         svc_ui->pane_add_text(mod_ctx, pane,
             "Nothing installed yet. Put a model folder in the folder below and press Reload.",
@@ -980,6 +1050,17 @@ pane {
 
 select-button {
     margin-bottom: 1dp;
+}
+
+.coop-preset-head {
+    display: block;
+    font-family: var(--font-family-heading);
+    text-transform: uppercase;
+    letter-spacing: 1dp;
+    font-size: var(--font-size-md);
+    color: rgba(var(--color-text-rgb), 60%);
+    padding-top: var(--space-xs);
+    padding-bottom: 2dp;
 }
 
 select-button key {

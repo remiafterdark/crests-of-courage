@@ -1,2 +1,0 @@
-name = Hero of Time (Child Timeline)
-by = SkilarBabcock

@@ -7,11 +7,22 @@ only windows has been played. mac, linux, android and ios are built here but unt
 enemy sync, boss sync and story progress are off by default under unfinished.
 
 this build:
-the hero of time shows up for other players again. anyone who first installed 1.0.0 kept the old
-hero of time after updating, it no longer matched everyone else's copy, and other players saw
-plain link instead. every built in model is unpacked fresh on the next launch
-files left over from an older version of a built in model are cleaned out when it unpacks. your
-own model folders are never touched
-a pot set down gently no longer smashes on everyone else's screen
-held items only use a model's version when it fits the original, instead of showing a broken one
-another player's model is freed a few frames after it stops being drawn, not while it still is
+co-op + randomizer. with the randomizer installed there is a co-op + randomizer mode on the title
+screen. pick it, press play, and the host / join window comes up before you pick a file. the host's
+seed and all its settings are sent to everyone who joins, so it is already in the list when you make
+your randomizer file. someone on a different seed is told, and keeps their own file
+hidden skills are shared. when anyone finishes a howling stone the golden wolf shows up for
+everyone, and when anyone learns a skill everyone gets it, but your own stone and your own fight are
+still there to do
+bomblings and water bombs look right on other screens, and bomb arrows only go off once
+the party hearts can sit on the right side of the screen, move sideways, and moving them down no
+longer spreads them apart
+chest prizes show in the other player's hands when they hold them up
+a model's own bow, clawshot, boomerang, bombs, arrows and spinner now show on other screens, not
+just its sword and shield
+names no longer flick back to "Player"
+five new models by SkilarBabcock: hero of the sky, hero of the wild, hyrule warriors, and the ordon
+warrior with and without the hat
+the models menu splits into models that have what you are wearing and the rest
+warping with a custom model no longer crashes, and your own custom model now dissolves like the
+real one

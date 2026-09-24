@@ -12,7 +12,11 @@ J3DModel* loadBmdFromArcIdx(const char* arcName, int resIndex, cXyz scale);
 
 J3DModel* loadBmdFromFile(const char* path, cXyz scale);
 J3DModelData* loadBmdDataFromFile(const char* path);
+
+J3DModelData* loadBmdDataForLink(const char* path);
 J3DModel* modelFromData(J3DModelData* data, cXyz scale);
+
+void models_warp_guard_init();
 
 void renderModelAtMtx(J3DModel* model, MtxP mtx, mDoExt_bckAnm* bck);
 
