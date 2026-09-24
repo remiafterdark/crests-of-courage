@@ -7,9 +7,11 @@ only windows has been played. mac, linux, android and ios are built here but unt
 enemy sync, boss sync and story progress are off by default under unfinished.
 
 this build:
-other players no longer share anything live with your own link. their models are loaded into
-memory of their own, out of archives the game has never heard of, which is where most of this
-mod's crashes came from
-dressing another player no longer edits your own materials
-the zora cap has physics for everyone, not just the person wearing it. any model that names its
-cap joints the same way gets it too
+the hero of time shows up for other players again. anyone who first installed 1.0.0 kept the old
+hero of time after updating, it no longer matched everyone else's copy, and other players saw
+plain link instead. every built in model is unpacked fresh on the next launch
+files left over from an older version of a built in model are cleaned out when it unpacks. your
+own model folders are never touched
+a pot set down gently no longer smashes on everyone else's screen
+held items only use a model's version when it fits the original, instead of showing a broken one
+another player's model is freed a few frames after it stops being drawn, not while it still is

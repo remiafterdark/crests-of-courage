@@ -358,6 +358,67 @@ void skins_init() {
     apply_overlays();
 }
 
+namespace {
+
+std::string shipped_key(std::string rel) {
+    for (char& c : rel) {
+        c = c == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return rel;
+}
+
+int clean_shipped_leftovers(const std::filesystem::path& dir,
+                            const std::vector<std::string>& shipped,
+                            const std::vector<std::string>& folders) {
+    int removed = 0;
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        std::error_code tec;
+        if (!entry.is_directory(tec)) continue;
+        const std::string folder = shipped_key(entry.path().filename().string());
+        if (std::find(folders.begin(), folders.end(), folder) == folders.end()) continue;
+
+        std::vector<std::filesystem::path> stale;
+        std::vector<std::filesystem::path> subdirs;
+        std::error_code wec;
+        for (auto it = std::filesystem::recursive_directory_iterator(entry.path(), wec);
+             !wec && it != std::filesystem::recursive_directory_iterator(); it.increment(wec)) {
+            if (it->is_directory(tec)) {
+                subdirs.push_back(it->path());
+                continue;
+            }
+            const std::string name = it->path().filename().string();
+
+            if (name.empty() || name[0] == '.') continue;
+            std::error_code rec;
+            const std::string key =
+                shipped_key(std::filesystem::relative(it->path(), dir, rec).generic_string());
+            if (rec) continue;
+            if (std::find(shipped.begin(), shipped.end(), key) == shipped.end()) {
+                stale.push_back(it->path());
+            }
+        }
+        for (const auto& path : stale) {
+            std::error_code rec;
+            if (std::filesystem::remove(path, rec)) {
+                ++removed;
+                coop_log::info("coop_mod: [SKIN] removed leftover '{}'", path.string());
+            }
+        }
+
+        std::sort(subdirs.begin(), subdirs.end(), [](const auto& a, const auto& b) {
+            return a.native().size() > b.native().size();
+        });
+        for (const auto& sub : subdirs) {
+            std::error_code rec;
+            if (std::filesystem::is_empty(sub, rec) && !rec) std::filesystem::remove(sub, rec);
+        }
+    }
+    return removed;
+}
+
+}
+
 void unpack_shipped_models() {
     if (svc_resource == nullptr) return;
     std::filesystem::path dir;
@@ -381,6 +442,9 @@ void unpack_shipped_models() {
 
     int written = 0;
     int failed = 0;
+
+    std::vector<std::string> shipped;
+    std::vector<std::string> shippedFolders;
     size_t at = 0;
     while (at < list.size()) {
         size_t nl = list.find('\n', at);
@@ -393,6 +457,17 @@ void unpack_shipped_models() {
         if (rel.find("..") != std::string::npos || rel.find(':') != std::string::npos ||
             rel[0] == '/' || rel[0] == '\\') {
             continue;
+        }
+
+        shipped.push_back(shipped_key(rel));
+        const std::string& key = shipped.back();
+        const size_t slash = key.find('/');
+        if (slash != std::string::npos) {
+            const std::string folder = key.substr(0, slash);
+            if (std::find(shippedFolders.begin(), shippedFolders.end(), folder) ==
+                shippedFolders.end()) {
+                shippedFolders.push_back(folder);
+            }
         }
 
         ResourceBuffer file = RESOURCE_BUFFER_INIT;
@@ -415,9 +490,13 @@ void unpack_shipped_models() {
         svc_resource->free(mod_ctx, &file);
     }
 
+    const int removed = failed == 0 ? clean_shipped_leftovers(dir, shipped, shippedFolders) : 0;
+
     std::ofstream(marker, std::ios::trunc) << stamp << "\n";
-    coop_log::info("coop_mod: [SKIN] unpacked {} shipped model file(s) into {} ({} failed)",
-        written, dir.string(), failed);
+    coop_log::info(
+        "coop_mod: [SKIN] unpacked {} shipped model file(s) into {} ({} failed, {} leftover(s) "
+        "removed)",
+        written, dir.string(), failed, removed);
 }
 
 void skins_refresh() {

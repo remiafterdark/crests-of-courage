@@ -3628,8 +3628,7 @@ void apply_remote_carry() {
             actor->speedF = msg.speedF;
             actor->speed.y = msg.speedY;
 
-            const bool gentle = msg.speedF < 1.5f && msg.speedY > -1.5f && msg.speedY < 1.5f;
-            if (gentle) {
+            if (msg.speedF < 1.5f && msg.speedY > -1.5f && msg.speedY < 1.5f) {
                 actor->speedF = 0.0f;
                 actor->speed.set(0.0f, 0.0f, 0.0f);
                 r.simulating = false;
