@@ -179,7 +179,7 @@ void write_seed(const std::string& hash, const std::vector<uint8_t>& data) {
         return;
     }
     coop_log::info("coop_mod: [RANDO] saved the host's seed '{}' ({} bytes)", hash, data.size());
-    coop_toast("Got the host's randomizer seed",
+    coop_notify_c(kNotifyRando, "Got the host's randomizer seed",
         ("Make a new Randomizer file and pick \"" + hash + "\".").c_str());
 }
 
@@ -269,7 +269,7 @@ void register_our_mode() {
 
 void forward_to_rando() {
     if (s_manager == nullptr || s_setMode == nullptr || !rando_installed()) {
-        coop_toast("Co-op + Randomizer", "Could not open the randomizer. Pick Randomizer yourself; "
+        coop_notify_c(kNotifyRando, "Co-op + Randomizer", "Could not open the randomizer. Pick Randomizer yourself; "
                                     "co-op works there too.");
         return;
     }
@@ -320,7 +320,7 @@ void force_host_seed() {
         s_localSeed, s_hostSeed.hash);
     s_invokeSaveLoaded(mode);
     if (s_localSeed == s_hostSeed.hash) {
-        coop_toast("Playing the host's seed", ("Switched to \"" + s_hostSeed.hash + "\".").c_str());
+        coop_notify_c(kNotifyRando, "Playing the host's seed", ("Switched to \"" + s_hostSeed.hash + "\".").c_str());
     }
 }
 
@@ -381,7 +381,7 @@ void on_seed_announced(const MsgRandoSeed& msg) {
     if (in_rando_mode() && !s_localSeed.empty() && s_localSeed != seed.hash && !s_warnedMismatch &&
         s_forceTries >= 3) {
         s_warnedMismatch = true;
-        coop_toast("Different randomizer seed",
+        coop_notify_c(kNotifyRando, "Different randomizer seed",
             ("The host is on \"" + seed.hash + "\". Make a new Randomizer file with that seed "
              "to play together.").c_str());
     }

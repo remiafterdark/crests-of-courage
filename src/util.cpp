@@ -4,6 +4,7 @@
 #include "mod.hpp"
 
 #include "d/d_com_inf_game.h"
+#include "JSystem/JUtility/JUTFont.h"
 
 bool cfg_bool(ConfigVarHandle var, bool fallback) {
     bool v = fallback;
@@ -73,4 +74,16 @@ std::filesystem::path path_ci(const std::filesystem::path& p) {
         if (!found) return p;
     }
     return cur;
+}
+
+float coop_text_width(JUTFont* font, const char* text, float cell) {
+    if (font == nullptr || text == nullptr) return 0.0f;
+    float width = 0.0f;
+    const float cellWidth = static_cast<float>(font->getCellWidth());
+    for (const char* c = text; *c != 0; ++c) {
+        const float advance = font->isFixed() ? static_cast<float>(font->getFixedWidth())
+                                              : static_cast<float>(font->getWidth(static_cast<u8>(*c)));
+        width += cellWidth > 0.0f ? advance * (cell / cellWidth) : cell * 0.6f;
+    }
+    return width;
 }

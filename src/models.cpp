@@ -4,6 +4,7 @@
 #include "d/d_com_inf_game.h"
 #include "d/actor/d_a_alink.h"
 #include "m_Do/m_Do_ext.h"
+#include "JSystem/JKernel/JKRSolidHeap.h"
 #include "m_Do/m_Do_mtx.h"
 #include "d/d_kankyo.h"
 #include "JSystem/JKernel/JKRExpHeap.h"
@@ -16,6 +17,7 @@
 #include "mods/svc/hook.hpp"
 
 #include <cstdio>
+#include <string>
 #include <fstream>
 #include <cstring>
 #include <unordered_set>
@@ -216,7 +218,7 @@ J3DModel* loadBmdFromArc(const char* arcName, const char* bmdName, cXyz scale) {
         return nullptr;
     }
 
-    J3DModel* model = mDoExt_J3DModel__create(modelData, 0x80000, kCoopDifferedDlistFlags);
+    J3DModel* model = coop_create_model(modelData, 0x80000, kCoopDifferedDlistFlags);
     if (model != nullptr) {
         model->setBaseScale(scale);
     } else {
@@ -350,7 +352,7 @@ J3DModelData* loadBmdDataForLink(const char* path) {
 
 J3DModel* modelFromData(J3DModelData* data, cXyz scale) {
     if (data == nullptr) return nullptr;
-    J3DModel* model = mDoExt_J3DModel__create(data, 0x80000, kCoopDifferedDlistFlags);
+    J3DModel* model = coop_create_model(data, 0x80000, kCoopDifferedDlistFlags);
     if (model == nullptr) {
         coop_log::warn("coop_mod: [models] mDoExt_J3DModel__create returned null");
         return nullptr;
@@ -387,7 +389,7 @@ J3DModel* loadBmdFromArcIdx(const char* arcName, int resIndex, cXyz scale) {
         return nullptr;
     }
 
-    J3DModel* model = mDoExt_J3DModel__create(modelData, 0x80000, kCoopDifferedDlistFlags);
+    J3DModel* model = coop_create_model(modelData, 0x80000, kCoopDifferedDlistFlags);
     if (model != nullptr) {
         model->setBaseScale(scale);
     }
@@ -412,6 +414,102 @@ void renderModelAtMtx(J3DModel* model, MtxP mtx, mDoExt_bckAnm* bck) {
     }
 
     mDoExt_modelUpdateDL(model);
+}
+
+JKRHeap* private_arc_heap_if_any();
+JKRHeap* private_arc_heap();
+std::string coop_mem_status();
+
+namespace {
+struct ModelHeap {
+    J3DModel* model = nullptr;
+    JKRSolidHeap* heap = nullptr;
+};
+const int kModelHeapMax = 1024;
+ModelHeap s_modelHeaps[kModelHeapMax];
+int s_modelHeapFallbacks = 0;
+}
+
+J3DModel* coop_create_model(J3DModelData* data, u32 modelFlag, u32 differedDlistFlag) {
+    if (data == nullptr) return nullptr;
+
+    const u32 kModelHeapSize = 2u * 1024u * 1024u;
+    const u32 kReserve = 2u * 1024u * 1024u;
+    JKRHeap* parent = private_arc_heap();
+    int slot = -1;
+    for (int i = 0; i < kModelHeapMax; ++i) {
+        if (s_modelHeaps[i].model == nullptr) {
+            slot = i;
+            break;
+        }
+    }
+    if (parent == nullptr || slot < 0 || parent->getFreeSize() < kModelHeapSize + kReserve) {
+
+        if (s_modelHeapFallbacks++ < 4) {
+            coop_log::warn("coop_mod: [models] no room for a model heap ({}) - building it the "
+                           "old way | [MEM] {}", slot < 0 ? "table full" : "heap low",
+                coop_mem_status());
+        }
+        return mDoExt_J3DModel__create(data, modelFlag, differedDlistFlag);
+    }
+
+    const u32 kSizes[] = {512u * 1024u, kModelHeapSize};
+    JKRSolidHeap* heap = nullptr;
+    J3DModel* model = nullptr;
+    for (u32 size : kSizes) {
+        heap = JKRSolidHeap::create(size, parent, false);
+        if (heap == nullptr) continue;
+        JKRHeap* previous = heap->becomeCurrentHeap();
+        model = mDoExt_J3DModel__create(data, modelFlag, differedDlistFlag);
+        if (previous != nullptr) previous->becomeCurrentHeap();
+        if (model != nullptr) break;
+        heap->destroy();
+        heap = nullptr;
+    }
+    if (model == nullptr) return nullptr;
+    heap->adjustSize();
+    s_modelHeaps[slot].model = model;
+    s_modelHeaps[slot].heap = heap;
+    return model;
+}
+
+void coop_free_model(J3DModel* model) {
+    if (model == nullptr) return;
+    for (ModelHeap& m : s_modelHeaps) {
+        if (m.model != model) continue;
+
+        m.heap->destroy();
+        m = ModelHeap{};
+        return;
+    }
+    JKR_DELETE(model);
+}
+
+std::string coop_mem_status() {
+
+    const auto kb = [](JKRHeap* h, char* out, size_t n) {
+        if (h == nullptr) {
+            std::snprintf(out, n, "-");
+            return;
+        }
+        std::snprintf(out, n, "%ld/%ldK", static_cast<long>(h->getTotalFreeSize() / 1024),
+            static_cast<long>(h->getFreeSize() / 1024));
+    };
+    char cur[32], sys[32], zel[32], game[32], arc[32], ours[32], root[32];
+    JKRHeap* current = JKRHeap::getCurrentHeap();
+    kb(current, cur, sizeof(cur));
+    kb(JKRHeap::getSystemHeap(), sys, sizeof(sys));
+    kb(mDoExt_getZeldaHeap(), zel, sizeof(zel));
+    kb(mDoExt_getGameHeap(), game, sizeof(game));
+    kb(mDoExt_getArchiveHeap(), arc, sizeof(arc));
+    kb(private_arc_heap_if_any(), ours, sizeof(ours));
+    kb(JKRHeap::getRootHeap(), root, sizeof(root));
+    char buf[320];
+    std::snprintf(buf, sizeof(buf),
+        "current=%s:%s system=%s zelda=%s game=%s archive=%s ours=%s root=%s",
+        current != nullptr && current->getName() != nullptr ? current->getName() : "?", cur, sys,
+        zel, game, arc, ours, root);
+    return buf;
 }
 
 void ensure_system_heap_capacity() {

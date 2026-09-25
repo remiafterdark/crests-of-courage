@@ -129,15 +129,14 @@ std::string rml_escape(const std::string& in) {
     return out;
 }
 
-void toast(const std::string& title, const std::string& body, uint32_t durationMs = 4500) {
-    if (svc_ui == nullptr) return;
-    const std::string titleRml = rml_escape(title);
-    const std::string bodyRml = rml_escape(body);
-    UiToastDesc desc = UI_TOAST_DESC_INIT;
-    desc.title_rml = titleRml.c_str();
-    desc.body_rml = bodyRml.c_str();
-    desc.duration_ms = durationMs;
-    svc_ui->push_toast(mod_ctx, &desc);
+void toast(const std::string& title, const std::string& body, uint32_t durationMs = 0,
+    NotifyKind kind = kNotifyOther) {
+    coop_notify(kind, title, body, durationMs);
+}
+
+void toast_kind(NotifyKind kind, const std::string& title, const std::string& body,
+    uint32_t durationMs = 0) {
+    coop_notify(kind, title, body, durationMs);
 }
 
 bool in_gameplay() {
@@ -707,7 +706,7 @@ void apply_remote_item(uint8_t item, uint8_t from) {
 
     if (cfg_bool(s_vars.notifyItems, true)) {
         const std::string who = sender_name(from);
-        toast(who + " found " + item_name(item), "You got it too.");
+        toast_kind(kNotifyItems, who + " found " + item_name(item), "You got it too.");
     }
 }
 
@@ -788,9 +787,9 @@ void apply_remote_bottle(uint8_t event, uint8_t item, uint8_t from) {
     if (applied && cfg_bool(s_vars.notifyItems, true)) {
         const std::string who = sender_name(from);
         if (event == kBottleFillEmpty) {
-            toast(who + " bottled " + item_name(item), "You got one too.");
+            toast_kind(kNotifyItems, who + " bottled " + item_name(item), "You got one too.");
         } else {
-            toast(who + " got a bottle of " + std::string(item_name(item)),
+            toast_kind(kNotifyItems, who + " got a bottle of " + std::string(item_name(item)),
                 "You got one too.");
         }
     }
@@ -831,7 +830,7 @@ void send_presence() {
 void announce_peer_once(uint8_t from) {
     if (from >= kCoopMaxPlayers || s_peerAnnounced[from] || !s_peers[from].present) return;
     s_peerAnnounced[from] = true;
-    toast(sender_name(from) + " joined", "");
+    toast_kind(kNotifyPlayers, sender_name(from) + " joined", "");
 }
 
 void on_hello(const uint8_t* payload, size_t size, uint8_t from) {
@@ -944,7 +943,7 @@ void update_pending_teleport() {
     if (!s_teleport.active) return;
     if (++s_teleport.ticks > kTeleportTimeoutTicks) {
         s_teleport.active = false;
-        toast("Teleport cancelled", "It took too long.");
+        toast_kind(kNotifyTeleport, "Teleport cancelled", "It took too long.");
         return;
     }
     daAlink_c* alink = daAlink_getAlinkActorClass();
@@ -968,7 +967,7 @@ void update_pending_teleport() {
     if (who.present && who.inGame && std::strncmp(who.stage, s_teleport.stage, 8) == 0) {
         place_at_player(alink, s_teleport.playerId);
     } else {
-        toast("Teleport cancelled", who.name + " left before we got there.");
+        toast_kind(kNotifyTeleport, "Teleport cancelled", who.name + " left before we got there.");
     }
 }
 
@@ -1001,6 +1000,7 @@ void features_register_vars() {
     s_vars.name = register_var("player_name", CONFIG_VAR_STRING, false, 0, "Player");
     s_vars.syncInventory = register_var("sync_inventory", CONFIG_VAR_BOOL, true, 0, nullptr);
     s_vars.notifyItems = register_var("notify_items", CONFIG_VAR_BOOL, true, 0, nullptr);
+    notify_register_vars(s_vars.notifyItems);
     s_vars.nametags = register_var("show_nametags", CONFIG_VAR_BOOL, true, 0, nullptr);
     s_vars.nametagsEdge = register_var("nametag_offscreen", CONFIG_VAR_BOOL, true, 0, nullptr);
     s_vars.nametagsHealth = register_var("nametag_health", CONFIG_VAR_BOOL, true, 0, nullptr);
@@ -1148,6 +1148,11 @@ void on_skin_choices(const uint8_t* payload, size_t size, uint8_t from) {
 }
 
 void features_update() {
+
+    {
+        static uint32_t s_memTick = 0;
+        if (++s_memTick % 1200 == 0) coop_log::info("coop_mod: [MEM] {}", coop_mem_status());
+    }
     s_devLogging = features_debug_menu();
     voices_update();
     local_skin_colors_update();
@@ -1245,7 +1250,7 @@ void features_on_roster_changed() {
         if ((s_lastRoster & bit) == 0 || (now & bit) != 0) continue;
         if (static_cast<uint8_t>(i) == coop_net_local_id()) continue;
         if (s_peers[i].present) {
-            toast(sender_name(static_cast<uint8_t>(i)) + " left", "");
+            toast_kind(kNotifyPlayers, sender_name(static_cast<uint8_t>(i)) + " left", "");
         }
         s_peers[i] = CoopPeer{};
         s_peerAnnounced[i] = false;
@@ -1282,9 +1287,9 @@ void features_on_disconnected() {
         if (s_peers[i].present) ++others;
     }
     if (others == 1) {
-        toast(first_peer().name + " left", "Disconnected.");
+        toast_kind(kNotifyPlayers, first_peer().name + " left", "Disconnected.");
     } else if (others > 1) {
-        toast("Disconnected", "");
+        toast_kind(kNotifyPlayers, "Disconnected", "");
     }
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         s_peers[i] = CoopPeer{};
@@ -1540,20 +1545,20 @@ std::string features_local_name() {
 void features_teleport_to_player(uint8_t playerId) {
     const CoopPeer& who = features_peer_of(playerId);
     if (!coop_net_connected() || !who.present) {
-        toast("Can't teleport", "Nobody is connected.");
+        toast_kind(kNotifyTeleport, "Can't teleport", "Nobody is connected.");
         return;
     }
     if (!who.inGame || who.stage[0] == '\0') {
-        toast("Can't teleport", who.name + " is not in the game yet.");
+        toast_kind(kNotifyTeleport, "Can't teleport", who.name + " is not in the game yet.");
         return;
     }
     daAlink_c* alink = daAlink_getAlinkActorClass();
     if (alink == nullptr) {
-        toast("Can't teleport", "Load your save first.");
+        toast_kind(kNotifyTeleport, "Can't teleport", "Load your save first.");
         return;
     }
     if (dComIfGp_event_runCheck() || dComIfGp_isEnableNextStage()) {
-        toast("Can't teleport right now", "Wait for the cutscene or loading screen.");
+        toast_kind(kNotifyTeleport, "Can't teleport right now", "Wait for the cutscene or loading screen.");
         return;
     }
 
@@ -1566,12 +1571,13 @@ void features_teleport_to_player(uint8_t playerId) {
     s_teleport.active = true;
     s_teleport.playerId = playerId;
     std::memcpy(s_teleport.stage, who.stage, 9);
-    dComIfGp_setNextStage(who.stage, who.point, who.curRoom, who.layer);
+
+    dComIfGp_setNextStage(who.stage, who.point, who.startRoom, who.layer);
     coop_log::info(
         "coop_mod: teleporting to {} stage={} point={} room={} layer={} (local stage={} room={})",
-        who.name, who.stage, who.point, who.curRoom, who.layer,
+        who.name, who.stage, who.point, who.startRoom, who.layer,
         dComIfGp_getStartStageName(), fopAcM_GetRoomNo(alink));
-    toast("Teleporting", "Heading to " + who.name + ".", 2500);
+    toast_kind(kNotifyTeleport, "Teleporting", "Heading to " + who.name + ".", 2500);
 }
 
 void features_debug_fake_peer(uint8_t id, bool on, const char* name, const float* pos, uint16_t life,
@@ -1610,7 +1616,7 @@ bool features_reload_at_player(uint8_t playerId) {
     s_teleport.active = true;
     s_teleport.playerId = playerId;
     std::memcpy(s_teleport.stage, who.stage, 9);
-    dComIfGp_setNextStage(who.stage, who.point, who.curRoom, who.layer);
+    dComIfGp_setNextStage(who.stage, who.point, who.startRoom, who.layer);
     coop_log::info("coop_mod: [JOIN] loading into {} room {} where {} is", who.stage, who.curRoom,
         who.name);
     return true;

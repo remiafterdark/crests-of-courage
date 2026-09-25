@@ -352,7 +352,7 @@ void on_draw_icons_post(ModContext*, void* args, void*, void*) {
         const std::string name = name_of(m.player);
         f32 x = originX + info.pos_x;
         if (mirror_mode()) x = list->getMirrorCenterPosX(x, 0.0f);
-        const f32 width = font->drawString_scale(0.0f, 0.0f, cell, cell, name.c_str(), false);
+        const f32 width = coop_text_width(font, name.c_str(), cell);
         const f32 left = x - width * 0.5f;
         const f32 top = originY + info.pos_y + below;
         const u8 alpha = static_cast<u8>(255.0f * a);

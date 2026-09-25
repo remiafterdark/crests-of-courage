@@ -16,6 +16,9 @@ J3DModelData* loadBmdDataFromFile(const char* path);
 J3DModelData* loadBmdDataForLink(const char* path);
 J3DModel* modelFromData(J3DModelData* data, cXyz scale);
 
+J3DModel* coop_create_model(J3DModelData* data, u32 modelFlag, u32 differedDlistFlag);
+void coop_free_model(J3DModel* model);
+
 void models_warp_guard_init();
 
 void renderModelAtMtx(J3DModel* model, MtxP mtx, mDoExt_bckAnm* bck);

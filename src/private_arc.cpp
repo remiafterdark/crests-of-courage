@@ -11,6 +11,7 @@
 #include "JSystem/JKernel/JKRArchive.h"
 #include "JSystem/JKernel/JKRExpHeap.h"
 #include "JSystem/JKernel/JKRMemArchive.h"
+#include "JSystem/JKernel/JKRSolidHeap.h"
 #include "JSystem/J3DGraphAnimator/J3DModelData.h"
 
 #include <cstring>
@@ -117,6 +118,14 @@ namespace {
 J3DModelData* private_arc_build(JKRArchive* archive, const char* name, u32 index, void* raw);
 }
 
+JKRHeap* private_arc_heap_if_any() {
+    return s_arcHeap;
+}
+
+JKRHeap* private_arc_heap() {
+    return arc_heap();
+}
+
 bool private_arc_request(const char* name) {
     if (name == nullptr || name[0] == '\0') return false;
     if (PrivateArc* have = find_arc(name)) {
@@ -209,6 +218,24 @@ J3DModelData* private_arc_load(const char* name, const char* file) {
 }
 
 namespace {
+
+struct PartHeap {
+    J3DModelData* data = nullptr;
+    JKRSolidHeap* heap = nullptr;
+};
+const int kPartHeapMax = 512;
+PartHeap s_partHeaps[kPartHeapMax];
+
+bool remember_part_heap(J3DModelData* data, JKRSolidHeap* heap) {
+    for (PartHeap& p : s_partHeaps) {
+        if (p.data != nullptr) continue;
+        p.data = data;
+        p.heap = heap;
+        return true;
+    }
+    return false;
+}
+
 J3DModelData* private_arc_build(JKRArchive* archive, const char* name, u32 index, void* raw) {
     const u32 size = archive->getExpandedResSize(raw);
     if (size < 32 || size > 16u * 1024u * 1024u) {
@@ -221,21 +248,32 @@ J3DModelData* private_arc_build(JKRArchive* archive, const char* name, u32 index
         return nullptr;
     }
 
-    JKRHeap* heap = arc_heap();
-    JKRHeap* previous = heap != nullptr ? heap->becomeCurrentHeap() : nullptr;
-    struct Restore {
-        JKRHeap* heap;
-        ~Restore() {
-            if (heap != nullptr) heap->becomeCurrentHeap();
-        }
-    } restore{previous};
-    u8* copy = JKR_NEW_ARRAY_ARGS(u8, size, 32);
-    if (copy == nullptr) return nullptr;
-    std::memcpy(copy, raw, size);
+    JKRHeap* parent = arc_heap();
+    if (parent == nullptr) return nullptr;
 
-    J3DModelData* data = dRes_info_c::loaderBasicBmd(type, copy);
+    const u32 want = size * 4u + 1024u * 1024u;
+    const u32 kMountReserve = 2u * 1024u * 1024u;
+    if (parent->getFreeSize() < want + kMountReserve) {
+        static int s_noRoomLogged = 0;
+        if (s_noRoomLogged++ < 8) {
+            coop_log::warn("coop_mod: [ARC] no room to load '{}' idx {} ({} KB wanted, {} KB free)"
+                           " - that part stays the game's own", name, index, want / 1024,
+                parent->getFreeSize() / 1024);
+        }
+        return nullptr;
+    }
+    JKRSolidHeap* heap = JKRSolidHeap::create(want, parent, false);
+    if (heap == nullptr) return nullptr;
+    JKRHeap* previous = heap->becomeCurrentHeap();
+    u8* copy = JKR_NEW_ARRAY_ARGS(u8, size, 32);
+    J3DModelData* data = nullptr;
+    if (copy != nullptr) {
+        std::memcpy(copy, raw, size);
+        data = dRes_info_c::loaderBasicBmd(type, copy);
+    }
     if (data == nullptr) {
-        JKR_DELETE_ARRAY(copy);
+        if (previous != nullptr) previous->becomeCurrentHeap();
+        heap->destroy();
         return nullptr;
     }
     if (type == 'BMWR' || type == 'BMWE') {
@@ -244,12 +282,29 @@ J3DModelData* private_arc_build(JKRArchive* archive, const char* name, u32 index
         data->simpleCalcMaterial(const_cast<MtxP>(j3dDefaultMtx));
         data->makeSharedDL();
     }
+
+    if (previous != nullptr) previous->becomeCurrentHeap();
+    heap->adjustSize();
+    if (!remember_part_heap(data, heap)) {
+
+        coop_log::warn("coop_mod: [ARC] {} parts loaded at once - not loading '{}' idx {}",
+            kPartHeapMax, name, index);
+        heap->destroy();
+        return nullptr;
+    }
     return data;
 }
 }
 
 void private_arc_free_data(J3DModelData* data) {
     if (data == nullptr) return;
+    for (PartHeap& p : s_partHeaps) {
+        if (p.data != data) continue;
+
+        p.heap->destroy();
+        p = PartHeap{};
+        return;
+    }
 
     JKR_DELETE_ARRAY(reinterpret_cast<u8*>(data));
 }

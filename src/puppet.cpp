@@ -82,7 +82,7 @@ namespace {
 const f32 kPuppetSpawnDist = 150.0f;
 const int kPuppetMaxJoints = 128;
 
-const int kPuppetMaxPrivateData = 24;
+const int kPuppetMaxPrivateData = 96;
 const int kPuppetMaxPrivateArcs = 6;
 
 const int kUnderRootJoint = 0;
@@ -329,6 +329,10 @@ struct Puppet {
 
     J3DModelData* privateData[kPuppetMaxPrivateData] = {};
 
+    char privateDataKey[kPuppetMaxPrivateData][40] = {};
+
+    J3DModel* privateDataModel[kPuppetMaxPrivateData] = {};
+
     char privateArcs[kPuppetMaxPrivateArcs][16] = {};
 
     char heldArc[16] = {};
@@ -376,8 +380,31 @@ void puppet_free_data_later(J3DModelData*& data) {
     data = nullptr;
 }
 
+void free_private_data_of(J3DModel* model) {
+    if (model == nullptr) return;
+    for (Puppet& q : s_puppetSlots) {
+        for (int i = 0; i < kPuppetMaxPrivateData; ++i) {
+            if (q.privateDataModel[i] != model) continue;
+            puppet_free_data_later(q.privateData[i]);
+            q.privateDataModel[i] = nullptr;
+            q.privateDataKey[i][0] = 0;
+            return;
+        }
+    }
+}
+
+void keep_private_data_of(J3DModel* model) {
+    if (model == nullptr) return;
+    for (Puppet& q : s_puppetSlots) {
+        for (int i = 0; i < kPuppetMaxPrivateData; ++i) {
+            if (q.privateDataModel[i] == model) q.privateDataModel[i] = nullptr;
+        }
+    }
+}
+
 void puppet_free_later(J3DModel*& model) {
     if (model == nullptr) return;
+    free_private_data_of(model);
     if (s_pendingFreeCount < kPendingFreeMax) {
         s_pendingFree[s_pendingFreeCount++] = model;
     } else {
@@ -392,7 +419,7 @@ void puppet_flush_pending_frees() {
     for (int i = 0; i < s_pendingFreeOlderCount; ++i) {
 
         colors_detach_model(s_pendingFreeOlder[i]);
-        JKR_DELETE(s_pendingFreeOlder[i]);
+        coop_free_model(s_pendingFreeOlder[i]);
         s_pendingFreeOlder[i] = nullptr;
     }
     s_pendingFreeOlderCount = 0;
@@ -791,6 +818,8 @@ void release_puppet() {
     for (J3DModelData*& d : pup().privateData) {
         puppet_free_data_later(d);
     }
+    for (auto& key : pup().privateDataKey) key[0] = 0;
+    for (J3DModel*& m : pup().privateDataModel) m = nullptr;
     for (auto& arc : pup().privateArcs) {
         if (arc[0] != 0) {
             private_arc_release(arc);
@@ -1771,7 +1800,8 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
         slot.data = model->getModelData();
         slot.shared = true;
         prep_equipment_model(model);
-        JKR_DELETE(model);
+        keep_private_data_of(model);
+        coop_free_model(model);
         coop_log::trace("coop_mod: [DIAG-ITEM] loaded kind={} from wire archive '{}' idx={}", kind,
             pup().rodArc, res.bmdResIdx);
         return slot.data;
@@ -1786,7 +1816,8 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
         slot.fromOutfit = true;
         slot.shared = true;
         prep_equipment_model(model);
-        JKR_DELETE(model);
+        keep_private_data_of(model);
+        coop_free_model(model);
         coop_log::trace("coop_mod: [DIAG-ITEM] loaded kind={} from outfit archive idx={}", kind,
             res.bmdResIdx);
         return slot.data;
@@ -1799,7 +1830,8 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
 
         if (J3DModel* skinModel = puppet_skin_equipment(
                 private_arc_file_name("Alink", res.bmdResIdx), cXyz(1.0f, 1.0f, 1.0f))) {
-            JKR_DELETE(model);
+            keep_private_data_of(model);
+            coop_free_model(model);
             model = skinModel;
             coop_log::info("coop_mod: [SKIN] held item kind={} is their model's '{}'", kind,
                 private_arc_file_name("Alink", res.bmdResIdx));
@@ -1808,7 +1840,8 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
         slot.fromOutfit = false;
         slot.shared = true;
         prep_equipment_model(model);
-        JKR_DELETE(model);
+        keep_private_data_of(model);
+        coop_free_model(model);
         coop_log::trace("coop_mod: [DIAG-ITEM] loaded kind={} from Alink idx={}", kind,
             res.bmdResIdx);
         return slot.data;
@@ -1823,7 +1856,8 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
         slot.fromOutfit = true;
         slot.shared = true;
         prep_equipment_model(model);
-        JKR_DELETE(model);
+        keep_private_data_of(model);
+        coop_free_model(model);
         coop_log::trace("coop_mod: [DIAG-ITEM] loaded kind={} from outfit archive '{}'", kind,
             res.outfitFile);
         return slot.data;
@@ -1876,12 +1910,12 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
                                         skinFile)
                                   : nullptr;
         if (mine != nullptr && skin_fits_original(mine, modelData, skinFile)) {
-            J3DModel* skinModel = mDoExt_J3DModel__create(mine, 0x80000, 0x11000284);
+            J3DModel* skinModel = coop_create_model(mine, 0x80000, 0x11000284);
             if (skinModel != nullptr) {
                 slot.data = mine;
                 slot.shared = true;
                 prep_equipment_model(skinModel);
-                JKR_DELETE(skinModel);
+                coop_free_model(skinModel);
                 coop_log::info("coop_mod: [SKIN] held item kind={} is their model's '{}'", kind,
                     skinFile);
                 return slot.data;
@@ -1933,7 +1967,7 @@ J3DModel* get_slot_model(int slotIdx, u8 kind, u16 wireIdx) {
 
     J3DModelData* data = get_or_load_item_data(kind, wireIdx);
     if (data == nullptr) return nullptr;
-    J3DModel* model = mDoExt_J3DModel__create(data, 0x80000, 0x11000284);
+    J3DModel* model = coop_create_model(data, 0x80000, 0x11000284);
     if (model == nullptr) return nullptr;
     force_diff_recognizes_stage_count(model);
     slot.kind = kind;
@@ -1986,7 +2020,7 @@ bool draw_chain_link(MtxP mtx, f32 scale) {
     if (pup().chainLinksUsed >= kChainLinkPool) return false;
     J3DModel*& model = pup().chainLinks[pup().chainLinksUsed];
     if (model == nullptr) {
-        model = mDoExt_J3DModel__create(s_chainLinkData, 0x80000, 0x11000284);
+        model = coop_create_model(s_chainLinkData, 0x80000, 0x11000284);
         if (model == nullptr) return false;
         force_diff_recognizes_stage_count(model);
     }
@@ -2697,23 +2731,54 @@ J3DModel* puppet_skin_equipment(const char* file, const cXyz& scale) {
     return model;
 }
 
-J3DModel* puppet_private_part_from(const char* arc, const char* file, const cXyz& scale) {
-    if (file == nullptr || arc == nullptr || arc[0] == 0) return nullptr;
-    J3DModelData* data = private_arc_load(arc, file);
+bool remember_private_data(J3DModelData* data, const char* key, J3DModel* model) {
+    for (int i = 0; i < kPuppetMaxPrivateData; ++i) {
+        if (pup().privateData[i] != nullptr) continue;
+        pup().privateData[i] = data;
+        pup().privateDataModel[i] = model;
+        std::strncpy(pup().privateDataKey[i], key, sizeof(pup().privateDataKey[i]) - 1);
+        pup().privateDataKey[i][sizeof(pup().privateDataKey[i]) - 1] = 0;
+        return true;
+    }
+    static int s_fullLogged = 0;
+    if (s_fullLogged++ < 4) {
+        coop_log::warn("coop_mod: [PUPPET] player {} already holds {} parts - not loading '{}' "
+                       "rather than leak it | [MEM] {}", static_cast<int>(s_pupId),
+            kPuppetMaxPrivateData, key, coop_mem_status());
+    }
+    return false;
+}
+
+J3DModel* private_part_model(const char* key, J3DModelData* (*load)(const char*, const char*, u32),
+    const char* arc, const char* file, u32 index) {
+    J3DModelData* data = load(arc, file, index);
     if (data == nullptr) return nullptr;
-    J3DModel* model = mDoExt_J3DModel__create(data, 0x80000, 0x11000284);
+    J3DModel* model = coop_create_model(data, 0x80000, 0x11000284);
     if (model == nullptr) {
         private_arc_free_data(data);
         return nullptr;
     }
-
-    for (int i = 0; i < kPuppetMaxPrivateData; ++i) {
-        if (pup().privateData[i] == nullptr) {
-            pup().privateData[i] = data;
-            break;
-        }
+    if (!remember_private_data(data, key, model)) {
+        coop_free_model(model);
+        private_arc_free_data(data);
+        return nullptr;
     }
     return model;
+}
+
+J3DModelData* load_part_by_name(const char* arc, const char* file, u32) {
+    return private_arc_load(arc, file);
+}
+
+J3DModelData* load_part_by_index(const char* arc, const char*, u32 index) {
+    return private_arc_load_idx(arc, index);
+}
+
+J3DModel* puppet_private_part_from(const char* arc, const char* file, const cXyz& scale) {
+    if (file == nullptr || arc == nullptr || arc[0] == 0) return nullptr;
+    char key[40];
+    std::snprintf(key, sizeof(key), "%s:%s", arc, file);
+    return private_part_model(key, load_part_by_name, arc, file, 0);
 }
 
 J3DModel* puppet_private_part(const char* file, const cXyz& scale) {
@@ -2743,20 +2808,10 @@ J3DModel* puppet_private_part_idx(const char* arc, u32 index, const cXyz& scale)
     const int state = private_arc_poll(arc);
     if (state == 0) return nullptr;
     if (state < 0) return nullptr;
-    J3DModelData* data = private_arc_load_idx(arc, index);
-    if (data == nullptr) return nullptr;
-    J3DModel* model = mDoExt_J3DModel__create(data, 0x80000, 0x11000284);
-    if (model == nullptr) {
-        private_arc_free_data(data);
-        return nullptr;
-    }
-    for (int i = 0; i < kPuppetMaxPrivateData; ++i) {
-        if (pup().privateData[i] == nullptr) {
-            pup().privateData[i] = data;
-            break;
-        }
-    }
-    return model;
+
+    char key[40];
+    std::snprintf(key, sizeof(key), "%s#%u", arc, static_cast<unsigned>(index));
+    return private_part_model(key, load_part_by_index, arc, nullptr, index);
 }
 
 J3DModel* puppet_skin_part(int part, const cXyz& scale) {
@@ -3479,10 +3534,10 @@ void update_one_puppet(daAlink_c* alink) {
         colors_attach_puppet_model(pup().hatModel, s_pupId);
         colors_attach_puppet_model(pup().bootModels[0], s_pupId);
         colors_attach_puppet_model(pup().bootModels[1], s_pupId);
-        coop_log::info("coop_mod: [DIAG] model={:p} outfit={} joints={} mats={}",
+        coop_log::info("coop_mod: [DIAG] model={:p} outfit={} joints={} mats={} | [MEM] {}",
             static_cast<void*>(pup().model), pup().outfit,
             pup().model ? pup().model->getModelData()->getJointNum() : 0,
-            pup().model ? pup().model->getModelData()->getMaterialNum() : 0);
+            pup().model ? pup().model->getModelData()->getMaterialNum() : 0, coop_mem_status());
     }
 }
 
@@ -4527,6 +4582,7 @@ void on_alink_draw_puppet_post(ModContext*, void*, void*, void*) {
     queue_boss_overlay_from_draw();
 
     squad_hud_queue();
+    notify_queue();
     daAlink_c* alink = daAlink_getAlinkActorClass();
     if (alink == nullptr) return;
 

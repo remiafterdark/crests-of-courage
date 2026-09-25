@@ -2320,7 +2320,11 @@ HookAction on_proc_execute_pre(ModContext*, void* args, void*, void*) {
     return HOOK_CONTINUE;
 }
 
-void on_proc_execute_post(ModContext*, void*, void*, void*) {
+bool repin_after_execute(base_process_class* proc);
+
+void on_proc_execute_post(ModContext*, void* args, void*, void*) {
+
+    repin_after_execute(mods::arg<base_process_class*>(args, 0));
     if (--s_lieDepth != 0) return;
     lie_end();
 }
@@ -3371,6 +3375,24 @@ struct RemoteCarry {
 };
 RemoteCarry s_remoteCarry[kMaxCarried];
 
+struct HeldPin {
+    fpc_ProcID id = fpcM_ERROR_PROCESS_ID_e;
+    cXyz pos;
+    s16 angle[3] = {0, 0, 0};
+};
+HeldPin s_heldPins[kMaxCarried];
+int s_heldPinCount = 0;
+
+void pin_held(fopAc_ac_c* actor) {
+    if (actor == nullptr || s_heldPinCount >= kMaxCarried) return;
+    HeldPin& p = s_heldPins[s_heldPinCount++];
+    p.id = fopAcM_GetID(actor);
+    p.pos = actor->current.pos;
+    p.angle[0] = actor->shape_angle.x;
+    p.angle[1] = actor->shape_angle.y;
+    p.angle[2] = actor->shape_angle.z;
+}
+
 struct RemoteStatue {
     fpc_ProcID id = fpcM_ERROR_PROCESS_ID_e;
     bool inHands = false;
@@ -3685,10 +3707,27 @@ void hold_still(fopAc_ac_c* actor, bool isPot) {
     pot->field_0xdec = actor->current.pos;
 }
 
+bool repin_after_execute(base_process_class* proc) {
+    if (s_heldPinCount == 0 || proc == nullptr) return false;
+    for (int i = 0; i < s_heldPinCount; ++i) {
+        if (s_heldPins[i].id != proc->id) continue;
+        auto* actor = static_cast<fopAc_ac_c*>(fopAcM_SearchByID(proc->id));
+        if (actor == nullptr) return false;
+        place(actor, s_heldPins[i].pos);
+        actor->shape_angle.x = s_heldPins[i].angle[0];
+        actor->shape_angle.y = s_heldPins[i].angle[1];
+        actor->shape_angle.z = s_heldPins[i].angle[2];
+        actor->current.angle.y = s_heldPins[i].angle[1];
+        return true;
+    }
+    return false;
+}
+
 void apply_remote_carry() {
     const bool full = carry_live();
     daAlink_c* me = daAlink_getAlinkActorClass();
     s_remoteStatueCount = 0;
+    s_heldPinCount = 0;
     for (RemoteCarry& r : s_remoteCarry) {
         if (!r.used) continue;
         const MsgCarry& msg = r.msg;
@@ -3738,6 +3777,7 @@ void apply_remote_carry() {
                     actor->shape_angle.z = msg.angle[2];
                     actor->current.angle.y = actor->shape_angle.y;
                     hold_still(actor, isPot);
+                    pin_held(actor);
                     break;
                 }
             }
@@ -3747,6 +3787,7 @@ void apply_remote_carry() {
             actor->shape_angle.z = msg.angle[2];
             actor->current.angle.y = msg.angle[1];
             hold_still(actor, isPot);
+            pin_held(actor);
             break;
         }
 

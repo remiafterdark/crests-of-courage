@@ -15,6 +15,9 @@ bool peer_on_our_stage();
 
 int power_class_to_damage(int atp);
 
+class JUTFont;
+float coop_text_width(JUTFont* font, const char* text, float cell);
+
 std::filesystem::path path_ci(const std::filesystem::path& p);
 inline bool exists_ci(const std::filesystem::path& p, std::error_code& ec) {
     return std::filesystem::exists(path_ci(p), ec);

@@ -320,6 +320,38 @@ void horse_on_message(const uint8_t* payload, size_t size, uint8_t from);
 ConfigVarHandle horse_enabled_var();
 
 void squad_hud_register_vars();
+
+enum NotifyKind { kNotifyItems, kNotifyPlayers, kNotifyRando, kNotifyTeleport, kNotifyOther,
+    kNotifyKinds };
+void notify_register_vars(ConfigVarHandle itemsVar);
+
+void coop_notify(NotifyKind kind, const std::string& title, const std::string& body,
+    uint32_t durationMs = 0);
+inline void coop_notify_c(NotifyKind kind, const char* title, const char* body) {
+    coop_notify(kind, title != nullptr ? title : "", body != nullptr ? body : "");
+}
+void notify_queue();
+void notify_debug_test();
+ConfigVarHandle notify_on_var();
+ConfigVarHandle notify_kind_var(NotifyKind kind);
+ConfigVarHandle notify_side_var();
+ConfigVarHandle notify_edge_var();
+ConfigVarHandle notify_from_side_var();
+ConfigVarHandle notify_from_edge_var();
+ConfigVarHandle notify_busy_var();
+ConfigVarHandle notify_hurry_var();
+ConfigVarHandle notify_more_var();
+ConfigVarHandle notify_slide_var();
+ConfigVarHandle notify_preview_var();
+ConfigVarHandle notify_test_amount_var();
+ConfigVarHandle notify_cycle_var();
+void notify_stop_preview();
+ConfigVarHandle notify_seconds_var();
+ConfigVarHandle notify_size_var();
+ConfigVarHandle notify_max_var();
+ConfigVarHandle notify_engine_var();
+
+std::string coop_mem_status();
 void squad_hud_queue();
 ConfigVarHandle squad_hud_enabled_var();
 ConfigVarHandle squad_hud_size_var();
@@ -353,6 +385,7 @@ void colors_attach_puppet_model(J3DModel* model, uint8_t owner);
 void coop_crash_trail(const char* step);
 
 bool private_arc_request(const char* name);
+class JKRHeap* private_arc_heap_if_any();
 int private_arc_poll(const char* name);
 void private_arc_release(const char* name);
 J3DModelData* private_arc_load(const char* name, const char* file);
@@ -507,6 +540,8 @@ ConfigVarHandle world_dungeon_var();
 ConfigVarHandle world_story_var();
 
 void joinsync_register_vars();
+
+ConfigVarHandle joinsync_keep_consumables_var();
 void joinsync_update();
 void joinsync_on_connected();
 void joinsync_on_message(const uint8_t* payload, size_t size);

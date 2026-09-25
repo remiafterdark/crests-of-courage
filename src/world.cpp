@@ -402,6 +402,22 @@ bool local_mid_sequence() {
     return dComIfGp_event_runCheck() != 0;
 }
 
+bool dungeon_stage(const char* stage) {
+    return stage != nullptr && stage[0] == 'D' && stage[1] == '_';
+}
+
+struct HeldWorldMsg {
+    uint8_t type;
+    uint8_t from;
+    uint16_t size;
+    uint8_t bytes[sizeof(MsgWorldFull) > sizeof(MsgWorldDelta) ? sizeof(MsgWorldFull)
+                                                                : sizeof(MsgWorldDelta)];
+};
+const int kHeldWorldMax = 512;
+HeldWorldMsg* s_heldWorld = nullptr;
+int s_heldWorldCount = 0;
+bool s_replayingWorld = false;
+
 uint32_t s_heldSequenceTicks = 0;
 
 void scan() {
@@ -472,7 +488,13 @@ void scan() {
             std::memcpy(s_base.zone[room], bits, kZoneBitSize);
             std::memcpy(s_base.zoneActor[room], actorBits, kZoneActorSize);
         } else {
-            diff_region(kRegionZone, static_cast<int8_t>(room), bits, s_base.zone[room], kZoneBitSize);
+
+            if (dungeon_stage(stage)) {
+                diff_region(kRegionZone, static_cast<int8_t>(room), bits, s_base.zone[room],
+                    kZoneBitSize);
+            } else {
+                std::memcpy(s_base.zone[room], bits, kZoneBitSize);
+            }
             diff_region(kRegionZoneActor, static_cast<int8_t>(room), actorBits,
                 s_base.zoneActor[room], kZoneActorSize);
         }
@@ -482,7 +504,7 @@ void scan() {
     }
 
     uint8_t* tmp = info->getTmp().mEvent;
-    if (dungeon && s_base.haveTmp) {
+    if (dungeon && dungeon_stage(stage) && s_base.haveTmp) {
         uint8_t view[kEventSize];
         std::memcpy(view, tmp, kEventSize);
         keep_private_tmp(view, s_base.tmp);
@@ -1058,6 +1080,10 @@ void merge_full(uint8_t* target, uint8_t* base, const uint8_t* data, int size, b
 void handle_full(const MsgWorldFull& msg) {
     if (msg.size > 32) return;
 
+    if ((msg.region == kRegionZone || msg.region == kRegionTmp) && !dungeon_stage(msg.stage)) {
+        return;
+    }
+
     if (msg.region == kRegionEvent) {
         if (!coop_session(kSessStory, cfg_bool(s_storyVar, false))) return;
     } else if (!coop_session(kSessDungeon, cfg_bool(s_dungeonVar, true))) {
@@ -1387,7 +1413,20 @@ void world_update() {
     ++s_tick;
     if (!coop_net_connected()) {
         s_base.have = false;
+        s_heldWorldCount = 0;
         return;
+    }
+
+    if (s_heldWorldCount > 0 && !local_mid_sequence()) {
+        coop_log::info("coop_mod: [WORLD] sequence over - applying {} held update(s)",
+            s_heldWorldCount);
+        s_replayingWorld = true;
+        for (int i = 0; i < s_heldWorldCount; ++i) {
+            const HeldWorldMsg& h = s_heldWorld[i];
+            world_on_message(h.type, h.bytes, h.size, h.from);
+        }
+        s_replayingWorld = false;
+        s_heldWorldCount = 0;
     }
     if (s_tick % 10 == 0) scan();
     if (s_tick % 30 == 0 && daAlink_getAlinkActorClass() != nullptr) retry_pending_chests();
@@ -1439,6 +1478,24 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
         handle_digest(msg, from);
         return;
     }
+
+    if ((type == kMsgWorldFull || type == kMsgWorldDelta) && !s_replayingWorld &&
+        local_mid_sequence() && daAlink_getAlinkActorClass() != nullptr) {
+        if (s_heldWorld == nullptr) s_heldWorld = new HeldWorldMsg[kHeldWorldMax];
+        if (s_heldWorldCount < kHeldWorldMax && size <= sizeof(HeldWorldMsg::bytes)) {
+            HeldWorldMsg& h = s_heldWorld[s_heldWorldCount++];
+            h.type = type;
+            h.from = from;
+            h.size = static_cast<uint16_t>(size);
+            std::memcpy(h.bytes, payload, size);
+            if (s_heldWorldCount == 1) {
+                coop_log::info("coop_mod: [WORLD] holding their world state until our sequence "
+                               "ends");
+            }
+            return;
+        }
+
+    }
     if (type == kMsgWorldFull) {
         if (size < sizeof(MsgWorldFull)) return;
         MsgWorldFull full;
@@ -1450,6 +1507,9 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
     MsgWorldDelta msg;
     std::memcpy(&msg, payload, sizeof(msg));
     if (msg.size > 32) return;
+    if ((msg.region == kRegionZone || msg.region == kRegionTmp) && !dungeon_stage(msg.stage)) {
+        return;
+    }
     const bool storyRegion = msg.region == kRegionEvent;
     if (storyRegion ? !coop_session(kSessStory, cfg_bool(s_storyVar, false)) : !coop_session(kSessDungeon, cfg_bool(s_dungeonVar, true))) return;
     dSv_info_c* info = dComIfGs_getSaveInfo();
@@ -1461,23 +1521,27 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
                       saveNo == msg.saveNo;
     const bool baselineValid = here && s_base.have;
 
+    const bool sameSlot = current_stage(stage, saveNo) && saveNo == msg.saveNo;
+    const bool slotBaselineValid = sameSlot && s_base.have;
+
     switch (msg.region) {
     case kRegionMemory: {
         if (msg.saveNo < 0 || msg.saveNo >= dSv_save_c::STAGE_MAX) return;
         if (msg.offset + msg.size > kMemSize) return;
-        uint8_t* target = here ? mem_bytes(info->getMemory())
-                               : mem_bytes(info->getSavedata().getSave(msg.saveNo));
+        uint8_t* target = sameSlot ? mem_bytes(info->getMemory())
+                                   : mem_bytes(info->getSavedata().getSave(msg.saveNo));
 
         uint8_t newlySet[8] = {};
-        if (here) {
+        if (sameSlot) {
             for (int i = 0; i < msg.size; ++i) {
                 const int at = msg.offset + i;
                 if (at >= 8) break;
                 newlySet[at] = static_cast<uint8_t>(msg.set[i] & ~target[at]);
             }
         }
-        apply_bytes(target, baselineValid ? s_base.mem : nullptr, msg, kKeyOffset);
-        if (here) {
+        apply_bytes(target, slotBaselineValid ? s_base.mem : nullptr, msg, kKeyOffset);
+        if (sameSlot) {
+
             open_chests_from_bits(newlySet);
             remove_collected_from_bits(newlySet);
         }
@@ -1485,10 +1549,10 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
     }
     case kRegionKeys: {
         if (msg.saveNo < 0 || msg.saveNo >= dSv_save_c::STAGE_MAX) return;
-        uint8_t* target = here ? mem_bytes(info->getMemory())
-                               : mem_bytes(info->getSavedata().getSave(msg.saveNo));
+        uint8_t* target = sameSlot ? mem_bytes(info->getMemory())
+                                   : mem_bytes(info->getSavedata().getSave(msg.saveNo));
         target[kKeyOffset] = msg.set[0];
-        if (baselineValid) s_base.mem[kKeyOffset] = msg.set[0];
+        if (slotBaselineValid) s_base.mem[kKeyOffset] = msg.set[0];
         break;
     }
     case kRegionDan: {

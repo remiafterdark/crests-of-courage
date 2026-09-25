@@ -5,6 +5,7 @@
 
 #include "mods/service.hpp"
 #include "mods/svc/config.h"
+#include "mods/svc/hook.hpp"
 #include "mods/svc/log.hpp"
 #include "print.hpp"
 
@@ -30,7 +31,28 @@
 #include <cstdio>
 #include <cstring>
 
+DEFINE_HOOK_SYMBOL("dMeter2_c::_create", int(dMeter2_c*), SquadMeterCreateHook);
+DEFINE_HOOK_SYMBOL("dMeter2_c::_delete", int(dMeter2_c*), SquadMeterDeleteHook);
+
 namespace {
+
+dMeter2_c* s_liveMeter = nullptr;
+bool s_meterHooked = false;
+
+void on_meter_create_post(ModContext*, void* args, void*, void*) {
+    s_liveMeter = mods::arg<dMeter2_c*>(args, 0);
+}
+
+HookAction on_meter_delete_pre(ModContext*, void* args, void*, void*) {
+    if (mods::arg<dMeter2_c*>(args, 0) == s_liveMeter) s_liveMeter = nullptr;
+    return HOOK_CONTINUE;
+}
+
+dMeter2_c* live_meter() {
+    dMeter2_c* meter = dMeter2Info_getMeterClass();
+    if (!s_meterHooked) return meter;
+    return meter == s_liveMeter ? meter : nullptr;
+}
 
 const int kHeartSlots = 20;
 const int kHeartsPerRow = 10;
@@ -375,7 +397,7 @@ void draw_name(const std::string& name, f32 x, f32 y, f32 cell, u8 alpha, bool l
     font->setGX();
     std::string text = name;
     if (paused) text += "  (menu)";
-    if (alignRight) x -= font->drawString_scale(0.0f, 0.0f, cell, cell, text.c_str(), false);
+    if (alignRight) x -= coop_text_width(font, text.c_str(), cell);
     const f32 shadow = cell * 0.08f;
     font->setCharColor(JUtility::TColor(0, 0, 0, static_cast<u8>(alpha * 0.7f)));
     font->drawString_scale(x + shadow, y + shadow, cell, cell, text.c_str(), true);
@@ -493,7 +515,7 @@ void draw_squad() {
     const bool listOn = cfg_bool(s_enableVar, false);
     const bool worldOn = puppet_hook_health_enabled();
     if (!coop_net_connected() || (!listOn && !worldOn)) return;
-    dMeter2_c* meter = dMeter2Info_getMeterClass();
+    dMeter2_c* meter = live_meter();
     if (meter == nullptr) return;
     dMeter2Draw_c* real = meter->getMeterDrawPtr();
     if (real == nullptr || real->mpLifeParent == nullptr || real->mpScreen == nullptr) return;
@@ -797,6 +819,10 @@ SquadHudDlst s_dlst;
 }
 
 void squad_hud_register_vars() {
+    s_meterHooked = mods::hook::add_post<SquadMeterCreateHook>(on_meter_create_post) == MOD_OK &&
+                    mods::hook::add_pre<SquadMeterDeleteHook>(on_meter_delete_pre) == MOD_OK;
+    coop_log::info("coop_mod: [HUD] watching the game's HUD come and go: {}",
+        s_meterHooked ? "yes" : "NO - trusting its pointer");
     if (svc_config == nullptr) return;
     ConfigVarDesc on = CONFIG_VAR_DESC_INIT;
     on.name = "squad_health";

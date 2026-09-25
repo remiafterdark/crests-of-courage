@@ -1,6 +1,9 @@
 
 
 #include "mod.hpp"
+#include "mods/svc/save.h"
+
+extern const SaveService* svc_save;
 #include "net/messages.hpp"
 
 #include "mods/service.hpp"
@@ -30,6 +33,17 @@ const size_t kSaveSize = sizeof(dSv_save_c);
 static_assert(sizeof(dSv_save_c) == 0x958, "dSv_save_c size moved - the join-sync blob length is wrong");
 
 ConfigVarHandle s_acceptVar = 0;
+ConfigVarHandle s_keepConsumablesVar = 0;
+
+bool s_fileIsNew = false;
+
+void on_file_new(ModContext*, uint32_t, void*) {
+    s_fileIsNew = true;
+}
+
+void on_file_loaded(ModContext*, uint32_t, void*) {
+    s_fileIsNew = false;
+}
 
 bool s_hostSentTo[kCoopMaxPlayers] = {};
 bool s_joinerApplied = false;
@@ -263,19 +277,36 @@ void load_host_save(dSv_info_c* info, const uint8_t* blob) {
     dSv_player_status_a_c& a = result.mPlayer.mPlayerStatusA;
     const dSv_player_status_a_c& myA = mine.mPlayer.mPlayerStatusA;
 
+    const bool keepOwn = !s_fileIsNew && cfg_bool(s_keepConsumablesVar, true);
+
     std::memcpy(s_session.selectEquip, a.mSelectEquip, sizeof(s_session.selectEquip));
     s_session.transform = a.mTransformStatus;
-    s_session.life = a.mLife;
 
     std::memcpy(a.mSelectEquip, myA.mSelectEquip, sizeof(a.mSelectEquip));
     a.mTransformStatus = myA.mTransformStatus;
 
     const u16 maxLife = a.mMaxLife;
     const u16 myLife = myA.mLife;
-    const u16 lifeCap = static_cast<u16>((maxLife / 5) * 4);
-    a.mLife = std::min<u16>(myLife == 0 ? u16{4} : myLife, lifeCap > 0 ? lifeCap : u16{4});
+    u16 lifeCap = static_cast<u16>((maxLife / 5) * 4);
+    if (lifeCap == 0) lifeCap = 4;
+    const u16 joinLife = (keepOwn && myLife > 0) ? std::min<u16>(myLife, lifeCap) : lifeCap;
+    a.mLife = joinLife;
+    s_session.life = joinLife;
 
     result.mPlayer.mConfig = mine.mPlayer.mConfig;
+
+    if (keepOwn) {
+        dSv_player_item_record_c& rec = result.mPlayer.mItemRecord;
+        const dSv_player_item_record_c& myRec = mine.mPlayer.mItemRecord;
+        dSv_player_item_max_c& cap = result.mPlayer.mItemMax;
+        rec.setArrowNum(std::min<u8>(myRec.getArrowNum(), cap.getArrowNum()));
+        rec.setPachinkoNum(myRec.getPachinkoNum());
+        for (u8 bag = 0; bag < 3; ++bag) rec.setBombNum(bag, myRec.getBombNum(bag));
+        static const u16 kWalletCap[] = {300, 600, 1000};
+        const u8 wallet = a.getWalletSize();
+        const u16 walletCap = wallet < 3 ? kWalletCap[wallet] : 1000;
+        a.setRupee(std::min<u16>(myA.getRupee(), walletCap));
+    }
 
     if (result.mPlayer.mHorsePlace.mName[0] != '\0') {
         std::memset(result.mPlayer.mHorsePlace.mName, 0, sizeof(result.mPlayer.mHorsePlace.mName));
@@ -388,11 +419,25 @@ void restore_backup(bool oldest) {
 }
 
 void joinsync_register_vars() {
+    ConfigVarDesc keep = CONFIG_VAR_DESC_INIT;
+    keep.name = "join_keeps_own_consumables";
+    keep.type = CONFIG_VAR_BOOL;
+    keep.default_bool = true;
+    if (svc_config->register_var(mod_ctx, &keep, &s_keepConsumablesVar) != MOD_OK) {
+        s_keepConsumablesVar = 0;
+    }
+    if (svc_save != nullptr) {
+        svc_save->observe_saves(mod_ctx, on_file_new, on_file_loaded, nullptr, nullptr, nullptr);
+    }
     ConfigVarDesc accept = CONFIG_VAR_DESC_INIT;
     accept.name = "join_copies_host_progress";
     accept.type = CONFIG_VAR_BOOL;
     accept.default_bool = true;
     if (svc_config->register_var(mod_ctx, &accept, &s_acceptVar) != MOD_OK) s_acceptVar = 0;
+}
+
+ConfigVarHandle joinsync_keep_consumables_var() {
+    return s_keepConsumablesVar;
 }
 
 void joinsync_restore_backup(bool oldest) {

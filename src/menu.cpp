@@ -629,10 +629,69 @@ ModResult group_sound(ModContext*, UiElementHandle pane, void*, ModError*) {
     return MOD_OK;
 }
 
+ModResult group_joining(ModContext*, UiElementHandle pane, void*, ModError*) {
+    add_panel_header(pane, "Joining");
+    add_toggle(pane, "Keep my own rupees, ammo and hearts", joinsync_keep_consumables_var(),
+        "Joining with a file you have played: you keep your rupees, arrows, bombs, slingshot seeds "
+        "and hearts instead of taking the host's, up to what the host's wallet, quiver, bags and "
+        "heart containers hold. A brand-new file takes the host's. Either way you never arrive "
+        "at the host's current health - off, or on a new file, you arrive at full.");
+    return MOD_OK;
+}
+
 ModResult group_messages(ModContext*, UiElementHandle pane, void*, ModError*) {
-    add_panel_header(pane, "Messages");
-    add_toggle(pane, "Say what they pick up", features_vars().notifyItems,
-        "A note when somebody finds something that matters: a key, an item, a heart piece.");
+    add_panel_header(pane, "Notifications");
+    const ConfigVarHandle on = notify_on_var();
+    add_toggle(pane, "Show notifications", on, "Turn this off to hide all of them.");
+    add_toggle(pane, "Preview while editing", notify_preview_var(),
+        "Shows a batch of sample notifications so you can see how they will look while you change "
+        "these settings. Only in-game, with a save loaded. Turns itself off when this window "
+        "closes.", on);
+    add_number(pane, "Test amount", notify_test_amount_var(), 1, 40, 1, nullptr,
+        "How many samples the preview shows. Changing it makes a fresh batch.",
+        notify_preview_var());
+    add_toggle(pane, "Cycle test", notify_cycle_var(),
+        "When the batch has gone, send it again - over and over, until you turn this off.",
+        notify_preview_var());
+    add_toggle(pane, "Use Dusklight's notifications instead", notify_engine_var(),
+        "Its own pop-ups: one at a time, no stacking. The title screen always uses them.", on);
+
+    svc_ui->pane_add_section(mod_ctx, pane, "What to show");
+    add_toggle(pane, "Items they find", features_vars().notifyItems,
+        "When somebody finds something that matters: a key, an item, a heart piece.", on);
+    add_toggle(pane, "Players joining and leaving", notify_kind_var(kNotifyPlayers), nullptr, on);
+    add_toggle(pane, "Randomizer", notify_kind_var(kNotifyRando),
+        "The host's seed arriving, switching to it, and so on.", on);
+    add_toggle(pane, "Teleports", notify_kind_var(kNotifyTeleport), nullptr, on);
+    add_toggle(pane, "Everything else", notify_kind_var(kNotifyOther),
+        "Death link, version mismatches, model notes and the rest.", on);
+
+    svc_ui->pane_add_section(mod_ctx, pane, "Timing");
+    add_number(pane, "Stay up for", notify_seconds_var(), 1, 30, 1, "s",
+        "How long each one stays when nothing else is waiting.", on);
+    add_number(pane, "At once", notify_max_var(), 1, 8, 1, nullptr,
+        "How many can be on screen together. The rest wait their turn.", on);
+    add_number(pane, "When busy, each stays", notify_busy_var(), 5, 100, 1, "/10s",
+        "With more waiting behind them, each one only stays this long, so a pile of them comes "
+        "through in quick bursts instead of taking a minute.", on);
+    add_number(pane, "Hurry once this many wait", notify_hurry_var(), 1, 30, 1, nullptr,
+        "How big the queue has to get before they speed up.", on);
+    add_toggle(pane, "Show how many are waiting", notify_more_var(),
+        "A \"+3 more\" line under the stack.", on);
+    add_toggle(pane, "Slide in", notify_slide_var(), "Off, they just fade in.", on);
+
+    svc_ui->pane_add_section(mod_ctx, pane, "Position and size");
+    static const char* const kSides[] = {"Left", "Middle", "Right"};
+    add_dropdown(pane, "Side", notify_side_var(), kSides, 3, nullptr, on);
+    static const char* const kEdges[] = {"Top", "Bottom"};
+    add_dropdown(pane, "Edge", notify_edge_var(), kEdges, 2,
+        "Which edge the stack starts from. It grows away from it.", on);
+    add_number(pane, "Distance from the side", notify_from_side_var(), 0, 400, 2, nullptr,
+        "Moves them in from the side they are on. No effect in the middle.", on);
+    add_number(pane, "Distance from the edge", notify_from_edge_var(), 0, 400, 2, nullptr,
+        "Moves them in from the top or bottom. The default keeps them above the rupee counter.",
+        on);
+    add_number(pane, "Size", notify_size_var(), 40, 200, 5, "%", nullptr, on);
     return MOD_OK;
 }
 
@@ -641,7 +700,8 @@ void build_screen(UiElementHandle pane, UiElementHandle detail) {
     add_group_or_section(pane, detail, "Health", group_health);
     add_group_or_section(pane, detail, "Map", group_map);
     add_group_or_section(pane, detail, "Sound", group_sound);
-    add_group_or_section(pane, detail, "Messages", group_messages);
+    add_group_or_section(pane, detail, "Notifications", group_messages);
+    add_group_or_section(pane, detail, "Joining", group_joining);
 }
 
 std::vector<std::string> s_modelNames;
@@ -960,6 +1020,9 @@ void build_debug(UiElementHandle pane) {
     add_button(pane, "Spawn test puppet", [](ModContext*, void*) { coop_debug_spawn_puppet(); });
     add_button(pane, "Transform", [](ModContext*, void*) { coop_debug_force_transform(); });
     add_button(pane, "Give Midna", [](ModContext*, void*) { coop_debug_give_midna(); });
+    add_button(pane, "Test notifications", [](ModContext*, void*) { notify_debug_test(); },
+        nullptr, "One of every kind at once, to see how they stack, where they sit and how long "
+        "they stay. Load a save first - on the title screen they go to Dusklight's own.");
 }
 
 ModResult build_panel(ModContext*, UiElementHandle pane, void*, ModError*) {
@@ -1053,6 +1116,7 @@ ModResult update_window(ModContext*, void*, ModError*) {
 }
 
 void on_window_closed(ModContext*, UiWindowHandle, void*) {
+    notify_stop_preview();
     s_windowHandle = 0;
     s_window = SurfaceHandles{};
 }

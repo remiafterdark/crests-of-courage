@@ -292,7 +292,6 @@ void skins_outfit_cycle_update() {
         dItemNo_WEAR_KOKIRI_e,
         dItemNo_WEAR_CASUAL_e,
         dItemNo_WEAR_ZORA_e,
-        dItemNo_ARMOR_e,
     };
     const int wearCount = static_cast<int>(sizeof(kWear) / sizeof(kWear[0]));
     static int next = 0;
