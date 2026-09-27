@@ -1,9 +1,9 @@
 {
   "id": "dev.remiafterdark.coop_mod",
   "name": "Crests of Courage",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "author": "remiafterdark",
-  "description": "Online co-op for Twilight Princess. 2 to 16 players in one shared world, with room codes so there is nothing to set up.",
+  "description": "Online true co-op for Twilight Princess.",
   "icon": "res/icon.png",
   "banner": "res/banner.png"
 }
