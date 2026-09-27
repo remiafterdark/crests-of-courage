@@ -498,6 +498,18 @@ ModResult group_together(ModContext*, UiElementHandle pane, void*, ModError*) {
     return MOD_OK;
 }
 
+ModResult group_pvp(ModContext*, UiElementHandle pane, void*, ModError*) {
+    add_panel_header(pane, "PvP");
+    add_toggle(pane, "PvP", pvp_enabled_var(),
+        "Players can hit each other with anything that hits an enemy. The host's setting is the one "
+        "in use.");
+    add_number(pane, "Damage", pvp_damage_var(), 0, 400, 25, "%",
+        "How much of each hit lands, for everybody.", pvp_enabled_var());
+    add_toggle(pane, "Lock on to players", pvp_lock_on_var(),
+        "Z-target other players while PvP is on. Your own setting.");
+    return MOD_OK;
+}
+
 ModResult group_unfinished(ModContext*, UiElementHandle pane, void*, ModError*) {
     add_panel_header(pane, "Unfinished", nullptr, "coop-danger");
 
@@ -535,6 +547,7 @@ void build_game(UiElementHandle pane, UiElementHandle detail) {
     }
     add_group_or_section(pane, detail, "Share", group_sharing);
     add_group_or_section(pane, detail, "Playing together", group_together);
+    add_group_or_section(pane, detail, "PvP", group_pvp);
     add_group_or_section(pane, detail, "Unfinished: these can break your game", group_unfinished);
     if (features_debug_menu()) add_group_or_section(pane, detail, "Dev", group_dev);
 }
@@ -1048,6 +1061,7 @@ void build_debug(UiElementHandle pane) {
 }
 
 ModResult build_panel(ModContext*, UiElementHandle pane, void*, ModError*) {
+    version_remind();
     s_panel = SurfaceHandles{};
     UiControlDesc open = UI_CONTROL_DESC_INIT;
     open.kind = UI_CONTROL_GROUP;
@@ -1306,6 +1320,7 @@ select-button.group-button key {
 )RCSS";
 
 void open_window() {
+    version_remind();
     if (s_windowHandle != 0) return;
 
     const size_t tabCount = features_debug_menu() ? 6 : 5;

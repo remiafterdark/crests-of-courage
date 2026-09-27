@@ -23,6 +23,7 @@ namespace {
 
 ConfigVarHandle s_enabledVar = 0;
 ConfigVarHandle s_damageVar = 0;
+ConfigVarHandle s_lockOnVar = 0;
 
 bool s_hostEnabled = false;
 uint16_t s_hostDamagePercent = 100;
@@ -46,173 +47,179 @@ uint16_t effective_damage_percent() {
     return coop_net_is_host() ? local_damage_percent() : s_hostDamagePercent;
 }
 
-const int kSourceCooldownTicks = 20;
-
-enum PvpSource : uint8_t {
-    kSrcAtSph,
-    kSrcAtCyl,
-    kSrcAtCps0,
-    kSrcAtCps1,
-    kSrcAtCps2,
-    kSrcGuardCps,
-    kSrcIronBall,
-    kSrcBoomerang,
-    kSrcArrow,
-    kSrcBomb,
-    kSrcCount,
+struct Pull {
+    bool active = false;
+    cXyz to;
+    u32 frames = 0;
 };
-uint32_t s_cooldownUntil[kSrcCount] = {};
+Pull s_pull;
+const f32 kPullSpeed = 60.0f;
+const f32 kPullStopShort = 90.0f;
+const u32 kPullMaxFrames = 45;
 
-struct Hurtbox {
-    cXyz feet;
-    f32 radius;
-    f32 height;
-};
+const s16 kPvpInvincibleFrames = 10;
+const u32 kTrimWindowFrames = 120;
+u32 s_trimFrames = 0;
 
-bool sphere_hits(const Hurtbox& hb, const cXyz& c, f32 r) {
-    const f32 dx = c.x - hb.feet.x;
-    const f32 dz = c.z - hb.feet.z;
-    const f32 reach = r + hb.radius;
-    if (dx * dx + dz * dz > reach * reach) return false;
-    return c.y + r >= hb.feet.y && c.y - r <= hb.feet.y + hb.height;
+void trim_invincibility(daAlink_c* alink) {
+    if (s_trimFrames == 0) return;
+    --s_trimFrames;
+    if (alink == nullptr || alink->mDamageTimer == 0) return;
+    if (alink->mDamageTimer > kPvpInvincibleFrames) alink->mDamageTimer = kPvpInvincibleFrames;
+    if (!alink->checkModeFlg(8)) s_trimFrames = 0;
 }
 
-bool cylinder_hits(const Hurtbox& hb, const cXyz& bottom, f32 r, f32 h) {
-    const f32 dx = bottom.x - hb.feet.x;
-    const f32 dz = bottom.z - hb.feet.z;
-    const f32 reach = r + hb.radius;
-    if (dx * dx + dz * dz > reach * reach) return false;
-    return bottom.y <= hb.feet.y + hb.height && bottom.y + h >= hb.feet.y;
-}
-
-bool capsule_hits(const Hurtbox& hb, const cXyz& a, const cXyz& b, f32 r) {
-    const int kSamples = 8;
-    for (int i = 0; i <= kSamples; ++i) {
-        const f32 t = static_cast<f32>(i) / kSamples;
-        const cXyz p(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t);
-        if (sphere_hits(hb, p, r)) return true;
+void start_pull(const MsgPvpHit& hit) {
+    daAlink_c* alink = daAlink_getAlinkActorClass();
+    if (alink == nullptr) return;
+    if (dComIfGp_event_runCheck() || alink->checkHorseRide() ||
+        sumo_hides_equipment(coop_net_local_id())) {
+        coop_log::info("coop_mod: [PVP] clawshotted, but not pulled (event / horse / sumo)");
+        return;
     }
-    return false;
+    const cXyz from(hit.from[0], hit.from[1], hit.from[2]);
+    cXyz toward(alink->current.pos.x - from.x, 0.0f, alink->current.pos.z - from.z);
+    const f32 len = std::sqrt(toward.x * toward.x + toward.z * toward.z);
+    if (len < kPullStopShort) {
+        coop_log::info("coop_mod: [PVP] clawshotted from {:.0f} away - already close", len);
+        return;
+    }
+    s_pull.active = true;
+    s_pull.to.set(from.x + toward.x / len * kPullStopShort, from.y, from.z + toward.z / len * kPullStopShort);
+    s_pull.frames = 0;
+    coop_log::info("coop_mod: [PVP] clawshotted - pulled {:.0f} over", len - kPullStopShort);
 }
 
-void send_hit(dCcD_GObjInf& at, PvpSource source, const cXyz& from) {
-    MsgPvpHit msg{};
-    msg.atType = at.GetAtType();
-    msg.atp = at.GetAtAtp();
-    msg.spl = static_cast<uint8_t>(at.GetAtSpl());
-    msg.mtrl = at.GetAtMtrl();
-    msg.source = source;
-    msg.from[0] = from.x;
-    msg.from[1] = from.y;
-    msg.from[2] = from.z;
-    coop_net_send(kMsgPvpHit, &msg, sizeof(msg));
-    s_cooldownUntil[source] = s_tick + kSourceCooldownTicks;
-    coop_log::info("coop_mod: [PVP] hit them: source={} type={:#x} atp={} spl={}", static_cast<int>(source),
-        msg.atType, msg.atp, msg.spl);
+u8 hit_se_for(const MsgPvpHit& hit) {
+    if (hit.se != 0) return hit.se;
+    const u32 t = hit.atType;
+    if (t & AT_TYPE_SLINGSHOT) return dCcD_SE_PACHINKO;
+    if (t & AT_TYPE_HOOKSHOT) return dCcD_SE_HOOKSHOT_STICK;
+    if (t & AT_TYPE_ARROW) return dCcD_SE_ARROW_STICK;
+    if (t & AT_TYPE_SHIELD_ATTACK) return dCcD_SE_SHIELD_ATTACK;
+    return dCcD_SE_SWORD;
 }
 
-bool ready(PvpSource source) {
-    return s_tick >= s_cooldownUntil[source];
-}
+struct SkillPower {
+    u8 cut;
+    u8 atp;
+    u8 spl;
+    const char* name;
+};
+const SkillPower kSkillPower[] = {
+    {daPy_py_c::CUT_TYPE_MORTAL_DRAW_A, 12, 1, "Mortal Draw"},
+    {daPy_py_c::CUT_TYPE_MORTAL_DRAW_B, 12, 1, "Mortal Draw"},
+    {daPy_py_c::CUT_TYPE_HEAD_JUMP, 8, 1, "Helm Splitter"},
 
-struct ActorList {
-    fopAc_ac_c* actors[16];
-    int count;
-    s16 name;
+    {daPy_py_c::CUT_TYPE_DOWN, 16, 1, "Ending Blow"},
+    {daPy_py_c::CUT_TYPE_FINISH_STAB, 16, 1, "Ending Blow"},
+    {daPy_py_c::CUT_TYPE_LARGE_JUMP_FINISH, 8, 1, "Jump Strike"},
+    {daPy_py_c::CUT_TYPE_LARGE_JUMP, 8, 1, "Jump Strike"},
+    {daPy_py_c::CUT_TYPE_TWIRL, 6, 0, "Back Slice"},
+    {daPy_py_c::CUT_TYPE_LARGE_TURN_LEFT, 6, 1, "Great Spin"},
+    {daPy_py_c::CUT_TYPE_LARGE_TURN_RIGHT, 6, 1, "Great Spin"},
 };
 
-void* collect_by_name(void* proc, void* data) {
-    auto* list = static_cast<ActorList*>(data);
-    auto* actor = static_cast<fopAc_ac_c*>(proc);
-    if (actor != nullptr && list->count < 16 && fopAcM_GetName(actor) == list->name) {
-        list->actors[list->count++] = actor;
+const SkillPower* skill_power(u8 cut) {
+    if (cut == 0) return nullptr;
+    for (const SkillPower& s : kSkillPower) {
+        if (s.cut == cut) return &s;
     }
     return nullptr;
 }
 
-void check_attacks(daAlink_c* alink, const Hurtbox& hb) {
-    const cXyz& me = alink->current.pos;
+struct HitPower {
+    int atp;
+    u8 spl;
+    int dmg;
+    const SkillPower* skill;
+};
 
-    auto try_sph = [&](dCcD_Sph& sph, PvpSource src, const cXyz& from) {
-        if (!ready(src) || !sph.ChkAtSet()) return false;
-        if (!sphere_hits(hb, *sph.GetCP(), sph.GetR())) return false;
-        send_hit(sph, src, from);
-        return true;
-    };
-    auto try_cps = [&](dCcD_Cps& cps, PvpSource src, const cXyz& from) {
-        if (!ready(src) || !cps.ChkAtSet()) return false;
-        if (!capsule_hits(hb, *cps.GetStartP(), *cps.GetEndP(), cps.GetR())) return false;
-        send_hit(cps, src, from);
-        return true;
-    };
+HitPower hit_power(const MsgPvpHit& hit) {
+    HitPower h{};
+    h.atp = hit.atp;
 
-    try_sph(alink->mAtSph, kSrcAtSph, me);
-    if (ready(kSrcAtCyl) && alink->mAtCyl.ChkAtSet() &&
-        cylinder_hits(hb, *alink->mAtCyl.GetCP(), alink->mAtCyl.GetR(), alink->mAtCyl.GetH()))
-    {
-        send_hit(alink->mAtCyl, kSrcAtCyl, me);
+    if (h.atp == 0 && (hit.atType & AT_TYPE_SLINGSHOT) != 0) h.atp = 1;
+    h.spl = hit.spl;
+    h.skill = skill_power(hit.cut);
+    if (h.skill != nullptr) {
+        if (h.skill->atp > h.atp) h.atp = h.skill->atp;
+        if (h.skill->spl > h.spl) h.spl = h.skill->spl;
     }
-    try_cps(alink->mAtCps[0], kSrcAtCps0, me);
-    try_cps(alink->mAtCps[1], kSrcAtCps1, me);
-    try_cps(alink->mAtCps[2], kSrcAtCps2, me);
-    try_cps(alink->mGuardAtCps, kSrcGuardCps, me);
-    try_sph(alink->field_0x1778, kSrcIronBall, *alink->field_0x1778.GetCP());
-
-    if (fopAc_ac_c* boomActor = alink->getBoomerangActor()) {
-        daBoomerang_c* boom = static_cast<daBoomerang_c*>(boomActor);
-        try_cps(boom->m_atCps, kSrcBoomerang, boom->current.pos);
-    }
-
-    if (ready(kSrcArrow)) {
-        ActorList arrows{};
-        arrows.name = fpcNm_ARROW_e;
-        fopAcM_Search(collect_by_name, &arrows);
-        for (int i = 0; i < arrows.count; ++i) {
-            daArrow_c* arrow = static_cast<daArrow_c*>(arrows.actors[i]);
-            if (projectiles_is_remote(arrow) || !arrow->field_0x688.ChkAtSet()) continue;
-            if (fopAcM_GetParam(arrow) != 1 && fopAcM_GetParam(arrow) != 2) continue;
-            if (!capsule_hits(hb, *arrow->field_0x688.GetStartP(), *arrow->field_0x688.GetEndP(),
-                    arrow->field_0x688.GetR()))
-            {
-                continue;
-            }
-            send_hit(arrow->field_0x688, kSrcArrow, arrow->current.pos);
-            s_cooldownUntil[kSrcArrow] = s_tick + 2;
-            arrow->deleteArrow();
-            break;
-        }
-    }
-
-    if (ready(kSrcBomb)) {
-        ActorList bombs{};
-        bombs.name = fpcNm_NBOMB_e;
-        fopAcM_Search(collect_by_name, &bombs);
-        for (int i = 0; i < bombs.count; ++i) {
-            daNbomb_c* bomb = static_cast<daNbomb_c*>(bombs.actors[i]);
-            if (!bomb->mCcSph.ChkAtSet()) continue;
-            if (!sphere_hits(hb, *bomb->mCcSph.GetCP(), bomb->mCcSph.GetR())) continue;
-            send_hit(bomb->mCcSph, kSrcBomb, bomb->current.pos);
-            break;
-        }
-    }
+    h.dmg = (h.atp * effective_damage_percent() + 50) / 100;
+    if (h.atp > 0 && h.dmg < 1 && effective_damage_percent() > 0) h.dmg = 1;
+    if (h.dmg > 255) h.dmg = 255;
+    return h;
 }
+
+bool guarding(daAlink_c* alink) {
+    return !alink->checkWolf() && (alink->checkUpperGuardAnime() || alink->checkPlayerGuard());
+}
+
+void hit_spark(daAlink_c* alink, const cXyz& from, u16 mark, u32 atType) {
+    const s16 toAttacker = cLib_targetAngleY(&alink->current.pos, &from);
+    csXyz sparkAngle(0, toAttacker, 0);
+    cXyz sparkPos(alink->current.pos.x + cM_ssin(toAttacker) * 30.0f, alink->current.pos.y + 90.0f,
+                  alink->current.pos.z + cM_scos(toAttacker) * 30.0f);
+    dComIfGp_setHitMark(mark, alink, &sparkPos, &sparkAngle, nullptr, atType);
+}
+
+u32 s_pinFrames = 0;
+u32 s_pinTotal = 0;
+
+const u32 kPinRefresh = 20;
+const u32 kPinMax = 150;
 
 void apply_hit(const MsgPvpHit& hit) {
     daAlink_c* alink = daAlink_getAlinkActorClass();
     if (alink == nullptr || !pvp_active()) return;
-    if (alink->mDamageTimer != 0 || dComIfGp_event_runCheck()) return;
+    if (dComIfGp_event_runCheck()) return;
 
-    int dmg = (static_cast<int>(hit.atp) * effective_damage_percent() + 50) / 100;
-    if (hit.atp > 0 && dmg < 1 && effective_damage_percent() > 0) dmg = 1;
-    if (dmg > 255) dmg = 255;
+    if (sumo_hides_equipment(coop_net_local_id())) return;
+
+    const HitPower power = hit_power(hit);
+    const int atp = power.atp;
+    const u8 spl = power.spl;
+    const int dmg = power.dmg;
+    const SkillPower* skill = power.skill;
+    const cXyz from(hit.from[0], hit.from[1], hit.from[2]);
+
+    if (alink->checkCameraLargeDamage()) {
+        if (skill == nullptr) return;
+        alink->setDamagePoint(dmg, FALSE, FALSE, 0);
+        hit_spark(alink, from, 1, hit.atType);
+
+        coop_log::info("coop_mod: [PVP] got hit while down: {} dmg={}", skill->name, dmg);
+        return;
+    }
+    if (alink->mDamageTimer != 0) return;
+
+    bool shield = false;
+    if (guarding(alink)) {
+        const s16 toAttacker = cLib_targetAngleY(&alink->current.pos, &from);
+        const s16 diff = static_cast<s16>(toAttacker - alink->shape_angle.y);
+        shield = hit.blocked != 0 || (diff > -0x3000 && diff < 0x3000);
+    }
+    const bool bash = (hit.atType & AT_TYPE_SHIELD_ATTACK) != 0 && !alink->checkWolf() &&
+                      !alink->checkHorseRide();
+
+    if (shield && !bash && spl == 0) {
+        const bool wood = alink->checkWoodShieldEquipNotIronBall() && !alink->checkMagicArmorNoDamage();
+        const u32 se = dCcD_GObjInf::getHitSeID(hit_se_for(hit), wood ? 0 : 1);
+        alink->mZ2Link.startCollisionSE(se, wood ? 0x29 : 0x28);
+        dComIfGp_getVibration().StartShock(VIBMODE_S_POWER3, 1, cXyz(0.0f, 1.0f, 0.0f));
+        hit_spark(alink, from, 6, hit.atType);
+        coop_log::info("coop_mod: [PVP] blocked: type={:#x} cut={}", hit.atType, hit.cut);
+        return;
+    }
 
     static dCcD_Sph s_attacker;
     s_attacker.SetAtType(hit.atType);
-    s_attacker.SetAtAtp(hit.atp);
-    s_attacker.SetAtSpl(static_cast<dCcG_At_Spl>(hit.spl));
+    s_attacker.SetAtAtp(static_cast<u8>(atp));
+    s_attacker.SetAtSpl(static_cast<dCcG_At_Spl>(spl));
     s_attacker.SetAtMtrl(hit.mtrl);
+    s_attacker.SetAtSe(hit_se_for(hit));
 
-    const cXyz from(hit.from[0], hit.from[1], hit.from[2]);
     dCcD_Cyl& tg = alink->mTgCyls[0];
     tg.SetTgHit(&s_attacker);
 
@@ -229,18 +236,29 @@ void apply_hit(const MsgPvpHit& hit) {
         away.set(cM_ssin(alink->shape_angle.y) * -10.0f, 0.0f, cM_scos(alink->shape_angle.y) * -10.0f);
     }
     tg.SetTgRVec(away);
-    alink->mCcStts.PlusDmg(dmg);
 
-    if (alink->checkUpperGuardAnime()) {
-        const s16 toAttacker = cLib_targetAngleY(&alink->current.pos, &from);
-        const s16 diff = static_cast<s16>(toAttacker - alink->shape_angle.y);
-        if (diff > -0x3000 && diff < 0x3000) {
-            tg.OnTgShieldHit();
-            s_shieldHitSet = true;
-        }
+    const bool stun = bash;
+    if (stun) {
+        tg.OnTgShieldHit();
+        s_shieldHitSet = true;
+        s_attacker.SetAtSpl(static_cast<dCcG_At_Spl>(10));
+    } else if (shield) {
+
+        tg.OnTgShieldHit();
+        s_shieldHitSet = true;
+    } else {
+        alink->mCcStts.PlusDmg(dmg);
+        s_trimFrames = kTrimWindowFrames;
     }
-    coop_log::info("coop_mod: [PVP] got hit: type={:#x} atp={} spl={} dmg={}", hit.atType, hit.atp,
-        hit.spl, dmg);
+    if (shield) {
+        hit_spark(alink, from, 6, hit.atType);
+    } else if (atp > 0 || stun) {
+        hit_spark(alink, from, 1, hit.atType);
+    }
+    coop_log::info("coop_mod: [PVP] got hit: type={:#x} atp={} spl={} se={} cut={} dmg={}{}{}{}",
+        hit.atType, atp, spl, hit_se_for(hit), hit.cut, stun || shield ? 0 : dmg,
+        skill != nullptr ? " - " : "", skill != nullptr ? skill->name : "",
+        stun ? " (stunned)" : shield ? " (on our shield)" : "");
 }
 
 void send_state() {
@@ -256,6 +274,15 @@ void send_state() {
 
 }
 
+int pvp_predict_damage(const MsgPvpHit& hit, uint8_t combat) {
+    if (!pvp_active() || hit.kind != kPvpHit) return 0;
+    const HitPower power = hit_power(hit);
+    if ((combat & 2) != 0) return power.skill != nullptr ? power.dmg : 0;
+    if ((combat & 4) != 0) return 0;
+    if (hit.blocked != 0 || (hit.atType & AT_TYPE_SHIELD_ATTACK) != 0) return 0;
+    return power.dmg;
+}
+
 void pvp_register_vars() {
     ConfigVarDesc enabled = CONFIG_VAR_DESC_INIT;
     enabled.name = "pvp_enabled";
@@ -268,14 +295,48 @@ void pvp_register_vars() {
     damage.type = CONFIG_VAR_INT;
     damage.default_int = 100;
     if (svc_config->register_var(mod_ctx, &damage, &s_damageVar) != MOD_OK) s_damageVar = 0;
+
+    ConfigVarDesc lockOn = CONFIG_VAR_DESC_INIT;
+    lockOn.name = "pvp_lock_on";
+    lockOn.type = CONFIG_VAR_BOOL;
+    lockOn.default_bool = true;
+    if (svc_config->register_var(mod_ctx, &lockOn, &s_lockOnVar) != MOD_OK) s_lockOnVar = 0;
+}
+
+ConfigVarHandle pvp_enabled_var() { return s_enabledVar; }
+ConfigVarHandle pvp_damage_var() { return s_damageVar; }
+ConfigVarHandle pvp_lock_on_var() { return s_lockOnVar; }
+
+bool pvp_lock_on() {
+    return pvp_active() && cfg_bool(s_lockOnVar, true);
+}
+
+void pvp_after_player(daAlink_c* alink) {
+    trim_invincibility(alink);
+    if (!s_pull.active) return;
+    if (alink == nullptr || !pvp_active() || dComIfGp_event_runCheck() || ++s_pull.frames > kPullMaxFrames) {
+        s_pull.active = false;
+        return;
+    }
+    cXyz at = alink->current.pos;
+    cXyz left(s_pull.to.x - at.x, s_pull.to.y - at.y, s_pull.to.z - at.z);
+    const f32 dist = std::sqrt(left.x * left.x + left.y * left.y + left.z * left.z);
+    if (dist <= kPullSpeed) {
+        at = s_pull.to;
+        s_pull.active = false;
+    } else {
+        at.x += left.x / dist * kPullSpeed;
+        at.y += left.y / dist * kPullSpeed;
+        at.z += left.z / dist * kPullSpeed;
+    }
+
+    const s16 facing = cLib_targetAngleY(&alink->current.pos, &s_pull.to);
+    alink->setPlayerPosAndAngle(&at, facing, TRUE);
 }
 
 bool pvp_active() {
-    return false;
-#if 0
     if (!coop_net_connected()) return false;
     return coop_net_is_host() ? cfg_bool(s_enabledVar, false) : s_hostEnabled;
-#endif
 }
 
 void pvp_update() {
@@ -287,6 +348,17 @@ void pvp_update() {
         s_shieldHitSet = false;
     }
 
+    if (s_pinFrames > 0) {
+        --s_pinFrames;
+        ++s_pinTotal;
+        if (alink == nullptr || !alink->checkCameraLargeDamage() || s_pinTotal > kPinMax) {
+            s_pinFrames = 0;
+        } else {
+            alink->onLargeDamageUpStop();
+        }
+    }
+
+    rival_update();
     if (!coop_net_connected()) return;
 
     if (coop_net_is_host()) {
@@ -296,13 +368,6 @@ void pvp_update() {
             send_state();
         }
     }
-
-    if (!pvp_active() || alink == nullptr || dComIfGp_event_runCheck()) return;
-    float x = 0.0f, y = 0.0f, z = 0.0f;
-    if (!puppet_hook_get_position(&x, &y, &z)) return;
-    const bool wolf = puppet_hook_is_wolf();
-    Hurtbox hb{cXyz(x, y, z), wolf ? 45.0f : 35.0f, wolf ? 90.0f : 150.0f};
-    check_attacks(alink, hb);
 }
 
 void pvp_on_connected() {
@@ -313,6 +378,7 @@ void pvp_on_connected() {
 
 void pvp_on_disconnected() {
     s_hostEnabled = false;
+    s_trimFrames = 0;
 }
 
 void pvp_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t from) {
@@ -330,6 +396,31 @@ void pvp_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t f
         if (size < sizeof(MsgPvpHit)) return;
         MsgPvpHit msg;
         std::memcpy(&msg, payload, sizeof(msg));
-        apply_hit(msg);
+        if (msg.to != coop_net_local_id() || !pvp_active()) return;
+        if (msg.kind == kPvpPin) {
+            daAlink_c* me = daAlink_getAlinkActorClass();
+            if (me != nullptr && me->checkCameraLargeDamage()) {
+                if (s_pinFrames == 0) {
+                    s_pinTotal = 0;
+                    coop_log::info("coop_mod: [PVP] pinned for an Ending Blow");
+                }
+                s_pinFrames = msg.atp != 0 ? msg.atp : kPinRefresh;
+            }
+            return;
+        }
+
+        daAlink_c* alink = daAlink_getAlinkActorClass();
+        bool pullBlocked = false;
+        if (msg.kind == kPvpPull && alink != nullptr && guarding(alink)) {
+            const cXyz from(msg.from[0], msg.from[1], msg.from[2]);
+            const s16 diff = static_cast<s16>(cLib_targetAngleY(&alink->current.pos, &from) -
+                                              alink->shape_angle.y);
+            pullBlocked = msg.blocked != 0 || (diff > -0x3000 && diff < 0x3000);
+        }
+        if (msg.kind == kPvpPull && !pullBlocked) {
+            start_pull(msg);
+        } else {
+            apply_hit(msg);
+        }
     }
 }

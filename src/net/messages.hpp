@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-const uint16_t kCoopProtocolVersion = 70;
+const uint16_t kCoopProtocolVersion = 72;
 
 const int kCoopMaxPlayers = 16;
 
@@ -352,6 +352,8 @@ struct MsgPresence {
 
     uint16_t life;
     uint16_t maxLife;
+
+    uint8_t storyBits;
 };
 
 struct MsgItem {
@@ -696,12 +698,21 @@ struct MsgPvpState {
     uint16_t damagePercent;
 };
 
+enum PvpHitKind : uint8_t {
+    kPvpHit = 0,
+    kPvpPull = 1,
+    kPvpPin = 2,
+};
 struct MsgPvpHit {
     uint32_t atType;
     uint8_t atp;
     uint8_t spl;
     uint8_t mtrl;
-    uint8_t source;
+    uint8_t to;
+    uint8_t kind;
+    uint8_t se;
+    uint8_t blocked;
+    uint8_t cut;
     float from[3];
 };
 

@@ -1125,9 +1125,14 @@ void apply_debug_give_kit() {
     dComIfGs_setCollectShield(COLLECT_HYLIAN_SHIELD);
     dComIfGs_setSelectEquipSword(dItemNo_MASTER_SWORD_e);
     dComIfGs_setSelectEquipShield(dItemNo_HYLIA_SHIELD_e);
+
+    static const u16 kHiddenSkills[] = {dSv_event_flag_c::F_0338, dSv_event_flag_c::F_0339,
+        dSv_event_flag_c::F_0340, dSv_event_flag_c::F_0341, dSv_event_flag_c::F_0342,
+        dSv_event_flag_c::F_0343, dSv_event_flag_c::F_0344};
+    for (u16 bit : kHiddenSkills) dComIfGs_onEventBit(bit);
     s_done = true;
     coop_log::info("coop_mod: [DEBUG] test kit given (rod, bombs, lantern, bow, boomerang, horse "
-                   "call, both swords, both shields)");
+                   "call, both swords, both shields, all seven hidden skills)");
 }
 
 void send_local_snapshot() {
@@ -1237,6 +1242,15 @@ void send_local_snapshot() {
         }
 
         snapshot.bootsVisible = alink->checkEquipHeavyBoots() ? 1 : 0;
+
+        snapshot.combat = static_cast<uint8_t>((alink->checkUpperGuardAnime() ? 1 : 0) |
+                                               (alink->checkCameraLargeDamage() ? 2 : 0) |
+                                               (alink->mDamageTimer != 0 ? 4 : 0));
+        for (int i = 0; i < 3; ++i) {
+            snapshot.hat[i] = alink->field_0x302c[7 + i];
+            snapshot.hat[3 + i] = alink->field_0x3040[7 + i];
+            snapshot.hat[6 + i] = alink->field_0x3066[i];
+        }
         snapshot.swordVisible = daAlink_c::checkSwordGet() ? 1 : 0;
         snapshot.shieldVisible = daAlink_c::checkShieldGet() ? 1 : 0;
         snapshot.swordJoint = alink->mLeftItemJntNo;
@@ -2686,6 +2700,7 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     puppet_hook_init();
     ganon_init();
     sumo_init();
+    rival_init();
     skipvote_init();
     skills_init();
     rando_init();
@@ -2749,6 +2764,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     update_pings();
     announce_local_pause();
     features_update();
+    version_update();
 
     rando_update();
     checks_update();

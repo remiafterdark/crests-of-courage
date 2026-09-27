@@ -474,7 +474,15 @@ const char* const kActNames[kActCount] = {
 void* s_act[kActCount] = {};
 
 using ActionFunc = daNpcWrestler_c::actionFunc;
-static_assert(sizeof(ActionFunc) == sizeof(void*), "a wrestler action is one code address");
+
+static_assert(sizeof(ActionFunc) >= sizeof(void*), "a wrestler action starts with its code address");
+
+ActionFunc action_at(void* at) {
+    ActionFunc action;
+    std::memset(&action, 0, sizeof(action));
+    std::memcpy(&action, &at, sizeof(at));
+    return action;
+}
 
 void* current_action(daNpcWrestler_c* w) {
     void* at = nullptr;
@@ -483,6 +491,8 @@ void* current_action(daNpcWrestler_c* w) {
 }
 
 void* landing_of(void* at) {
+#if defined(_MSC_VER) && defined(_M_X64)
+
     const u8* code = static_cast<const u8*>(at);
     for (int hop = 0; hop < 2 && code != nullptr && code[0] == 0xE9; ++hop) {
         s32 rel = 0;
@@ -490,6 +500,9 @@ void* landing_of(void* at) {
         code = code + 5 + rel;
     }
     return const_cast<u8*>(code);
+#else
+    return at;
+#endif
 }
 
 void* s_actGame[kActCount] = {};
@@ -497,8 +510,7 @@ void* s_actGame[kActCount] = {};
 bool set_action(daNpcWrestler_c* w, Act act) {
     void* at = s_actGame[act] != nullptr ? s_actGame[act] : s_act[act];
     if (at == nullptr) return false;
-    ActionFunc action;
-    std::memcpy(&action, &at, sizeof(at));
+    ActionFunc action = action_at(at);
     w->field_0xe96 = 3;
     if (w->field_0xdcc != nullptr) (w->*(w->field_0xdcc))(nullptr);
     w->field_0xe96 = 0;

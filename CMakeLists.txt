@@ -40,6 +40,7 @@ add_mod(coop_mod
              src/projectiles.cpp
              src/effects.cpp
              src/pvp.cpp
+             src/rival.cpp
              src/world.cpp
              src/enemies.cpp
              src/enemy_layout_wb.cpp
@@ -56,12 +57,18 @@ add_mod(coop_mod
              src/voices.cpp
              src/game_mode.cpp
              src/horses.cpp
+             src/version.cpp
     MOD_JSON mod.json
 )
 
 if(MSVC)
     target_compile_options(coop_mod PRIVATE /Zc:__cplusplus)
 endif()
+
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/mod.json" COOP_MOD_JSON)
+string(JSON COOP_MOD_VERSION GET "${COOP_MOD_JSON}" version)
+target_compile_definitions(coop_mod PRIVATE COOP_MOD_VERSION="${COOP_MOD_VERSION}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/mod.json")
 
 option(COOP_PUBLIC_BUILD "Build for publishing" OFF)
 if(COOP_PUBLIC_BUILD AND MSVC)

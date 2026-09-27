@@ -741,9 +741,12 @@ void run_self_test() {
     log_bomb_res_once();
     cXyz at(alink->current.pos.x + cM_ssin(alink->shape_angle.y) * 80.0f, alink->current.pos.y,
         alink->current.pos.z + cM_scos(alink->shape_angle.y) * 80.0f);
-    fopAc_ac_c* bomb = fopAcM_fastCreate(fpcNm_NBOMB_e,
-        static_cast<u32>(dBomb_c::PRM_BOMB_WAIT), &at, fopAcM_GetRoomNo(alink), nullptr, nullptr,
-        -1, nullptr, nullptr);
+    fopAc_ac_c* bomb = nullptr;
+    {
+        CoopActorLayer layer;
+        bomb = fopAcM_fastCreate(fpcNm_NBOMB_e, static_cast<u32>(dBomb_c::PRM_BOMB_WAIT), &at,
+            fopAcM_GetRoomNo(alink), nullptr, nullptr, -1, nullptr, nullptr);
+    }
     coop_log::warn("coop_mod: [SPAWN-SELFTEST] *** DEBUG *** dropped ONE bomb at "
                     "({:.0f},{:.0f},{:.0f}) -> {}",
         at.x, at.y, at.z, bomb != nullptr ? "created" : "FAILED");
@@ -941,9 +944,13 @@ void spawns_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_
         const csXyz angle(msg.angle[0], msg.angle[1], msg.angle[2]);
         ++s_creatingReplica;
         s_replicaBombKind = msg.procName == fpcNm_NBOMB_e ? msg.kind : 0xFF;
-        fopAc_ac_c* actor = fopAcM_fastCreate(msg.procName,
-            create_param_for_kind(msg.procName, msg.param, msg.kind), &pos,
-            static_cast<int>(msg.room), &angle, nullptr, -1, nullptr, nullptr);
+        fopAc_ac_c* actor = nullptr;
+        {
+            CoopActorLayer layer;
+            actor = fopAcM_fastCreate(msg.procName,
+                create_param_for_kind(msg.procName, msg.param, msg.kind), &pos,
+                static_cast<int>(msg.room), &angle, nullptr, -1, nullptr, nullptr);
+        }
         s_replicaBombKind = 0xFF;
         --s_creatingReplica;
         if (actor == nullptr) {

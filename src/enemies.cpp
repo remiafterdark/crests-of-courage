@@ -586,6 +586,13 @@ bool procname_is_boss(s16 name) {
 }
 
 bool syncable(fopAc_ac_c* actor) {
+    if (rival_is(actor)) return false;
+
+    {
+        const s16 name = fopAcM_GetName(actor);
+        if (name == fpcNm_E_YC_e || name == fpcNm_E_YR_e) return false;
+        if (name == fpcNm_E_RDY_e && dKy_darkworld_check()) return false;
+    }
 
     if (procname_is_boss(fopAcM_GetName(actor))) return false;
 
@@ -619,6 +626,8 @@ void* collect_enemy(void* proc, void* data) {
     if (fopAcM_GetGroup(actor) != fopAc_ENEMY_e && !trackedObject) return nullptr;
 
     if (fopAcM_GetName(actor) == fpcNm_NI_e) return nullptr;
+
+    if (rival_is(actor)) return nullptr;
     ++list->enemyActors;
 
     if (!syncable(actor)) return nullptr;
@@ -4783,6 +4792,12 @@ void enemies_init() {
     warn_if_debug_armed();
     log_anm_table();
     audit_layout_tables();
+}
+
+bool enemies_carried_by_other(fopAc_ac_c* actor) {
+    if (actor == nullptr) return false;
+    return carry_driven_elsewhere(static_cast<int8_t>(fopAcM_GetRoomNo(actor)),
+        compute_placement_key(actor));
 }
 
 void enemies_on_connected() {

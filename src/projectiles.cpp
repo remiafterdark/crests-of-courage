@@ -11,7 +11,9 @@
 #include "d/actor/d_a_arrow.h"
 #include "d/d_com_inf_game.h"
 #include "f_op/f_op_actor_mng.h"
+#include "f_pc/f_pc_layer.h"
 
+#include <cmath>
 #include <cstring>
 
 namespace {
@@ -23,6 +25,9 @@ fpc_ProcID s_reported[kTrackMax];
 int s_reportedNext = 0;
 fpc_ProcID s_remote[kTrackMax];
 int s_remoteNext = 0;
+
+fpc_ProcID s_stopped[kTrackMax];
+int s_stoppedNext = 0;
 bool s_inited = false;
 
 struct PendingShot {
@@ -38,6 +43,7 @@ void init_once() {
     for (int i = 0; i < kTrackMax; ++i) {
         s_reported[i] = kNoId;
         s_remote[i] = kNoId;
+        s_stopped[i] = kNoId;
     }
     s_inited = true;
 }
@@ -87,6 +93,139 @@ void apply_launch(daArrow_c* arrow, const MsgArrowShot& shot) {
     }
 }
 
+bool segment_meets_body(const cXyz& a, const cXyz& b, const cXyz& feet, f32 radius, f32 height) {
+
+    const f32 dx = b.x - a.x, dz = b.z - a.z;
+    const f32 len2 = dx * dx + dz * dz;
+    f32 t = 0.0f;
+    if (len2 > 0.0001f) {
+        t = ((feet.x - a.x) * dx + (feet.z - a.z) * dz) / len2;
+        if (t < 0.0f) t = 0.0f;
+        if (t > 1.0f) t = 1.0f;
+    }
+    const f32 px = a.x + dx * t - feet.x, pz = a.z + dz * t - feet.z;
+    if (px * px + pz * pz > radius * radius) return false;
+    const f32 y = a.y + (b.y - a.y) * t;
+    return y >= feet.y - 10.0f && y <= feet.y + height;
+}
+
+void stop_remote_arrows_on_us(daAlink_c* alink) {
+    if (!pvp_active()) return;
+    const bool wolf = alink->checkWolf() != 0;
+    const f32 radius = wolf ? 45.0f : 35.0f;
+    const f32 height = wolf ? 90.0f : 150.0f;
+    ArrowList list{};
+    fopAcM_Search(collect_arrows, &list);
+    for (int i = 0; i < list.count; ++i) {
+        daArrow_c* arrow = list.arrows[i];
+        const fpc_ProcID id = fopAcM_GetID(arrow);
+        if (!in_list(s_remote, id) || in_list(s_stopped, id)) continue;
+        const u32 param = fopAcM_GetParam(arrow);
+        if ((param != 1 && param != 2) || arrow->speedF <= 0.0f || arrow->field_0x93f != 0) continue;
+        const cXyz from = arrow->current.pos;
+        const cXyz to(from.x + arrow->speed.x, from.y + arrow->speed.y, from.z + arrow->speed.z);
+        if (!segment_meets_body(from, to, alink->current.pos, radius, height)) continue;
+        push_id(s_stopped, s_stoppedNext, id);
+
+        cXyz at = from;
+        cXyz toUs(alink->current.pos.x - from.x, 0.0f, alink->current.pos.z - from.z);
+        const f32 d = std::sqrt(toUs.x * toUs.x + toUs.z * toUs.z);
+        if (d > radius) {
+            const f32 k = (d - radius) / d;
+            at.set(from.x + toUs.x * k, from.y + (to.y - from.y) * k, from.z + toUs.z * k);
+        }
+        if (arrow->mArrowType == daArrow_c::ARROW_TYPE_SLING) {
+            arrow->current.pos = at;
+            arrow->procSlingHitInit(&at, nullptr);
+        } else {
+            arrow->current.pos = at;
+            arrow->speedF = 0.0f;
+            arrow->speed.set(0.0f, 0.0f, 0.0f);
+            arrow->field_0x93f = 1;
+        }
+        coop_log::info("coop_mod: [PVP] their {} stopped on us",
+            arrow->mArrowType == daArrow_c::ARROW_TYPE_SLING ? "pellet" : "arrow");
+    }
+}
+
+struct BombArrowSeen {
+    fpc_ProcID id = kNoId;
+    cXyz pos;
+    bool ours = false;
+    bool seen = false;
+};
+BombArrowSeen s_bombArrows[kArrowListMax];
+
+struct BlastSite {
+    cXyz pos;
+    u32 frame = 0;
+    bool used = false;
+};
+const int kBlastSites = 16;
+const u32 kBlastMemoryFrames = 90;
+const f32 kBlastReach = 300.0f;
+BlastSite s_ourBlasts[kBlastSites];
+int s_ourBlastNext = 0;
+u32 s_frame = 0;
+
+void follow_bomb_arrows(const ArrowList& list) {
+    ++s_frame;
+    for (BombArrowSeen& b : s_bombArrows) b.seen = false;
+    for (int i = 0; i < list.count; ++i) {
+        daArrow_c* arrow = list.arrows[i];
+        if (arrow->mArrowType != daArrow_c::ARROW_TYPE_BOMB) continue;
+        const fpc_ProcID id = fopAcM_GetID(arrow);
+        BombArrowSeen* slot = nullptr;
+        BombArrowSeen* free = nullptr;
+        for (BombArrowSeen& b : s_bombArrows) {
+            if (b.id == id) slot = &b;
+            if (b.id == kNoId && free == nullptr) free = &b;
+        }
+        if (slot == nullptr) slot = free;
+        if (slot == nullptr) continue;
+        slot->id = id;
+        slot->pos = arrow->current.pos;
+        slot->ours = !in_list(s_remote, id);
+        slot->seen = true;
+    }
+    for (BombArrowSeen& b : s_bombArrows) {
+        if (b.id == kNoId || b.seen) continue;
+        if (b.ours) {
+            BlastSite& site = s_ourBlasts[s_ourBlastNext];
+            s_ourBlastNext = (s_ourBlastNext + 1) % kBlastSites;
+            site.pos = b.pos;
+            site.frame = s_frame;
+            site.used = true;
+        }
+        b = BombArrowSeen{};
+    }
+}
+
+}
+
+bool projectiles_blast_is_ours(fopAc_ac_c* blast) {
+    if (blast == nullptr) return false;
+    for (const BlastSite& site : s_ourBlasts) {
+        if (!site.used || s_frame - site.frame > kBlastMemoryFrames) continue;
+        const f32 dx = blast->current.pos.x - site.pos.x, dy = blast->current.pos.y - site.pos.y,
+                  dz = blast->current.pos.z - site.pos.z;
+        if (dx * dx + dy * dy + dz * dz <= kBlastReach * kBlastReach) return true;
+    }
+    return false;
+}
+
+layer_class* coop_enter_actor_layer() {
+    layer_class* prev = fpcLy_CurrentLayer();
+    daAlink_c* alink = daAlink_getAlinkActorClass();
+    if (alink != nullptr) {
+        layer_class* linkLayer = static_cast<base_process_class*>(alink)->layer_tag.layer;
+        if (linkLayer != nullptr) fpcLy_SetCurrentLayer(linkLayer);
+    }
+    return prev;
+}
+
+void coop_leave_actor_layer(layer_class* prev) {
+    if (prev != nullptr) fpcLy_SetCurrentLayer(prev);
 }
 
 bool projectiles_is_remote(fopAc_ac_c* actor) {
@@ -119,9 +258,11 @@ void projectiles_update() {
     }
 
     if (!coop_net_connected()) return;
+    stop_remote_arrows_on_us(alink);
 
     ArrowList list{};
     fopAcM_Search(collect_arrows, &list);
+    follow_bomb_arrows(list);
     for (int i = 0; i < list.count; ++i) {
         daArrow_c* arrow = list.arrows[i];
         const fpc_ProcID id = fopAcM_GetID(arrow);
@@ -166,8 +307,12 @@ void projectiles_on_message(const uint8_t* payload, size_t size) {
     const u8 param = (shot.type == daArrow_c::ARROW_TYPE_SLING) ? 1 : (shot.param == 2 ? 2 : 1);
     cXyz pos(shot.startPos[0], shot.startPos[1], shot.startPos[2]);
     csXyz angle(shot.angleX, shot.angleY, 0);
-    fopAc_ac_c* actor = fopAcM_fastCreate(fpcNm_ARROW_e, (static_cast<u32>(shot.type) << 8) | param,
-        &pos, fopAcM_GetRoomNo(alink), &angle, nullptr, -1, nullptr, nullptr);
+    fopAc_ac_c* actor = nullptr;
+    {
+        CoopActorLayer layer;
+        actor = fopAcM_fastCreate(fpcNm_ARROW_e, (static_cast<u32>(shot.type) << 8) | param, &pos,
+            fopAcM_GetRoomNo(alink), &angle, nullptr, -1, nullptr, nullptr);
+    }
     if (actor == nullptr) {
         coop_log::warn("coop_mod: [ARROW] could not spawn their arrow (type {})", shot.type);
         return;

@@ -152,8 +152,12 @@ bool horses_spawn_for(uint8_t player, const cXyz& pos, int16_t angleY) {
     if (alink == nullptr) return false;
 
     csXyz angle(0, angleY, 0);
-    fopAc_ac_c* horse = fopAcM_fastCreate(fpcNm_HORSE_e, 0xFFFFFFFF, &pos,
-        fopAcM_GetRoomNo(alink), &angle, nullptr, -1, nullptr, nullptr, 0, 0);
+    fopAc_ac_c* horse = nullptr;
+    {
+        CoopActorLayer layer;
+        horse = fopAcM_fastCreate(fpcNm_HORSE_e, 0xFFFFFFFF, &pos, fopAcM_GetRoomNo(alink), &angle,
+            nullptr, -1, nullptr, nullptr, 0, 0);
+    }
     if (horse == nullptr) return false;
 
     s_horses[player].actor = horse;

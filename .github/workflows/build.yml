@@ -4,10 +4,11 @@ name: build
 env:
   SYMGEN_VERSION: v1.2.4
 
-# tags only, so a release builds once. use the Actions tab (run workflow) to build off a branch.
+# tags build a release. the ci branch builds without one, to try every platform first.
 on:
   push:
     tags: ["v*"]
+    branches: ["ci"]
   workflow_dispatch:
 
 concurrency:
@@ -99,7 +100,18 @@ jobs:
           cmake -B build "${args[@]}"
 
       - name: build
-        run: cmake --build build --parallel
+        shell: bash
+        run: |
+          set -o pipefail
+          # keep going past the first error, and put the errors on the run page itself
+          if ! cmake --build build --parallel -- -k 0 2>&1 | tee build.log; then
+            grep -E "error:|error [A-Z]+[0-9]+:" build.log | sed 's/%/%25/g' | awk '!seen[$0]++' | head -60 > errors.txt || true
+            split -l 12 errors.txt part_
+            for f in part_*; do
+              [ -s "$f" ] && echo "::error title=${{matrix.platform}}::$(awk 'BEGIN{ORS="%0A"} {print}' "$f")"
+            done
+            exit 1
+          fi
 
       - name: upload
         uses: actions/upload-artifact@v4

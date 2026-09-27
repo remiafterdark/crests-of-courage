@@ -437,8 +437,9 @@ f32 hurt_alpha(uint8_t id, const CoopPeer& peer) {
         w.show = 0;
         return 0.0f;
     }
-    if (w.known && peer.life < w.life) w.show = hurt_show_ticks();
-    w.life = peer.life;
+    const uint16_t life = features_shown_life(id);
+    if (w.known && life < w.life) w.show = hurt_show_ticks();
+    w.life = life;
     w.known = true;
     if (w.show <= 0) return 0.0f;
     --w.show;
@@ -484,7 +485,7 @@ void draw_world_hearts(J2DPane* realGroup, dMeter2Draw_c* real, J2DGrafContext* 
         const f32 eff = realSy * k;
         s_ours.heartN->scale(realSx * k, eff);
         s_ours.heartMgr->setAlphaRate(alphaRate * fade);
-        set_hearts(p.maxLife, p.life);
+        set_hearts(p.maxLife, features_shown_life(id));
 
         ParentSpace ps = parent_space_of(s_ours.heartN);
         f32 dx = 0.0f, dy = 0.0f;
@@ -538,9 +539,9 @@ void draw_squad() {
         SquadMember& m = members[count++];
         m.id = id;
         m.name = p.name;
-        m.life = p.life;
+        m.life = features_shown_life(id);
         m.maxLife = p.maxLife;
-        m.low = p.maxLife >= 5 && p.life <= p.maxLife / 5;
+        m.low = p.maxLife >= 5 && m.life <= p.maxLife / 5;
         m.paused = coop_player_paused(id);
         const bool sameStage = myStage != nullptr && std::strncmp(myStage, p.stage, 8) == 0;
         m.rank = !sameStage ? 2 : (p.curRoom == myRoom ? 0 : 1);

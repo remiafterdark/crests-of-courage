@@ -211,6 +211,8 @@ struct Puppet {
     J3DModel* handsModel = nullptr;
     J3DModel* bootModels[2] = {nullptr, nullptr};
     u8 bootsVisible = 0;
+    u8 combat = 0;
+    u32 hurtSince = 0;
     u8 handL = 1;
     u8 handR = 6;
     J3DModel* swordModel = nullptr;
@@ -315,6 +317,8 @@ struct Puppet {
     int getItemArcOldTimer = 0;
     u8 pendingOutfit = kPuppetOutfitDefault;
     s16 hatPitch = 0;
+    s16 hat[9] = {};
+    bool hatHeard = false;
     J3DModel* chainLinks[kChainLinkPool] = {};
     int chainLinksUsed = 0;
     J3DModel* rodSegModels[kRodSegments] = {};
@@ -1163,6 +1167,8 @@ void force_diff_recognizes_stage_count(J3DModel* model) {
 int kHatJoint6 = 6;
 int kHatJoint7 = 7;
 
+int kHatTailLen = 2;
+
 bool joint_name_split(const char* name, char* prefix, size_t prefixSize, int& number) {
     if (name == nullptr) return false;
     const size_t len = std::strlen(name);
@@ -1180,6 +1186,7 @@ bool joint_name_split(const char* name, char* prefix, size_t prefixSize, int& nu
 void resolve_hat_tail_joints(J3DModelData* modelData) {
     kHatJoint6 = -1;
     kHatJoint7 = -1;
+    kHatTailLen = 2;
     if (modelData == nullptr) return;
     JUTNameTab* names = modelData->getJointName();
     const u16 jointNum = modelData->getJointNum();
@@ -1240,12 +1247,14 @@ void resolve_hat_tail_joints(J3DModelData* modelData) {
         if (outfit_files(pup().outfit).hasKmdlHatTail && jointNum > 7) {
             kHatJoint6 = 6;
             kHatJoint7 = 7;
+            kHatTailLen = jointNum - 6 < 4 ? jointNum - 6 : 4;
             coop_log::info("coop_mod: [HAT] no tail matched on the hero's head - keeping 6 and 7");
         }
         return;
     }
     kHatJoint6 = bestStart;
     kHatJoint7 = bestStart + 1;
+    kHatTailLen = bestLen < 4 ? bestLen : 4;
     coop_log::info("coop_mod: [HAT] tail '{}' is {} segments from joint {} - swaying {} and {}",
         bestPrefix, bestLen, bestStart, kHatJoint6, kHatJoint7);
 }
@@ -1255,7 +1264,25 @@ int puppet_hat_tail_callback(J3DJoint* joint, int param1) {
         return 1;
     }
     const int jointNo = joint->getJntNo();
-    if (kHatJoint6 < 0 || (jointNo != kHatJoint6 && jointNo != kHatJoint7)) return 1;
+    const int seg = jointNo - kHatJoint6;
+    if (kHatJoint6 < 0 || seg < 0 || seg >= kHatTailLen) return 1;
+
+    if (pup().hatHeard) {
+        const s16* h = pup().hat;
+        s16 yaw, pitch;
+        switch (seg) {
+        case 0: yaw = static_cast<s16>(h[3] >> 1); pitch = static_cast<s16>(h[0] >> 1); break;
+        case 1: yaw = static_cast<s16>(h[3] >> 1); pitch = static_cast<s16>((h[0] >> 1) + h[6]); break;
+        case 2: yaw = h[4]; pitch = static_cast<s16>(h[1] + h[7]); break;
+        default: yaw = h[5]; pitch = static_cast<s16>(h[2] + h[8]); break;
+        }
+        mDoMtx_stack_c::copy(J3DSys::mCurrentMtx);
+        mDoMtx_stack_c::XYZrotM(0, yaw, pitch);
+        pup().hatModel->setAnmMtx(jointNo, mDoMtx_stack_c::get());
+        cMtx_copy(mDoMtx_stack_c::get(), J3DSys::mCurrentMtx);
+        return 1;
+    }
+    if (seg > 1) return 1;
 
     if (jointNo == kHatJoint6) {
 
@@ -1455,7 +1482,7 @@ void set_hat_tail_callbacks(J3DModel* hatModel) {
     J3DModelData* modelData = hatModel != nullptr ? hatModel->getModelData() : nullptr;
     if (modelData == nullptr) return;
     const u16 jointNum = modelData->getJointNum();
-    for (int j = kHatJoint6; j <= kHatJoint7 && j < jointNum; ++j) {
+    for (int j = kHatJoint6; j < kHatJoint6 + kHatTailLen && j < jointNum; ++j) {
         J3DJoint* joint = modelData->getJointNodePointer(j);
         if (joint != nullptr) joint->setCallBack(puppet_hat_tail_callback);
     }
@@ -3454,6 +3481,7 @@ void on_alink_execute_puppet_post(ModContext*, void*, void*, void*) {
     fx_owner_window(false);
     daAlink_c* alink = daAlink_getAlinkActorClass();
     sumo_after_player(alink);
+    pvp_after_player(alink);
     if (alink == nullptr) {
         for (int i = 0; i < kMaxPuppets; ++i) {
             PuppetScope scope(static_cast<uint8_t>(i));
@@ -3721,6 +3749,9 @@ void puppet_hook_on_network_snapshot(uint8_t playerId, float x, float y, float z
         for (int a = 0; a < 3; ++a) pup().footAngles[i][a] = equipment.footAngles[i][a];
     }
     pup().bootsVisible = equipment.bootsVisible;
+    pup().combat = equipment.combat;
+    for (int i = 0; i < 9; ++i) pup().hat[i] = equipment.hat[i];
+    pup().hatHeard = true;
     pup().bodyRotX = equipment.bodyRotX;
     pup().bodyRotY = equipment.bodyRotY;
     pup().bodyRotZ = equipment.bodyRotZ;
@@ -4058,8 +4089,25 @@ bool puppet_hook_player_active(uint8_t playerId) {
            s_puppetSlots[playerId].model != nullptr;
 }
 
+uint8_t puppet_hook_combat_of(uint8_t playerId) {
+    return puppet_hook_player_active(playerId) ? s_puppetSlots[playerId].combat : 0;
+}
+
 bool puppet_hook_is_wolf_of(uint8_t playerId) {
     return puppet_hook_player_active(playerId) && outfit_files(s_puppetSlots[playerId].outfit).isWolf;
+}
+
+bool puppet_hook_torso_of(uint8_t playerId, cXyz* out) {
+    if (out == nullptr || !puppet_hook_player_active(playerId)) return false;
+    const Puppet& q = s_puppetSlots[playerId];
+    J3DModelData* data = q.model->getModelData();
+    if (data == nullptr || data->getJointNum() <= kBackbone2Joint) return false;
+    MtxP m = q.model->getAnmMtx(kBackbone2Joint);
+    const cXyz torso(m[0][3], m[1][3], m[2][3]);
+    const f32 dx = torso.x - q.pos.x, dy = torso.y - q.pos.y, dz = torso.z - q.pos.z;
+    if (!(dx * dx + dy * dy + dz * dz < 300.0f * 300.0f)) return false;
+    *out = torso;
+    return true;
 }
 
 bool puppet_hook_get_pose_of(uint8_t playerId, float* x, float* y, float* z, short* angleY,
@@ -5481,6 +5529,12 @@ struct PuppetPlaceOverride {
             angle = pup().angle;
             pup().pos = at;
             pup().angle = turn;
+        } else if (rival_hooked_pos(s_pupId, &at)) {
+
+            on = true;
+            pos = pup().pos;
+            angle = pup().angle;
+            pup().pos = at;
         }
     }
     ~PuppetPlaceOverride() {
@@ -5490,10 +5544,42 @@ struct PuppetPlaceOverride {
     }
 };
 
+struct PuppetHurtTint {
+    dKy_tevstr_c* tev = nullptr;
+    GXColor saved{};
+    void apply(daAlink_c* alink, Puppet& q, u32 frame) {
+        if ((q.combat & 4) == 0) {
+            q.hurtSince = 0;
+            return;
+        }
+        if (q.hurtSince == 0) q.hurtSince = frame != 0 ? frame : 1;
+        int timer = 48 - static_cast<int>(frame - q.hurtSince);
+        if (timer < 1) timer = 1;
+        int r = 5;
+        if (timer > 32) {
+            r = 15;
+        } else if (timer > 16) {
+            r = 10;
+        }
+        const f32 pulse = std::fabs(cM_ssin(static_cast<s16>(timer * 0x800)));
+        tev = &alink->tevStr;
+        saved = tev->TevKColor;
+        tev->TevKColor.r = static_cast<u8>(r * pulse);
+        tev->TevKColor.g = 0;
+        tev->TevKColor.b = 0;
+    }
+    ~PuppetHurtTint() {
+        if (tev != nullptr) tev->TevKColor = saved;
+    }
+};
+
 void draw_one_puppet(daAlink_c* alink) {
     PuppetPlaceOverride place;
 
     if (alink->mClothesChangeWaitTimer != 0) return;
+
+    PuppetHurtTint hurt;
+    hurt.apply(alink, pup(), s_puppetFrame);
 
     PuppetWarpScope warp;
     if (pup().warpOn && features_puppet_warp_fx()) {

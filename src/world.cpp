@@ -1568,6 +1568,12 @@ void world_update() {
         return;
     }
 
+    if (!rando_join_sync_allowed()) {
+        s_base.have = false;
+        s_heldWorldCount = 0;
+        return;
+    }
+
     if (s_heldWorldCount > 0 && !local_mid_sequence()) {
         coop_log::info("coop_mod: [WORLD] sequence over - applying {} held update(s)",
             s_heldWorldCount);
@@ -1608,6 +1614,7 @@ void world_on_connected() {
 }
 
 void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t from) {
+    if (!rando_join_sync_allowed()) return;
     if (type == kMsgWorldSyncRequest) {
         if (size < sizeof(MsgWorldSyncRequest) || !coop_session(kSessDungeon, cfg_bool(s_dungeonVar, true))) return;
         MsgWorldSyncRequest req;

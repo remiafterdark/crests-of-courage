@@ -59,7 +59,9 @@ bool s_resolved = false;
 bool s_registered = false;
 bool s_intent = false;
 
-int s_promptIn = -1;
+bool s_prompted = false;
+int s_loadedTicks = 0;
+const int kPromptAfterLoadTicks = 45;
 uint32_t s_tick = 0;
 
 std::string s_localSeed;
@@ -75,9 +77,14 @@ struct SeedInfo {
 SeedInfo s_hostSeed;
 bool s_warnedMismatch = false;
 bool s_requested = false;
+uint32_t s_requestTick = 0;
+
+const uint32_t kSeedRetryTicks = 300;
 std::vector<uint8_t> s_incoming;
 uint32_t s_incomingCrc = 0;
 uint32_t s_incomingGot = 0;
+
+std::vector<uint8_t> s_incomingHave;
 
 struct Outgoing {
     uint8_t to = kCoopNoPlayer;
@@ -85,7 +92,7 @@ struct Outgoing {
     uint32_t crc = 0;
     uint32_t offset = 0;
 };
-Outgoing s_out;
+Outgoing s_outs[kCoopMaxPlayers];
 
 uint32_t crc32(const uint8_t* data, size_t size) {
     uint32_t crc = 0xFFFFFFFFu;
@@ -238,14 +245,18 @@ void on_set_mode_post(ModContext*, void* args, void*, void*) {
     }
 }
 
-ModResult on_our_mode_activated(void*, ModError*) { return MOD_OK; }
+ModResult on_our_mode_activated(void*, ModError*) {
+    version_remind();
+    return MOD_OK;
+}
 
 void forward_to_rando();
 
 ModResult on_our_mode_play(void*, ModError*) {
     s_intent = true;
+    s_prompted = false;
+    s_loadedTicks = 0;
     forward_to_rando();
-    s_promptIn = 120;
     return MOD_OK;
 }
 
@@ -335,8 +346,12 @@ void announce_seed() {
     coop_net_send(kMsgRandoSeed, &msg, sizeof(msg));
 }
 
-void pump_outgoing() {
+void pump_one(Outgoing& s_out) {
     if (s_out.to == kCoopNoPlayer) return;
+    if (!coop_net_player_present(s_out.to)) {
+        s_out = Outgoing{};
+        return;
+    }
     const uint32_t kPerTick = 4;
     for (uint32_t i = 0; i < kPerTick && s_out.offset < s_out.data.size(); ++i) {
         uint8_t buf[sizeof(MsgRandoChunk) + kRandoChunkBytes];
@@ -353,6 +368,23 @@ void pump_outgoing() {
     if (s_out.offset >= s_out.data.size()) s_out = Outgoing{};
 }
 
+void pump_outgoing() {
+    for (Outgoing& out : s_outs) pump_one(out);
+}
+
+void request_seed(const SeedInfo& seed) {
+    s_requested = true;
+    s_requestTick = s_tick;
+    s_incoming.assign(seed.size, 0);
+    s_incomingHave.assign((seed.size + kRandoChunkBytes - 1) / kRandoChunkBytes, 0);
+    s_incomingCrc = seed.crc;
+    s_incomingGot = 0;
+    MsgRandoSeedRequest req{};
+    std::strncpy(req.hash, seed.hash.c_str(), sizeof(req.hash) - 1);
+    coop_net_send_to(kCoopHostId, kMsgRandoSeedRequest, &req, sizeof(req));
+    coop_log::info("coop_mod: [RANDO] asking the host for seed '{}'", seed.hash);
+}
+
 void on_seed_announced(const MsgRandoSeed& msg) {
     SeedInfo seed;
     seed.hash.assign(msg.hash, strnlen(msg.hash, sizeof(msg.hash)));
@@ -367,16 +399,7 @@ void on_seed_announced(const MsgRandoSeed& msg) {
         coop_log::info("coop_mod: [RANDO] the host plays seed '{}'", seed.hash);
     }
     s_hostSeedFileOk = have_seed(seed);
-    if (!s_requested && !s_hostSeedFileOk) {
-        s_requested = true;
-        s_incoming.assign(seed.size, 0);
-        s_incomingCrc = seed.crc;
-        s_incomingGot = 0;
-        MsgRandoSeedRequest req{};
-        std::strncpy(req.hash, seed.hash.c_str(), sizeof(req.hash) - 1);
-        coop_net_send_to(kCoopHostId, kMsgRandoSeedRequest, &req, sizeof(req));
-        coop_log::info("coop_mod: [RANDO] asking the host for seed '{}'", seed.hash);
-    }
+    if (!s_requested && !s_hostSeedFileOk) request_seed(seed);
 
     if (in_rando_mode() && !s_localSeed.empty() && s_localSeed != seed.hash && !s_warnedMismatch &&
         s_forceTries >= 3) {
@@ -393,8 +416,15 @@ void on_chunk(const uint8_t* payload, size_t size) {
     std::memcpy(&head, payload, sizeof(head));
     if (head.crc != s_incomingCrc || size < sizeof(head) + head.length) return;
     if (static_cast<size_t>(head.offset) + head.length > s_incoming.size()) return;
+    if (head.offset % kRandoChunkBytes != 0) return;
+    const size_t chunk = head.offset / kRandoChunkBytes;
+    if (chunk >= s_incomingHave.size()) return;
     std::memcpy(s_incoming.data() + head.offset, payload + sizeof(head), head.length);
-    s_incomingGot += head.length;
+    if (s_incomingHave[chunk] == 0) {
+        s_incomingHave[chunk] = 1;
+        s_incomingGot += head.length;
+    }
+    s_requestTick = s_tick;
     if (s_incomingGot < s_incoming.size()) return;
     if (crc32(s_incoming.data(), s_incoming.size()) != s_incomingCrc) {
         coop_log::warn("coop_mod: [RANDO] the host's seed arrived damaged - asking again");
@@ -402,8 +432,10 @@ void on_chunk(const uint8_t* payload, size_t size) {
     } else {
         write_seed(s_hostSeed.hash, s_incoming);
         s_hostSeedFileOk = have_seed(s_hostSeed);
+        s_requested = false;
     }
     s_incoming.clear();
+    s_incomingHave.clear();
 }
 
 }
@@ -424,9 +456,13 @@ void rando_update() {
     ++s_tick;
     resolve_once();
     if (!s_registered && s_tick % 30 == 0 && rando_installed()) register_our_mode();
-    if (s_promptIn > 0 && --s_promptIn == 0) {
-        s_promptIn = -1;
-        if (!coop_net_connected() && !coop_net_connecting()) game_mode_prompt_connect();
+    if (s_intent && !s_prompted && in_rando_mode()) {
+        if (daAlink_getAlinkActorClass() == nullptr) {
+            s_loadedTicks = 0;
+        } else if (++s_loadedTicks >= kPromptAfterLoadTicks) {
+            s_prompted = true;
+            if (!coop_net_connected() && !coop_net_connecting()) game_mode_prompt_connect();
+        }
     }
     if (!in_rando_mode()) {
 
@@ -441,9 +477,16 @@ void rando_update() {
         s_forcedFrom.clear();
         s_hostSeed = SeedInfo{};
         s_requested = false;
-        s_out = Outgoing{};
+        for (Outgoing& out : s_outs) out = Outgoing{};
         s_incoming.clear();
+        s_incomingHave.clear();
         return;
+    }
+
+    if (s_requested && !s_hostSeedFileOk && !s_hostSeed.hash.empty() &&
+        s_tick - s_requestTick > kSeedRetryTicks) {
+        coop_log::warn("coop_mod: [RANDO] the host's seed stopped arriving - asking again");
+        request_seed(s_hostSeed);
     }
     const uint32_t roster = coop_net_roster();
     if (s_tick % 300 == 0 || roster != s_announcedRoster || s_localSeed != s_announcedSeed) {
@@ -469,7 +512,7 @@ void rando_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
         if (hash != s_localSeed || !read_seed(hash, out.data)) return;
         out.to = from;
         out.crc = crc32(out.data.data(), out.data.size());
-        s_out = std::move(out);
+        s_outs[from] = std::move(out);
         coop_log::info("coop_mod: [RANDO] sending seed '{}' to player {}", hash, from);
     } else if (type == kMsgRandoChunk && !coop_net_is_host()) {
         on_chunk(payload, size);

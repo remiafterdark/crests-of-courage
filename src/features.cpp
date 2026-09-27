@@ -951,6 +951,27 @@ void send_hello() {
     coop_net_send(kMsgHello, &msg, sizeof(msg));
 }
 
+const u16 kSharedStoryFlags[] = {dSv_event_flag_c::M_067};
+
+uint8_t shared_story_bits() {
+    if (daAlink_getAlinkActorClass() == nullptr) return 0;
+    uint8_t bits = 0;
+    for (int i = 0; i < static_cast<int>(sizeof(kSharedStoryFlags) / sizeof(kSharedStoryFlags[0])); ++i) {
+        if (dComIfGs_isEventBit(kSharedStoryFlags[i])) bits |= static_cast<uint8_t>(1u << i);
+    }
+    return bits;
+}
+
+void take_shared_story_bits(uint8_t bits) {
+    if (bits == 0 || daAlink_getAlinkActorClass() == nullptr || dComIfGp_event_runCheck()) return;
+    for (int i = 0; i < static_cast<int>(sizeof(kSharedStoryFlags) / sizeof(kSharedStoryFlags[0])); ++i) {
+        if ((bits & (1u << i)) == 0 || dComIfGs_isEventBit(kSharedStoryFlags[i])) continue;
+        dComIfGs_onEventBit(kSharedStoryFlags[i]);
+        coop_log::info("coop_mod: [STORY] shared flag {:#06x} on from another player",
+            kSharedStoryFlags[i]);
+    }
+}
+
 void send_presence() {
     MsgPresence msg{};
     copy_name(msg.name, features_local_name());
@@ -973,8 +994,18 @@ void send_presence() {
         msg.life = dComIfGs_getLife();
         msg.maxLife = dComIfGs_getMaxLife();
     }
+    msg.storyBits = shared_story_bits();
     coop_net_send(kMsgPresence, &msg, sizeof(msg));
 }
+
+struct LifeGuess {
+    bool on = false;
+    uint16_t base = 0;
+    int pending = 0;
+    uint32_t tick = 0;
+};
+LifeGuess s_lifeGuess[kCoopMaxPlayers];
+const uint32_t kLifeGuessTicks = 60;
 
 void announce_peer_once(uint8_t from) {
     if (from >= kCoopMaxPlayers || s_peerAnnounced[from] || !s_peers[from].present) return;
@@ -1025,6 +1056,7 @@ void on_presence(const uint8_t* payload, size_t size, uint8_t from) {
     peer_slot(from).y = msg.y;
     peer_slot(from).z = msg.z;
     peer_slot(from).angleY = msg.angleY;
+    take_shared_story_bits(msg.storyBits);
 
     if (peer_slot(from).skinStamp != msg.skinStamp) {
         peer_slot(from).skinStamp = msg.skinStamp;
@@ -1436,8 +1468,11 @@ void features_update() {
         return;
     }
 
-    if (++s_presenceTicks >= 30) {
+    static uint16_t s_sentLife = 0xFFFF;
+    const uint16_t lifeNow = dComIfGs_getLife();
+    if (++s_presenceTicks >= 30 || (lifeNow != s_sentLife && s_presenceTicks >= 2)) {
         s_presenceTicks = 0;
+        s_sentLife = lifeNow;
         send_presence();
     }
     if (coop_net_is_host() && ++s_timeTicks >= 60) {
@@ -1843,4 +1878,31 @@ bool features_reload_at_player(uint8_t playerId) {
 
 void features_debug_receive_item(uint8_t item, uint8_t from) {
     apply_remote_item(item, from);
+}
+
+void features_guess_damage(uint8_t playerId, int dmg) {
+    if (playerId >= kCoopMaxPlayers || dmg <= 0) return;
+    const CoopPeer& p = features_peer_of(playerId);
+    if (!p.present || !p.lifeKnown) return;
+    LifeGuess& g = s_lifeGuess[playerId];
+    if (!g.on || g.base != p.life) {
+        g.on = true;
+        g.base = p.life;
+        g.pending = 0;
+    }
+    g.pending += dmg;
+    g.tick = s_invTick;
+}
+
+uint16_t features_shown_life(uint8_t playerId) {
+    if (playerId >= kCoopMaxPlayers) return 0;
+    const CoopPeer& p = features_peer_of(playerId);
+    LifeGuess& g = s_lifeGuess[playerId];
+    if (!g.on) return p.life;
+    if (p.life != g.base || s_invTick - g.tick > kLifeGuessTicks) {
+        g.on = false;
+        return p.life;
+    }
+    const int shown = static_cast<int>(p.life) - g.pending;
+    return static_cast<uint16_t>(shown > 0 ? shown : 0);
 }

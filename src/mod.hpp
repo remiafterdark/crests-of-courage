@@ -468,6 +468,19 @@ void projectiles_on_message(const uint8_t* payload, size_t size);
 
 bool projectiles_is_remote(fopAc_ac_c* actor);
 
+struct layer_class;
+layer_class* coop_enter_actor_layer();
+void coop_leave_actor_layer(layer_class* prev);
+struct CoopActorLayer {
+    layer_class* prev;
+    CoopActorLayer() : prev(coop_enter_actor_layer()) {}
+    ~CoopActorLayer() { coop_leave_actor_layer(prev); }
+    CoopActorLayer(const CoopActorLayer&) = delete;
+    CoopActorLayer& operator=(const CoopActorLayer&) = delete;
+};
+bool puppet_hook_torso_of(uint8_t playerId, cXyz* out);
+bool projectiles_blast_is_ours(fopAc_ac_c* blast);
+
 void fx_init();
 void fx_update();
 
@@ -483,6 +496,26 @@ void pvp_on_disconnected();
 void pvp_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t from);
 
 bool pvp_active();
+bool pvp_lock_on();
+void pvp_after_player(daAlink_c* alink);
+ConfigVarHandle pvp_enabled_var();
+ConfigVarHandle pvp_damage_var();
+ConfigVarHandle pvp_lock_on_var();
+
+void rival_init();
+
+void version_update();
+void version_remind();
+bool version_outdated();
+void rival_update();
+void rival_forget_all();
+bool rival_is(fopAc_ac_c* actor);
+struct MsgPvpHit;
+int pvp_predict_damage(const MsgPvpHit& hit, uint8_t combat);
+void features_guess_damage(uint8_t playerId, int dmg);
+uint16_t features_shown_life(uint8_t playerId);
+bool rival_hooked_pos(uint8_t player, cXyz* pos);
+uint8_t puppet_hook_combat_of(uint8_t playerId);
 
 void enemies_register_vars();
 void enemies_init();
@@ -525,6 +558,7 @@ void spawns_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_
 
 bool spawns_replicates_procname(int16_t procName);
 bool spawns_is_replica(fopAc_ac_c* actor);
+bool enemies_carried_by_other(fopAc_ac_c* actor);
 
 void boss_register_vars();
 void boss_init();
