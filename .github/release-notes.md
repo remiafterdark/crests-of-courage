@@ -6,29 +6,26 @@ one player presses host and reads out the room, everyone else types it and press
 only windows has been played. mac, linux, android and ios are built here but untested.
 enemy sync, boss sync and story progress are off by default under unfinished.
 
-this version connects to 1.5.0, so nobody has to update at the same time.
+this version needs dusklight 2.0.2, and everyone has to update: it doesn't connect to 1.5.
 
 this build:
-crashes:
-- save and quit, or resetting, while connected no longer crashes
-- fixed the game running out of memory and closing with lots of players, especially as people
-  joined or changed clothes or models. three separate leaks
-- fixed a stray player name drawn in the corner of the screen
+sumo:
+- sumo against other players in bo's ring. face them in the ring and press a to challenge
 
-world:
-- no more endless textboxes with villagers (jaggle on the vines, uli after the cradle, "where has
-  talo gone"). their conversation flags are only shared inside dungeons now, and changes from
-  other players wait until your conversation or cutscene is over
-- a chest opened in a house (like the wooden sword chest in ordon) now stays open for everyone
-- things another player is carrying (like uli's cradle) no longer flicker
-- teleporting to someone arrives through the right door
+models:
+- ganondorf and the hero's shade
+- a "silent" voice option
 
-notifications:
-- a new notification system that stacks, slides in and bursts through a backlog like steam's.
-  everything is under local > notifications: what shows, timing, side, position, size, and a
-  preview to see changes as you make them. dusklight's own are still an option
+randomizer:
+- see what other players found and where
 
-joining:
-- joining with a file you've played keeps your own rupees, arrows, bombs, seeds and hearts
-  (on by default, under local > joining). a brand-new file takes the host's
-- you never arrive at the host's current health any more
+fixes:
+- other players' ordon sword no longer pokes out of their sheath
+- other players now see ganondorf and the hero's shade hold their weapons
+- teleporting into a room waits for its door cutscene
+- the silent voice is silent for everyone
+- filling the last tear vessel takes everyone out of twilight
+- scent tracking is shared properly
+- hit sparks show when another player hits an enemy
+- sumo, ganon fight and twilight gate animations show on other players
+- story progress only lands when you change area, which stops some cutscene crashes

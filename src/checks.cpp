@@ -14,6 +14,7 @@
 #include "f_op/f_op_actor_iter.h"
 #include "f_op/f_op_actor_mng.h"
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <unordered_set>
@@ -98,10 +99,11 @@ void forget_commit(const std::string& name) {
     if (tag != 0) s_cancel(tag);
 }
 
-void send_one(const std::string& name) {
+void send_one(const std::string& name, uint8_t item) {
     MsgCheckTaken msg{};
     if (name.size() >= sizeof(msg.name)) return;
     std::memcpy(msg.name, name.data(), name.size());
+    msg.item = item;
     coop_net_send(kMsgCheckTaken, &msg, sizeof(msg));
 }
 
@@ -139,7 +141,7 @@ void on_give(ModContext*, const ItemGiveInfo* info, void*) {
     const std::string name(info->check_name);
     if (!note(name)) return;
     save_ledger();
-    if (coop_net_connected()) send_one(name);
+    if (coop_net_connected()) send_one(name, info->item);
     coop_log::info("coop_mod: [CHECKS] collected '{}'", name);
 }
 
@@ -254,18 +256,20 @@ void checks_update() {
     if (s_tick % 300 == 0) save_ledger();
 }
 
-void checks_on_message(uint8_t type, const uint8_t* payload, size_t size) {
+void checks_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t from) {
     int added = 0;
     std::string last;
-    if (type == kMsgCheckTaken && size >= sizeof(MsgCheckTaken)) {
-        MsgCheckTaken msg;
-        std::memcpy(&msg, payload, sizeof(msg));
+    if (type == kMsgCheckTaken && size >= sizeof(MsgCheckTaken::name)) {
+        MsgCheckTaken msg{};
+        std::memcpy(&msg, payload, std::min(size, sizeof(msg)));
         const std::string name(msg.name, strnlen(msg.name, sizeof(msg.name)));
         s_fromPeers.insert(name);
         if (note(name)) {
             ++added;
             last = name;
             forget_commit(name);
+
+            if (size >= sizeof(MsgCheckTaken)) features_check_found(from, name.c_str(), msg.item);
         }
     } else if (type == kMsgCheckList && size >= 1) {
         const int count = payload[0];

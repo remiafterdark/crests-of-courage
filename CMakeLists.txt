@@ -4,7 +4,7 @@ project(coop_mod CXX)
 set(DUSK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../dusklight" CACHE PATH "Path to dusk source root")
 if (NOT EXISTS "${DUSK_DIR}/sdk/CMakeLists.txt")
     if (NOT DUSKLIGHT_VERSION)
-        set(DUSKLIGHT_VERSION "e9b120544cb75e81b5aa36777f1688fa61f2d9e8")
+        set(DUSKLIGHT_VERSION "b245c6bef8b4a370afb2453104a585dd41c97676")
     endif ()
     include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchDusklight.cmake")
     set(DUSK_DIR "${DUSKLIGHT_DIR}")
@@ -29,6 +29,10 @@ add_mod(coop_mod
              src/skills.cpp
              src/rando.cpp
              src/checks.cpp
+             src/check_names.cpp
+             src/ganon.cpp
+             src/beast.cpp
+             src/sumo.cpp
              src/map_markers.cpp
              src/notify.cpp
              src/selftest.cpp
@@ -54,6 +58,10 @@ add_mod(coop_mod
              src/horses.cpp
     MOD_JSON mod.json
 )
+
+if(MSVC)
+    target_compile_options(coop_mod PRIVATE /Zc:__cplusplus)
+endif()
 
 option(COOP_PUBLIC_BUILD "Build for publishing" OFF)
 if(COOP_PUBLIC_BUILD AND MSVC)

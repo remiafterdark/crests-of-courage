@@ -2470,6 +2470,13 @@ void capture_landed_hits(EnemyList& list) {
             msg.at[0] = where.x;
             msg.at[1] = where.y;
             msg.at[2] = where.z;
+            const cXyz* atVec = atInf->GetAtVecP();
+            if (atVec != nullptr) {
+                msg.atVec[0] = atVec->x;
+                msg.atVec[1] = atVec->y;
+                msg.atVec[2] = atVec->z;
+            }
+            msg.hitMark = static_cast<uint8_t>(atInf->GetAtHitMark());
             coop_net_send(kMsgEnemyHit, &msg, sizeof(msg));
             t->hitQuietTicks = kHitRelayQuietTicks;
             t->captureQuietTicks = kCaptureQuietTicks;
@@ -2484,6 +2491,8 @@ void capture_landed_hits(EnemyList& list) {
         });
     }
 }
+
+void show_relayed_hitmark(fopAc_ac_c* actor, dCcD_GObjInf* tg, const MsgEnemyHit& msg);
 
 void inject_pending_hits(EnemyList& list) {
     bool any = false;
@@ -2521,7 +2530,9 @@ void inject_pending_hits(EnemyList& list) {
         blow.SetR(10.0f);
 
         int landed = 0;
+        dCcD_GObjInf* firstTg = nullptr;
         for_each_tg_collider(actor, tgCount, [&](cCcD_Obj* obj, dCcD_GObjInf* inf) {
+            if (firstTg == nullptr) firstTg = inf;
             inf->SetTgHit(&blow);
 
             inf->OnTgHitNoActor();
@@ -2545,6 +2556,7 @@ void inject_pending_hits(EnemyList& list) {
 
         if (landed > 0) {
             ++s_hitsApplied;
+            show_relayed_hitmark(actor, firstTg, msg);
             Tracked* t = find_tracked(msg.room, msg.key);
 
             if (t != nullptr) t->hitQuietTicks = kHitRelayQuietTicks;
@@ -2557,6 +2569,37 @@ void inject_pending_hits(EnemyList& list) {
             apply_damage_amount(actor, msg.room, msg.key, power_class_to_damage(msg.atp));
         }
     }
+}
+
+void show_relayed_hitmark(fopAc_ac_c* actor, dCcD_GObjInf* tg, const MsgEnemyHit& msg) {
+    if (actor == nullptr || tg == nullptr || tg->ChkTgNoHitMark()) return;
+    const u32 plainBlows = AT_TYPE_WOLF_ATTACK | AT_TYPE_WOLF_CUT_TURN | AT_TYPE_MIDNA_LOCK |
+                           AT_TYPE_HOOKSHOT | AT_TYPE_SHIELD_ATTACK | AT_TYPE_NORMAL_SWORD;
+    if ((msg.atType & plainBlows) && tg->GetTgSpl() == dCcG_Tg_Spl_UNK_1) return;
+    if (msg.atType == AT_TYPE_HOOKSHOT && tg->ChkTgHookShotNoHitMark()) return;
+    if (msg.atType == AT_TYPE_ARROW && tg->ChkTgArrowNoHitMark()) return;
+    const int atMark = msg.hitMark;
+    const int tgMark = tg->GetTgHitMark();
+    if (atMark == 0 && tgMark != 8) return;
+    if (atMark == 4 && tgMark == 4) return;
+    u16 mark = static_cast<u16>(atMark);
+    if (tgMark == 5 || tgMark == 8) {
+        mark = 2;
+    } else if (tgMark == 3) {
+        mark = 3;
+    }
+    if ((mark == 1 || mark == 3) && msg.atp == 0) return;
+    const cXyz where(msg.at[0], msg.at[1], msg.at[2]);
+    cXyz way(msg.atVec[0], msg.atVec[1], msg.atVec[2]);
+    if (cM3d_IsZero(PSVECMag(&way))) way = where - cXyz(msg.from[0], msg.from[1], msg.from[2]);
+    if (cM3d_IsZero(PSVECMag(&way))) {
+        way.set(0.0f, -1.0f, 0.0f);
+    } else {
+        PSVECNormalize(&way, &way);
+    }
+    csXyz angle;
+    cM3d_CalcVecZAngle(way, &angle);
+    dComIfGp_setHitMark(mark, actor, &where, &angle, nullptr, msg.atType);
 }
 
 bool real_hits_enabled() {
@@ -4344,6 +4387,13 @@ void capture_landed_object_hits(BreakableList& list) {
             msg.at[0] = where.x;
             msg.at[1] = where.y;
             msg.at[2] = where.z;
+            const cXyz* atVec = atInf->GetAtVecP();
+            if (atVec != nullptr) {
+                msg.atVec[0] = atVec->x;
+                msg.atVec[1] = atVec->y;
+                msg.atVec[2] = atVec->z;
+            }
+            msg.hitMark = static_cast<uint8_t>(atInf->GetAtHitMark());
             coop_net_send(kMsgObjectHit, &msg, sizeof(msg));
             breakable_go_quiet(room, key);
             ++s_objHitsSent;
@@ -4412,6 +4462,7 @@ void inject_pending_object_hits() {
         const f32 kSameObjectMargin = 60.0f;
 
         int landed = 0;
+        dCcD_GObjInf* firstTg = nullptr;
         for_each_tg_collider(actor, tgCount, [&](cCcD_Obj* obj, dCcD_GObjInf* inf) {
             if (nearest >= 0.0f) {
                 cCcD_ShapeAttr* shape = obj->GetShapeAttr();
@@ -4421,6 +4472,7 @@ void inject_pending_object_hits() {
                     if ((centre - at).abs() > nearest + kSameObjectMargin) return false;
                 }
             }
+            if (firstTg == nullptr) firstTg = inf;
             inf->SetTgHit(&blow);
             inf->OnTgHitNoActor();
             cXyz where(msg.at[0], msg.at[1], msg.at[2]);
@@ -4444,6 +4496,7 @@ void inject_pending_object_hits() {
         breakable_go_quiet(msg.room, msg.key);
         if (landed > 0) {
             ++s_objHitsApplied;
+            show_relayed_hitmark(actor, firstTg, msg);
             coop_log::info(
                 "coop_mod: [OBJ] replaying their blow on room={} key={:#010x} name={} hurtboxes={}",
                 static_cast<int>(msg.room), msg.key, static_cast<int>(fopAcM_GetName(actor)),
@@ -4522,6 +4575,7 @@ void run_self_test(EnemyList& list, bool host) {
         msg.at[0] = actor->current.pos.x;
         msg.at[1] = actor->current.pos.y + 30.0f;
         msg.at[2] = actor->current.pos.z;
+        msg.hitMark = 1;
 
         coop_net_send(kMsgEnemyHit, &msg, sizeof(msg));
 
@@ -4962,9 +5016,10 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
         break;
     }
     case kMsgEnemyHit: {
-        if (size < sizeof(MsgEnemyHit)) return;
-        MsgEnemyHit msg;
-        std::memcpy(&msg, payload, sizeof(msg));
+        if (size < offsetof(MsgEnemyHit, atVec)) return;
+        MsgEnemyHit msg{};
+        std::memcpy(&msg, payload, std::min(size, sizeof(msg)));
+        if (size < sizeof(MsgEnemyHit)) msg.hitMark = 1;
 
         claim_after_hit(find_tracked(msg.room, msg.key), from);
         if (!real_hits_enabled()) return;
@@ -4986,9 +5041,12 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
         break;
     }
     case kMsgObjectHit: {
-        if (size < sizeof(MsgEnemyHit) || !real_hits_enabled() || !breakables_enabled()) return;
-        MsgEnemyHit msg;
-        std::memcpy(&msg, payload, sizeof(msg));
+        if (size < offsetof(MsgEnemyHit, atVec) || !real_hits_enabled() || !breakables_enabled()) {
+            return;
+        }
+        MsgEnemyHit msg{};
+        std::memcpy(&msg, payload, std::min(size, sizeof(msg)));
+        if (size < sizeof(MsgEnemyHit)) msg.hitMark = 1;
         for (int i = 0; i < kMaxPendingObjectHits; ++i) {
             if (s_pendingObjectHits[i].used) continue;
             s_pendingObjectHits[i].used = true;

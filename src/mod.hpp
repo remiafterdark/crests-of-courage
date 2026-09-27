@@ -62,6 +62,60 @@ void coop_debug_spawn_puppet();
 void coop_debug_force_transform();
 void coop_debug_give_midna();
 
+class daAlink_c;
+void ganon_init();
+bool ganon_debug_toggle();
+bool ganon_debug_is_on();
+void ganon_draw_post(daAlink_c* alink);
+
+extern const char* const kGanondorfSkin;
+extern const char* const kHerosShadeSkin;
+extern const char* const kBeastGanonSkin;
+bool beast_debug_toggle();
+class J3DModelData;
+J3DModelData* ganon_skin_equipment(const char* file);
+bool ganon_skin_ships(const char* file);
+bool shade_skin_ships(const char* file);
+
+class J3DModel;
+class dKy_tevstr_c;
+int standin_body(const char* skin);
+bool standin_puppet_ready(int pupId, int body);
+void standin_puppet_draw(int pupId, J3DModel* body, uint8_t handL, uint8_t handR, dKy_tevstr_c* tev);
+void standin_puppet_hold_begin(int pupId, J3DModel* body, int podJoint);
+void standin_puppet_hold_end(J3DModel* body);
+
+float (*standin_local_joint_mtx(J3DModel* link, int joint))[4];
+J3DModel* standin_puppet_model(int pupId);
+J3DModel* ganon_puppet_sword(int pupId, bool sheath);
+enum ShadePiece { kShadePieceSword, kShadePieceShield, kShadePieceSheath };
+bool standin_owns_data(const J3DModelData* data);
+J3DModel* shade_puppet_weapon(int pupId, int piece);
+
+class cXyz;
+class csXyz;
+void sumo_init();
+void sumo_after_player(daAlink_c* alink);
+void sumo_on_message(const uint8_t* payload, size_t size, uint8_t from);
+bool sumo_puppet_transform(uint8_t playerId, cXyz* pos, csXyz* angle);
+bool sumo_local_demo_running();
+bool sumo_hides_equipment(uint8_t playerId);
+void sumo_on_state(const uint8_t* payload, size_t size, uint8_t from);
+void fx_play_for(uint8_t playerId, uint32_t soundId, const float* pos);
+bool sumo_shows_in_cutscene(uint8_t playerId);
+
+bool sumo_puppet_anim(uint8_t playerId, uint16_t* underIdx, uint16_t* upperIdx, float* frame);
+
+void beast_init();
+void beast_frame(daAlink_c* alink);
+bool beast_model_draw(daAlink_c* alink, J3DModel* model, int noDraw);
+bool beast_local_active();
+J3DModel* beast_local_model();
+int wolf_standin(const char* skin);
+bool beast_puppet_ready(int pupId, int look);
+void beast_puppet_draw(int pupId, J3DModel* body, dKy_tevstr_c* tev);
+J3DModel* beast_puppet_model(int pupId);
+
 enum SkinOutfit {
     kSkinOutfitHero = 0,
     kSkinOutfitOrdon,
@@ -189,6 +243,7 @@ enum SkinPart {
 void skins_init();
 void skins_refresh();
 int skins_count();
+bool skins_hidden(int index);
 const char* skins_name(int index);
 std::string skins_parts_text(int index);
 
@@ -279,6 +334,10 @@ std::string coop_net_join_address();
 void voices_begin(const char* skinName);
 
 void voices_begin_local();
+
+extern const char* const kSilentVoice;
+bool voices_local_silent();
+inline bool voices_is_link_voice(uint32_t soundId) { return soundId >= 0x10000u && soundId <= 0x100C7u; }
 
 void voices_begin_remote(const char* skinName);
 void voices_end_remote();
@@ -390,6 +449,8 @@ int private_arc_poll(const char* name);
 void private_arc_release(const char* name);
 J3DModelData* private_arc_load(const char* name, const char* file);
 J3DModelData* private_arc_load_idx(const char* name, uint32_t index);
+void* private_arc_load_anm(const char* name, const char* file);
+void* private_arc_load_anm_idx(const char* name, uint32_t index);
 const char* private_arc_file_name(const char* name, uint32_t index);
 void private_arc_free_data(J3DModelData* data);
 
@@ -499,7 +560,9 @@ ConfigVarHandle map_markers_edge_var();
 ConfigVarHandle map_markers_other_floor_var();
 ConfigVarHandle map_markers_colors_var();
 void checks_update();
-void checks_on_message(uint8_t type, const uint8_t* payload, size_t size);
+void checks_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t from);
+
+void features_check_found(uint8_t from, const char* check, uint8_t item);
 void checks_on_join_synced();
 std::vector<std::string> checks_debug_names_with(const char* prefix);
 
@@ -515,6 +578,9 @@ bool checks_collected(const char* name);
 void rando_update();
 void rando_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t from);
 bool rando_active();
+
+const char* check_place_name(const char* check);
+const char* rando_item_name(uint8_t item);
 bool rando_join_sync_allowed();
 bool rando_join_sync_wait();
 void game_mode_prompt_connect();
@@ -552,6 +618,7 @@ std::string joinsync_backup_summary();
 
 void features_reset_sync_baselines();
 void features_toast(const char* title, const char* body);
+std::string features_peer_name(uint8_t id);
 
 void ui_init();
 
@@ -561,6 +628,7 @@ bool puppet_hook_player_active(uint8_t playerId);
 bool puppet_hook_sword_mtx(uint8_t playerId, float out[3][4], bool* master);
 bool puppet_hook_get_pose_of(uint8_t playerId, float* x, float* y, float* z, short* angleY,
     float* speedX, float* speedZ);
+bool puppet_hook_is_wolf_of(uint8_t playerId);
 
 uint8_t puppet_hook_nearest_player(float x, float y, float z);
 

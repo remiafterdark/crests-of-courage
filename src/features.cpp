@@ -661,9 +661,152 @@ static void remove_local_heart_containers(uint8_t from) {
     }
 }
 
+struct Found {
+    uint8_t from;
+    uint8_t item;
+    uint8_t got;
+    bool haveCheck;
+    bool shared;
+    std::string place;
+    uint32_t since;
+};
+std::vector<Found> s_found;
+uint32_t s_foundTick = 0;
+const uint32_t kFoundWaitTicks = 60;
+
+bool found_is_junk(uint8_t item) {
+    if (item <= 0x07 || item == 0xED) return true;
+    if (item >= 0x0A && item <= 0x12) return true;
+    if ((item >= 0x16 && item <= 0x18) || item == 0x1A || item == 0x1B) return true;
+    return false;
+}
+
+const char* found_item_name(uint8_t item) {
+    if (rando_active()) {
+        if (const char* name = rando_item_name(item)) return name;
+    }
+    return item_name(item);
+}
+
+Found& found_entry(uint8_t from, uint8_t item) {
+    for (Found& f : s_found) {
+        if (f.from == from && f.item == item) return f;
+    }
+    if (s_found.size() >= 16) s_found.erase(s_found.begin());
+    Found f{};
+    f.from = from;
+    f.item = item;
+    f.got = item;
+    f.since = s_foundTick;
+    s_found.push_back(f);
+    return s_found.back();
+}
+
+bool found_will_share(uint8_t item) {
+    return coop_session(kSessItems, cfg_bool(s_vars.syncInventory, true)) &&
+           (item_is_relayed(item) || item_is_check_extra(item));
+}
+
+void show_found(const Found& f) {
+    if (!cfg_bool(s_vars.notifyItems, true)) return;
+
+    std::string body = f.place;
+    if (body.empty() && f.shared) {
+        body = f.got == f.item ? "You got it too."
+                               : std::string("You got ") + found_item_name(f.got) + ".";
+    }
+    toast_kind(kNotifyItems, sender_name(f.from) + " found " + found_item_name(f.item), body);
+}
+
+void found_update() {
+    ++s_foundTick;
+    for (size_t i = 0; i < s_found.size();) {
+        const Found& f = s_found[i];
+        const bool whole = f.haveCheck && (f.shared || !found_will_share(f.item));
+        if (whole || s_foundTick - f.since >= kFoundWaitTicks) {
+            show_found(f);
+            s_found.erase(s_found.begin() + static_cast<std::ptrdiff_t>(i));
+        } else {
+            ++i;
+        }
+    }
+}
+
+uint8_t s_lastScent = dItemNo_NONE_e;
+bool s_haveScent = false;
+uint8_t s_scentOwed = dItemNo_NONE_e;
+uint8_t s_scentOwedFrom = 0;
+
+bool is_scent(uint8_t item) {
+    return item >= dItemNo_SMELL_YELIA_POUCH_e && item <= dItemNo_SMELL_MEDICINE_e;
+}
+
+const char* scent_name(uint8_t smell) {
+    switch (smell) {
+    case dItemNo_SMELL_YELIA_POUCH_e: return "Ilia's scent";
+    case dItemNo_SMELL_POH_e: return "the Poe scent";
+    case dItemNo_SMELL_FISH_e: return "the Reekfish scent";
+    case dItemNo_SMELL_CHILDREN_e: return "the children's scent";
+    case dItemNo_SMELL_MEDICINE_e: return "the medicine scent";
+    default: return "a scent";
+    }
+}
+
+void take_scent(uint8_t smell, uint8_t from) {
+    if (dComIfGs_getCollectSmell() == smell) return;
+    if (dComIfGp_event_runCheck()) {
+        s_scentOwed = smell;
+        s_scentOwedFrom = from;
+        return;
+    }
+    if (dComIfGs_getCollectSmell() == dItemNo_SMELL_MEDICINE_e) {
+        dComIfGs_offEventBit(dSv_event_flag_c::F_0387);
+    }
+    dComIfGs_onItemFirstBit(smell);
+    dComIfGs_setCollectSmell(smell);
+    dComIfGs_setSelectItemIndex(2, smell);
+    if (smell == dItemNo_SMELL_MEDICINE_e) dComIfGs_onEventBit(dSv_event_flag_c::F_0387);
+
+    s_lastScent = smell;
+    s_invExpectUntil[smell] = s_invTick + 1200;
+    coop_log::info("coop_mod: [INV] {} picked up {:#x} - carrying it too", sender_name(from), smell);
+    if (cfg_bool(s_vars.notifyItems, true)) {
+        toast_kind(kNotifyItems, sender_name(from) + " picked up " + scent_name(smell),
+            "You're following it too.");
+    }
+}
+
+void scan_scent() {
+    if (!in_gameplay()) {
+        s_haveScent = false;
+        return;
+    }
+    if (s_scentOwed != dItemNo_NONE_e && !dComIfGp_event_runCheck()) {
+        const uint8_t owed = s_scentOwed;
+        s_scentOwed = dItemNo_NONE_e;
+        take_scent(owed, s_scentOwedFrom);
+    }
+    const uint8_t now = dComIfGs_getCollectSmell();
+    if (!s_haveScent) {
+        s_haveScent = true;
+        s_lastScent = now;
+        return;
+    }
+    if (now == s_lastScent) return;
+    s_lastScent = now;
+    if (!is_scent(now) || !coop_net_connected()) return;
+    MsgItem msg{now};
+    coop_net_send(kMsgItem, &msg, sizeof(msg));
+    coop_log::info("coop_mod: [INV] we picked up scent {:#x} - handing it over", now);
+}
+
 void apply_remote_item(uint8_t item, uint8_t from) {
     if (!coop_session(kSessItems, cfg_bool(s_vars.syncInventory, true))) return;
     if (svc_item == nullptr) return;
+    if (is_scent(item)) {
+        take_scent(item, from);
+        return;
+    }
     const bool extra = item_is_check_extra(item);
     if (!item_is_relayed(item) && !extra) return;
 
@@ -704,10 +847,16 @@ void apply_remote_item(uint8_t item, uint8_t from) {
     s_invExpectUntil[item] = s_invTick + 1200;
     coop_log::info("coop_mod: [INV] received item {:#x} from {}", item, sender_name(from));
 
-    if (cfg_bool(s_vars.notifyItems, true)) {
-        const std::string who = sender_name(from);
-        toast_kind(kNotifyItems, who + " found " + item_name(item), "You got it too.");
+    if (!rando_active()) {
+        if (cfg_bool(s_vars.notifyItems, true)) {
+            toast_kind(kNotifyItems, sender_name(from) + " found " + item_name(item),
+                "You got it too.");
+        }
+        return;
     }
+    Found& found = found_entry(from, relayed);
+    found.shared = true;
+    found.got = item;
 }
 
 const int kBottleSlots = 4;
@@ -893,12 +1042,21 @@ struct PendingTeleport {
     char stage[9] = {};
     uint32_t ticks = 0;
     uint32_t settledTicks = 0;
+    uint32_t arrivedTicks = 0;
+
+    bool placed = false;
+    bool sawEvent = false;
+    uint32_t watchTicks = 0;
+    cXyz placedAt;
 };
 PendingTeleport s_teleport;
 
 const uint32_t kTeleportTimeoutTicks = 60 * 30;
 const uint32_t kTeleportSettleTicks = 45;
 const uint32_t kTeleportMinTicks = 3;
+const uint32_t kTeleportWatchTicks = 60;
+const f32 kTeleportDraggedAway = 150.0f;
+const uint32_t kArrivalCutsceneWait = 150;
 
 bool local_on_stage(const char* stage8) {
     const char* stage = dComIfGp_getStartStageName();
@@ -939,19 +1097,59 @@ void place_at_player(daAlink_c* alink, uint8_t playerId) {
         pos.z);
 }
 
+bool arrival_cutscene_pending() {
+    const int id = dComIfGp_getEventManager().mException.mEventInfoIdx;
+    return id >= 0 && id != 0xFF;
+}
+
+bool teleport_event_busy() {
+    dEvt_control_c* event = dComIfGp_getEvent();
+    return dComIfGp_isEnableNextStage() || dComIfGp_event_runCheck() ||
+           (event != nullptr && event->mNum != 0);
+}
+
+bool teleport_target_here() {
+    const CoopPeer& who = features_peer_of(s_teleport.playerId);
+    return who.present && who.inGame && std::strncmp(who.stage, s_teleport.stage, 8) == 0;
+}
+
 void update_pending_teleport() {
     if (!s_teleport.active) return;
     if (++s_teleport.ticks > kTeleportTimeoutTicks) {
+        if (!s_teleport.placed) toast_kind(kNotifyTeleport, "Teleport cancelled", "It took too long.");
         s_teleport.active = false;
-        toast_kind(kNotifyTeleport, "Teleport cancelled", "It took too long.");
         return;
     }
     daAlink_c* alink = daAlink_getAlinkActorClass();
     if (alink == nullptr || !local_on_stage(s_teleport.stage)) {
         s_teleport.settledTicks = 0;
+        s_teleport.arrivedTicks = 0;
+        if (s_teleport.placed) s_teleport.active = false;
         return;
     }
-    if (dComIfGp_isEnableNextStage() || dComIfGp_event_runCheck()) {
+    ++s_teleport.arrivedTicks;
+
+    if (s_teleport.placed) {
+        if (teleport_event_busy()) {
+            s_teleport.sawEvent = true;
+            return;
+        }
+        if (s_teleport.sawEvent) {
+            if (alink->mDemo.getDemoType() != 0) return;
+            s_teleport.active = false;
+            const cXyz now = alink->current.pos;
+            if ((now - s_teleport.placedAt).abs() > kTeleportDraggedAway && teleport_target_here()) {
+                coop_log::info("coop_mod: a cutscene took us away on arrival - placing again");
+                place_at_player(alink, s_teleport.playerId);
+            }
+            return;
+        }
+        if (++s_teleport.watchTicks >= kTeleportWatchTicks) s_teleport.active = false;
+        return;
+    }
+
+    if (teleport_event_busy() || alink->mDemo.getDemoType() != 0 ||
+        (arrival_cutscene_pending() && s_teleport.arrivedTicks < kArrivalCutsceneWait)) {
         s_teleport.settledTicks = 0;
         return;
     }
@@ -961,13 +1159,16 @@ void update_pending_teleport() {
     if (s_teleport.settledTicks < kTeleportSettleTicks && !ground_under_player(s_teleport.playerId)) {
         return;
     }
-    s_teleport.active = false;
 
-    const CoopPeer& who = features_peer_of(s_teleport.playerId);
-    if (who.present && who.inGame && std::strncmp(who.stage, s_teleport.stage, 8) == 0) {
+    if (teleport_target_here()) {
         place_at_player(alink, s_teleport.playerId);
+        s_teleport.placed = true;
+        s_teleport.placedAt = alink->current.pos;
+        s_teleport.ticks = 0;
     } else {
-        toast_kind(kNotifyTeleport, "Teleport cancelled", who.name + " left before we got there.");
+        s_teleport.active = false;
+        toast_kind(kNotifyTeleport, "Teleport cancelled",
+            features_peer_of(s_teleport.playerId).name + " left before we got there.");
     }
 }
 
@@ -994,6 +1195,15 @@ void on_time(const uint8_t* payload, size_t size) {
     }
 }
 
+}
+
+void features_check_found(uint8_t from, const char* check, uint8_t item) {
+    if (check == nullptr || found_is_junk(item) || !rando_active()) return;
+    Found& found = found_entry(from, item);
+    found.haveCheck = true;
+    if (const char* place = check_place_name(check)) found.place = place;
+    coop_log::info("coop_mod: [CHECKS] {} found {:#x} at '{}' ({})", sender_name(from), item, check,
+        found.place.empty() ? "no name for it" : found.place);
 }
 
 void features_register_vars() {
@@ -1154,6 +1364,7 @@ void features_update() {
         if (++s_memTick % 1200 == 0) coop_log::info("coop_mod: [MEM] {}", coop_mem_status());
     }
     s_devLogging = features_debug_menu();
+    found_update();
     voices_update();
     local_skin_colors_update();
     local_skin_equipment_update();
@@ -1236,6 +1447,7 @@ void features_update() {
     if (coop_session(kSessItems, cfg_bool(s_vars.syncInventory, true))) {
         scan_inventory();
         scan_bottles();
+        scan_scent();
     } else {
         s_haveBottles = false;
     }
@@ -1312,6 +1524,11 @@ void features_on_disconnected() {
 void features_reset_sync_baselines() {
     s_haveInv = false;
     s_haveBottles = false;
+}
+
+std::string features_peer_name(uint8_t id) {
+    if (id >= kCoopMaxPlayers) return "";
+    return peer_slot(id).name;
 }
 
 void features_toast(const char* title, const char* body) {
@@ -1422,7 +1639,9 @@ void features_on_message(uint8_t type, const uint8_t* payload, size_t size, uint
     case kMsgRandoSeedRequest:
     case kMsgRandoChunk: rando_on_message(type, payload, size, from); break;
     case kMsgCheckTaken:
-    case kMsgCheckList: checks_on_message(type, payload, size); break;
+    case kMsgCheckList: checks_on_message(type, payload, size, from); break;
+    case kMsgSumo: sumo_on_message(payload, size, from); break;
+    case kMsgSumoState: sumo_on_state(payload, size, from); break;
     case kMsgTwilightBug:
     case kMsgTearGot: twilight_on_message(type, payload, size); break;
     case kMsgActorSpawn:

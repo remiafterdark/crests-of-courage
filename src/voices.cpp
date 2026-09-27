@@ -290,14 +290,22 @@ void voices_end_local() {
     }
 }
 
+const char* const kSilentVoice = "Silent";
+bool s_localSilent = false;
+
+bool voices_local_silent() {
+    return s_localSilent;
+}
+
 void voices_update() {
+    s_localSilent = skins_local_slot(kSkinChoiceVoice) == kSilentVoice;
 
     if (!s_wanted.empty()) {
         const std::string wanted = s_wanted;
         s_wanted.clear();
         load_set(wanted);
     }
-    const std::string mine = skins_local_slot(kSkinChoiceVoice);
+    const std::string mine = s_localSilent ? std::string() : skins_local_slot(kSkinChoiceVoice);
     if (!mine.empty()) {
         bool known = false;
         for (VoiceSet* set : s_sets) known = known || set->skin == mine;

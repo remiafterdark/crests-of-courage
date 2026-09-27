@@ -1164,7 +1164,8 @@ void send_local_snapshot() {
     auto fill_slots = [](AnmSlotSnapshot* out, const daPy_anmHeap_c* heaps,
                          const daPy_frameCtrl_c* frameCtrls, mDoExt_AnmRatioPack* packs) {
         for (int i = 0; i < 3; ++i) {
-            out[i].resIdx = heaps[i].getIdx();
+
+            out[i].resIdx = anm_pack(heaps[i].getArcNo(), heaps[i].getIdx());
             out[i].frame = frameCtrls[i].getFrame();
             out[i].ratio = packs[i].getRatio();
             out[i].rate = frameCtrls[i].getRate();
@@ -1254,8 +1255,9 @@ void send_local_snapshot() {
             if (body == nullptr || !looks_like_live_data(body)) return 0;
             if (body->getJointNum() == 0 || body->getJointNum() > 256) return 0;
             if (joint >= body->getJointNum()) return 0;
+
             const cXyz a = origin_of(item->getBaseTRMtx());
-            const cXyz b = origin_of(alink->mpLinkModel->getAnmMtx(joint));
+            const cXyz b = origin_of(standin_local_joint_mtx(alink->mpLinkModel, joint));
             return ((a - b).abs() < 1.0f) ? 1 : 0;
         };
 
@@ -1298,7 +1300,7 @@ void send_local_snapshot() {
             const bool jointOk = joint != kPuppetHeldJointRoot && joint < bodyData->getJointNum();
             Mtx inv;
             Mtx local;
-            mDoMtx_inverse(jointOk ? body->getAnmMtx(joint) : body->getBaseTRMtx(), inv);
+            mDoMtx_inverse(jointOk ? standin_local_joint_mtx(body, joint) : body->getBaseTRMtx(), inv);
             mDoMtx_concat(inv, model->getBaseTRMtx(), local);
 
             AttachedModelSnapshot& out = snapshot.attached[slot++];
@@ -1327,7 +1329,7 @@ void send_local_snapshot() {
                 if (candidates[i] >= bodyData->getJointNum()) continue;
                 cXyz jointPos(0.0f, 0.0f, 0.0f);
                 cXyz modelPos(0.0f, 0.0f, 0.0f);
-                mDoMtx_multVecZero(body->getAnmMtx(candidates[i]), &jointPos);
+                mDoMtx_multVecZero(standin_local_joint_mtx(body, candidates[i]), &jointPos);
                 mDoMtx_multVecZero(model->getBaseTRMtx(), &modelPos);
                 const f32 dist = (jointPos - modelPos).abs();
                 if (best == kPuppetHeldJointRoot || dist < bestDist) {
@@ -1730,7 +1732,9 @@ void send_local_snapshot() {
         }
 
         J3DModel* wolfBody = alink->mpLinkModel;
-        if (!modelsUnsafe && wolfBody != nullptr && looks_like_live_data(wolfBody)) {
+
+        if (!modelsUnsafe && wolfBody != nullptr && looks_like_live_data(wolfBody) &&
+            !beast_local_active()) {
             Mtx rootInv;
             mDoMtx_inverse(wolfBody->getBaseTRMtx(), rootInv);
             const cXyz* chainPos = alink->field_0x363c;
@@ -2680,6 +2684,8 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     horses_init();
     ui_init();
     puppet_hook_init();
+    ganon_init();
+    sumo_init();
     skipvote_init();
     skills_init();
     rando_init();

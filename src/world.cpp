@@ -21,12 +21,19 @@
 #include "f_op/f_op_actor_iter.h"
 #include "mods/service.hpp"
 #include "mods/svc/hook.hpp"
+#include "mods/svc/save.h"
 #include "f_op/f_op_actor_mng.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 
 DEFINE_HOOK(&daTbox_c::actionOpenWait, TboxOpenWaitHook);
+
+DEFINE_HOOK_SYMBOL("src/d/d_s_play.cpp#phase_1", int(void*), StoryStageLoadHook);
+
+extern const SaveService* svc_save;
 
 namespace {
 
@@ -201,8 +208,31 @@ void keep_private_tmp(uint8_t* tmp, const uint8_t* before) {
     keep_private(tmp, before, skills_tmp_private);
 }
 
+const uint16_t kStoryPrivateFlags[] = {
+    0x1D01,
+    0x1B20, 0x1B10,
+    0x1F80, 0x1F40, 0x1F20, 0x1F10,
+    0x5220, 0x5210, 0x5208, 0x5204,
+    0x2640, 0x2620, 0x2610, 0x2608, 0x2604, 0x2602, 0x2601, 0x2780, 0x2740, 0x2720,
+    0x2F04,
+    0x3920,
+    0x6110,
+};
+const int kStoryRegistersFrom = 0xF1;
+
+uint8_t story_private(int byte) {
+    static uint8_t mask[kEventSize] = {};
+    static bool built = false;
+    if (!built) {
+        for (uint16_t flag : kStoryPrivateFlags) mask[flag >> 8] |= static_cast<uint8_t>(flag);
+        for (int b = kStoryRegistersFrom; b < kEventSize; ++b) mask[b] = 0xFF;
+        built = true;
+    }
+    return static_cast<uint8_t>(mask[byte] | skills_event_private(byte));
+}
+
 void keep_private_event(uint8_t* ev, const uint8_t* before) {
-    keep_private(ev, before, skills_event_private);
+    keep_private(ev, before, story_private);
 }
 
 uint32_t hash_bytes(const uint8_t* data, int size, int skipByte);
@@ -212,6 +242,52 @@ uint32_t hash_shared(const uint8_t* bytes, uint8_t (*mask_of)(int)) {
     std::memcpy(copy, bytes, kEventSize);
     for (int b = 0; b < kEventSize; ++b) copy[b] = static_cast<uint8_t>(copy[b] & ~mask_of(b));
     return hash_bytes(copy, kEventSize, -1);
+}
+
+uint8_t s_storyPending[kEventSize] = {};
+int s_storyPendingBits = 0;
+
+int bit_count(uint8_t v) {
+    int n = 0;
+    for (; v != 0; v = static_cast<uint8_t>(v & (v - 1))) ++n;
+    return n;
+}
+
+int story_hold(dSv_info_c* info, const uint8_t* set, int offset, int size) {
+    const uint8_t* have = info->getSavedata().getEvent().mEvent;
+    int added = 0;
+    for (int i = 0; i < size; ++i) {
+        const int b = offset + i;
+        if (b < 0 || b >= kEventSize) continue;
+        const uint8_t fresh =
+            static_cast<uint8_t>(set[i] & ~story_private(b) & ~have[b] & ~s_storyPending[b]);
+        if (fresh == 0) continue;
+        s_storyPending[b] = static_cast<uint8_t>(s_storyPending[b] | fresh);
+        added += bit_count(fresh);
+    }
+    s_storyPendingBits += added;
+    return added;
+}
+
+uint32_t story_hash(dSv_info_c* info) {
+    uint8_t ev[kEventSize];
+    const uint8_t* cur = info->getSavedata().getEvent().mEvent;
+    for (int b = 0; b < kEventSize; ++b) ev[b] = static_cast<uint8_t>(cur[b] | s_storyPending[b]);
+    return hash_shared(ev, story_private);
+}
+
+void diff_story(uint8_t* cur, uint8_t* base) {
+    for (int start = 0; start < kEventSize; start += 32) {
+        uint8_t set[32] = {};
+        const uint8_t clr[32] = {};
+        bool any = false;
+        for (int i = 0; i < 32; ++i) {
+            set[i] = static_cast<uint8_t>(cur[start + i] & ~base[start + i]);
+            if (set[i] != 0) any = true;
+        }
+        if (any) send_delta(s_base, kRegionEvent, -1, start, 32, set, clr);
+    }
+    std::memcpy(base, cur, kEventSize);
 }
 
 void diff_region(WorldRegion region, int8_t room, uint8_t* cur, uint8_t* base, int size,
@@ -376,6 +452,24 @@ uint8_t* status_b_flags(dSv_info_c* info) {
     return &info->getSavedata().getPlayer().mPlayerStatusB.mTransformLevelFlag;
 }
 
+uint8_t s_statusBPending[kStatusBSize] = {};
+
+void hold_status_b(dSv_info_c* info, const uint8_t* set) {
+    const uint8_t* cur = status_b_flags(info);
+    bool any = false;
+    for (int i = 0; i < kStatusBSize; ++i) {
+        const uint8_t fresh = static_cast<uint8_t>(set[i] & ~cur[i] & ~s_statusBPending[i]);
+        if (fresh == 0) continue;
+        s_statusBPending[i] = static_cast<uint8_t>(s_statusBPending[i] | fresh);
+        any = true;
+    }
+    if (any) {
+        coop_log::info("coop_mod: [WORLD] transform/twilight flags {:#04x}/{:#04x} from another "
+                       "player - applied at our next stage load", s_statusBPending[0],
+            s_statusBPending[1]);
+    }
+}
+
 void diff_status_b(dSv_info_c* info) {
     uint8_t* cur = status_b_flags(info);
     if (!s_statusB.have) {
@@ -524,7 +618,7 @@ void scan() {
         uint8_t view[kEventSize];
         std::memcpy(view, events, kEventSize);
         keep_private_event(view, s_base.event);
-        diff_region(kRegionEvent, -1, view, s_base.event, kEventSize);
+        diff_story(view, s_base.event);
     } else {
         s_base.haveEvent = true;
         std::memcpy(s_base.event, events, kEventSize);
@@ -854,7 +948,10 @@ uint32_t collect_hash(dSv_info_c* info) {
 }
 
 uint32_t status_b_hash(dSv_info_c* info) {
-    return hash_bytes(status_b_flags(info), kStatusBSize);
+    uint8_t bytes[kStatusBSize];
+    const uint8_t* cur = status_b_flags(info);
+    for (int i = 0; i < kStatusBSize; ++i) bytes[i] = static_cast<uint8_t>(cur[i] | s_statusBPending[i]);
+    return hash_bytes(bytes, kStatusBSize);
 }
 
 uint32_t light_drop_hash(dSv_info_c* info) {
@@ -917,7 +1014,8 @@ void send_digest(dSv_info_c* info, const char stage[8], int saveNo) {
     msg.visitedHash = visited_hash(info);
     msg.lightDropHash = light_drop_hash(info);
     msg.collectHash = collect_hash(info);
-    msg.eventHash = hash_shared(info->getSavedata().getEvent().mEvent, skills_event_private);
+    msg.eventHash = story_hash(info);
+    msg.storyRules = kStoryRules;
     msg.statusBHash = status_b_hash(info);
     coop_net_send(kMsgWorldDigest, &msg, sizeof(msg));
 }
@@ -941,7 +1039,7 @@ void handle_digest(const MsgWorldDigest& msg, uint8_t from) {
     }
 
     if (!coop_session(kSessStory, cfg_bool(s_storyVar, false))) {
-        const uint32_t mine = hash_shared(info->getSavedata().getEvent().mEvent, skills_event_private);
+        const uint32_t mine = story_hash(info);
         if (mine == msg.eventHash) {
             s_storyDiffFor = 0;
             s_storyWarned = false;
@@ -994,8 +1092,9 @@ void handle_digest(const MsgWorldDigest& msg, uint8_t from) {
     const uint32_t myLightDrop = light_drop_hash(info);
 
     const bool storyOn = coop_session(kSessStory, cfg_bool(s_storyVar, false));
-    const uint32_t myEvent = hash_shared(info->getSavedata().getEvent().mEvent, skills_event_private);
-    const bool eventOk = !storyOn || myEvent == msg.eventHash;
+    const uint32_t myEvent = story_hash(info);
+
+    const bool eventOk = !storyOn || myEvent == msg.eventHash || msg.storyRules != kStoryRules;
     if (mine == msg.memoryHash && myDan == msg.danHash && myTmp == msg.tmpHash &&
         myStatusB == msg.statusBHash && myCollect == msg.collectHash &&
         myLightDrop == msg.lightDropHash && eventOk) {
@@ -1048,9 +1147,13 @@ void answer_sync_request(const MsgWorldSyncRequest& req) {
             kLightDropSize);
 
         if (coop_session(kSessStory, cfg_bool(s_storyVar, false))) {
-            uint8_t* ev = info->getSavedata().getEvent().mEvent;
+            const uint8_t* ev = info->getSavedata().getEvent().mEvent;
             for (int off = 0; off < kEventSize; off += 32) {
-                send_full(stage, saveNo, kRegionEvent, static_cast<int8_t>(off / 32), ev + off, 32);
+                uint8_t shared[32];
+                for (int i = 0; i < 32; ++i) {
+                    shared[i] = static_cast<uint8_t>(ev[off + i] & ~story_private(off + i));
+                }
+                send_full(stage, saveNo, kRegionEvent, static_cast<int8_t>(off / 32), shared, 32);
             }
         }
         coop_log::info("coop_mod: [WORLD] answering stage-memory request for {:.8s}", stage);
@@ -1132,11 +1235,7 @@ void handle_full(const MsgWorldFull& msg) {
 
     case kRegionStatusB: {
         if (msg.size != kStatusBSize) return;
-        uint8_t* cur = status_b_flags(info);
-        for (int i = 0; i < kStatusBSize; ++i) {
-            cur[i] = static_cast<uint8_t>(cur[i] | msg.data[i]);
-            if (s_statusB.have) s_statusB.bytes[i] = cur[i];
-        }
+        hold_status_b(info, msg.data);
         break;
     }
     case kRegionCollect: {
@@ -1167,12 +1266,19 @@ void handle_full(const MsgWorldFull& msg) {
         if (!coop_session(kSessStory, cfg_bool(s_storyVar, false))) return;
         const int off = static_cast<int>(msg.room) * 32;
         if (msg.size != 32 || off < 0 || off + 32 > kEventSize) return;
-        uint8_t before[kEventSize];
-        std::memcpy(before, info->getSavedata().getEvent().mEvent, kEventSize);
-        merge_full(info->getSavedata().getEvent().mEvent + off,
-            (baselineValid && s_base.haveEvent) ? s_base.event + off : nullptr, msg.data, 32,
-            false);
-        keep_private_event(info->getSavedata().getEvent().mEvent, before);
+        const int added = story_hold(info, msg.data, off, 32);
+        if (added > 0) {
+            coop_log::info("coop_mod: [STORY] {} flag(s) from their copy wait for our next stage "
+                           "({} waiting)", added, s_storyPendingBits);
+        }
+
+        if (baselineValid && s_base.haveEvent) {
+            for (int i = 0; i < 32; ++i) {
+                const uint8_t mine = story_private(off + i);
+                s_base.event[off + i] = static_cast<uint8_t>((msg.data[i] & ~mine) |
+                                                              (s_base.event[off + i] & mine));
+            }
+        }
         break;
     }
     case kRegionZone:
@@ -1360,6 +1466,44 @@ void tbox2_update() {
     fopAcM_Search(collect_open_tbox2, nullptr);
 }
 
+HookAction on_stage_load_pre(ModContext*, void*, void*, void*) {
+    dSv_info_c* info = dComIfGs_getSaveInfo();
+    if (info == nullptr) return HOOK_CONTINUE;
+
+    if (s_statusBPending[0] != 0 || s_statusBPending[1] != 0) {
+        uint8_t* cur = status_b_flags(info);
+        for (int i = 0; i < kStatusBSize; ++i) {
+            cur[i] = static_cast<uint8_t>(cur[i] | s_statusBPending[i]);
+            if (s_statusB.have) s_statusB.bytes[i] = static_cast<uint8_t>(s_statusB.bytes[i] | s_statusBPending[i]);
+        }
+        coop_log::info("coop_mod: [WORLD] loading a stage - transform/twilight flags now "
+                       "{:#04x}/{:#04x}", cur[0], cur[1]);
+        std::memset(s_statusBPending, 0, sizeof(s_statusBPending));
+    }
+    if (s_storyPendingBits == 0) return HOOK_CONTINUE;
+    uint8_t* ev = info->getSavedata().getEvent().mEvent;
+    for (int b = 0; b < kEventSize; ++b) {
+        ev[b] = static_cast<uint8_t>(ev[b] | s_storyPending[b]);
+
+        if (s_base.haveEvent) s_base.event[b] = static_cast<uint8_t>(s_base.event[b] | s_storyPending[b]);
+    }
+    coop_log::info("coop_mod: [STORY] loading a stage - {} story flag(s) from the other players "
+                   "go in now, before it reads them", s_storyPendingBits);
+    std::memset(s_storyPending, 0, sizeof(s_storyPending));
+    s_storyPendingBits = 0;
+    return HOOK_CONTINUE;
+}
+
+void forget_pending_story(ModContext*, uint32_t, void*) {
+    if (s_storyPendingBits != 0) {
+        coop_log::info("coop_mod: [STORY] another file - dropping {} waiting flag(s)",
+            s_storyPendingBits);
+    }
+    std::memset(s_storyPending, 0, sizeof(s_storyPending));
+    s_storyPendingBits = 0;
+    std::memset(s_statusBPending, 0, sizeof(s_statusBPending));
+}
+
 }
 
 void world_register_vars() {
@@ -1380,6 +1524,13 @@ void world_register_vars() {
     selfTest.type = CONFIG_VAR_INT;
     selfTest.default_int = 0;
     if (svc_config->register_var(mod_ctx, &selfTest, &s_selfTestVar) != MOD_OK) s_selfTestVar = 0;
+
+    const ModResult storyHook = mods::hook::add_pre<StoryStageLoadHook>(on_stage_load_pre);
+    coop_log::info("coop_mod: [STORY] stage-load hook: {}", static_cast<int>(storyHook));
+    if (svc_save != nullptr) {
+        svc_save->observe_saves(mod_ctx, forget_pending_story, forget_pending_story, nullptr,
+            nullptr, nullptr);
+    }
 
     const ModResult r = mods::hook::add_pre<TboxOpenWaitHook>(
         [](ModContext*, void* args, void* retval, void*) -> HookAction {
@@ -1472,9 +1623,9 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
         return;
     }
     if (type == kMsgWorldDigest) {
-        if (size < sizeof(MsgWorldDigest)) return;
-        MsgWorldDigest msg;
-        std::memcpy(&msg, payload, sizeof(msg));
+        if (size < offsetof(MsgWorldDigest, storyRules)) return;
+        MsgWorldDigest msg{};
+        std::memcpy(&msg, payload, std::min(size, sizeof(msg)));
         handle_digest(msg, from);
         return;
     }
@@ -1606,11 +1757,7 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
     case kRegionStatusB: {
 
         if (msg.size != kStatusBSize) return;
-        uint8_t* cur = status_b_flags(info);
-        for (int i = 0; i < kStatusBSize; ++i) {
-            cur[i] = static_cast<uint8_t>(cur[i] | msg.set[i]);
-            if (s_statusB.have) s_statusB.bytes[i] = cur[i];
-        }
+        hold_status_b(info, msg.set);
         break;
     }
     case kRegionCollect: {
@@ -1648,13 +1795,14 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
         break;
     }
     case kRegionEvent: {
+
         if (msg.offset + msg.size > kEventSize) return;
-        uint8_t before[kEventSize];
-        std::memcpy(before, info->getSavedata().getEvent().mEvent, kEventSize);
-        apply_bytes(info->getSavedata().getEvent().mEvent,
-            (s_base.have && s_base.haveEvent) ? s_base.event : nullptr, msg);
-        keep_private_event(info->getSavedata().getEvent().mEvent, before);
-        break;
+        const int added = story_hold(info, msg.set, msg.offset, msg.size);
+        if (added > 0) {
+            coop_log::info("coop_mod: [STORY] {} new flag(s) from another player - applied at our "
+                           "next stage load ({} waiting)", added, s_storyPendingBits);
+        }
+        return;
     }
     default:
         return;

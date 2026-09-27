@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-const uint16_t kCoopProtocolVersion = 68;
+const uint16_t kCoopProtocolVersion = 70;
 
 const int kCoopMaxPlayers = 16;
 
@@ -79,6 +79,37 @@ enum CoopMsgType : uint8_t {
     kMsgCheckTaken = 59,
     kMsgCheckList = 60,
     kMsgEnemyClaim = 61,
+    kMsgSumo = 62,
+    kMsgSumoState = 63,
+};
+
+enum SumoKind : uint8_t {
+    kSumoChallenge = 1,
+    kSumoAnswer = 2,
+    kSumoMove = 3,
+
+    kSumoResult = 4,
+    kSumoCancel = 5,
+    kSumoMash = 6,
+};
+const uint8_t kSumoChallengerWon = 1;
+const uint8_t kSumoChallengedWon = 2;
+struct MsgSumo {
+    uint8_t kind;
+    uint8_t to;
+    uint8_t value;
+    uint8_t pad;
+};
+
+struct MsgSumoState {
+    uint8_t to;
+    uint8_t act;
+    uint8_t bck;
+    uint8_t pad;
+    float frame;
+    float x, y, z;
+    int16_t angle;
+    int16_t pad2;
 };
 
 struct MsgTorch {
@@ -133,6 +164,7 @@ struct MsgRandoChunk {
 
 struct MsgCheckTaken {
     char name[64];
+    uint8_t item;
 };
 
 struct MsgTwilightBug {
@@ -452,7 +484,10 @@ struct MsgWorldDigest {
 
     uint32_t eventHash;
     uint32_t statusBHash;
+
+    uint8_t storyRules;
 };
+const uint8_t kStoryRules = 1;
 
 struct MsgDeathLink {
     char name[kCoopNameMax];
@@ -492,6 +527,9 @@ struct MsgEnemyHit {
     uint8_t mtrl;
     float from[3];
     float at[3];
+
+    float atVec[3];
+    uint8_t hitMark;
 };
 
 struct MsgSessionSettings {

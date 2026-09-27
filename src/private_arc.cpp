@@ -13,6 +13,7 @@
 #include "JSystem/JKernel/JKRMemArchive.h"
 #include "JSystem/JKernel/JKRSolidHeap.h"
 #include "JSystem/J3DGraphAnimator/J3DModelData.h"
+#include "JSystem/J3DGraphLoader/J3DAnmLoader.h"
 
 #include <cstring>
 
@@ -215,6 +216,58 @@ J3DModelData* private_arc_load(const char* name, const char* file) {
     void* raw = archive->getIdxResource(index);
     if (raw == nullptr) return nullptr;
     return private_arc_build(archive, name, index, raw);
+}
+
+void* private_arc_load_anm_idx(const char* name, uint32_t index) {
+    PrivateArc* a = find_arc(name);
+    if (a == nullptr || a->archive == nullptr) return nullptr;
+    JKRArchive* archive = a->archive;
+    if (index >= archive->countFile() || !archive->isFileEntry(index)) return nullptr;
+    void* raw = archive->getIdxResource(index);
+    if (raw == nullptr) return nullptr;
+    const u32 size = archive->getExpandedResSize(raw);
+    JKRHeap* heap = arc_heap();
+    if (size < 32 || size > 1024u * 1024u || heap == nullptr ||
+        heap->getFreeSize() < size * 2u + 2u * 1024u * 1024u) {
+        return nullptr;
+    }
+    JKRHeap* previous = heap->becomeCurrentHeap();
+    u8* copy = JKR_NEW_ARRAY_ARGS(u8, size, 32);
+    void* anm = nullptr;
+    if (copy != nullptr) {
+        std::memcpy(copy, raw, size);
+        anm = J3DAnmLoaderDataBase::load(copy);
+    }
+    if (previous != nullptr) previous->becomeCurrentHeap();
+    return anm;
+}
+
+void* private_arc_load_anm(const char* name, const char* file) {
+    PrivateArc* a = find_arc(name);
+    if (a == nullptr || a->archive == nullptr || file == nullptr) return nullptr;
+    JKRArchive* archive = a->archive;
+    JKRArchive::SDIFileEntry* entry = archive->findNameResource(file);
+    if (entry == nullptr) {
+        coop_log::warn("coop_mod: [ARC] '{}' has no '{}'", name, file);
+        return nullptr;
+    }
+    void* raw = archive->getIdxResource(static_cast<u32>(entry - archive->mFiles));
+    if (raw == nullptr) return nullptr;
+    const u32 size = archive->getExpandedResSize(raw);
+    JKRHeap* heap = arc_heap();
+    if (size < 32 || size > 1024u * 1024u || heap == nullptr ||
+        heap->getFreeSize() < size * 2u + 2u * 1024u * 1024u) {
+        return nullptr;
+    }
+    JKRHeap* previous = heap->becomeCurrentHeap();
+    u8* copy = JKR_NEW_ARRAY_ARGS(u8, size, 32);
+    void* anm = nullptr;
+    if (copy != nullptr) {
+        std::memcpy(copy, raw, size);
+        anm = J3DAnmLoaderDataBase::load(copy);
+    }
+    if (previous != nullptr) previous->becomeCurrentHeap();
+    return anm;
 }
 
 namespace {

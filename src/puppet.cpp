@@ -1554,6 +1554,37 @@ bool alanm_guard_intact(const u8* buf, u32 bufSize) {
     return true;
 }
 
+const char* const kLinkAnmArcs[kAnmOtherArcCount] = {
+    "alSumou", "B_oh", "TWGate_Lk", "TWGate_Wf", "B_DR", "Lv6Gate", "B_gnd", "B_mgn",
+};
+struct OtherArcAnim {
+    u16 packed;
+    J3DAnmTransform* anm;
+};
+OtherArcAnim s_otherArcAnims[64];
+int s_otherArcAnimCount = 0;
+bool s_otherArcClaimed[kAnmOtherArcCount] = {};
+
+J3DAnmTransform* other_arc_anim(u16 packed) {
+    for (int i = 0; i < s_otherArcAnimCount; ++i) {
+        if (s_otherArcAnims[i].packed == packed) return s_otherArcAnims[i].anm;
+    }
+    const u16 arc = anm_arc(packed);
+    if (arc < 1 || arc > kAnmOtherArcCount || s_otherArcAnimCount >= 64) return nullptr;
+    const char* name = kLinkAnmArcs[arc - 1];
+
+    if (!s_otherArcClaimed[arc - 1]) {
+        if (!private_arc_request(name)) return nullptr;
+        s_otherArcClaimed[arc - 1] = true;
+    }
+    if (private_arc_poll(name) <= 0) return nullptr;
+    J3DAnmTransform* anm = static_cast<J3DAnmTransform*>(private_arc_load_anm_idx(name, anm_index(packed)));
+    if (anm == nullptr) return nullptr;
+    s_otherArcAnims[s_otherArcAnimCount++] = {packed, anm};
+    coop_log::info("coop_mod: [ANIM] {} #{} for other players", name, anm_index(packed));
+    return anm;
+}
+
 mDoExt_bckAnm* get_or_load_puppet_anim(daAlink_c* alink, u16 resIdx) {
     int lruIdx = -1;
     for (int i = 0; i < kAnimCacheSize; ++i) {
@@ -1580,6 +1611,23 @@ mDoExt_bckAnm* get_or_load_puppet_anim(daAlink_c* alink, u16 resIdx) {
 
         coop_log::warn("coop_mod: [ANIM] cache full this frame - resIdx={} not loaded", resIdx);
         return nullptr;
+    }
+    if (anm_is_other_arc(resIdx)) {
+        J3DAnmTransform* anm = other_arc_anim(resIdx);
+        if (anm == nullptr) return nullptr;
+        mDoExt_bckAnm* bck = JKR_NEW mDoExt_bckAnm();
+        if (bck == nullptr || !bck->init(anm, TRUE, 2, 1.0f, 0, -1, false)) {
+            if (bck != nullptr) JKR_DELETE(bck);
+            return nullptr;
+        }
+        if (s_puppetAnimCache[lruIdx].bck != nullptr) JKR_DELETE(s_puppetAnimCache[lruIdx].bck);
+        if (s_puppetAnimCache[lruIdx].buf != nullptr) JKRFreeToSysHeap(s_puppetAnimCache[lruIdx].buf);
+        s_puppetAnimCache[lruIdx].buf = nullptr;
+        s_puppetAnimCache[lruIdx].resIdx = resIdx;
+        s_puppetAnimCache[lruIdx].bck = bck;
+        s_puppetAnimCache[lruIdx].lastUsed = ++s_puppetAnimCacheClock;
+        s_puppetAnimCache[lruIdx].usedFrame = s_puppetFrame;
+        return bck;
     }
 
     u32 bufSize = 0;
@@ -2690,6 +2738,10 @@ J3DModelData* local_skin_for(const char* arcName, const char* resName) {
     return nullptr;
 }
 
+int puppet_standin();
+bool puppet_holds_ganondorf_sword();
+int puppet_wolf_standin();
+
 int puppet_skin_outfit() {
     switch (pup().outfit) {
     case kPuppetOutfitCasual: return kSkinOutfitOrdon;
@@ -2812,6 +2864,26 @@ J3DModel* puppet_private_part_idx(const char* arc, u32 index, const cXyz& scale)
     char key[40];
     std::snprintf(key, sizeof(key), "%s#%u", arc, static_cast<unsigned>(index));
     return private_part_model(key, load_part_by_index, arc, nullptr, index);
+}
+
+int puppet_standin() {
+    if (outfit_files(pup().outfit).isWolf) return -1;
+    return standin_body(puppet_skin_for(skins_slot_for_outfit(puppet_skin_outfit())));
+}
+
+int puppet_wolf_standin() {
+    if (!outfit_files(pup().outfit).isWolf) return -1;
+    return wolf_standin(puppet_skin_for(kSkinChoiceWolf));
+}
+
+bool puppet_holds(int slot, const char* skin) {
+    const char* name = puppet_skin_for(slot);
+    if (name == nullptr) name = puppet_skin_for(kSkinChoiceEquipment);
+    return name != nullptr && std::strcmp(name, skin) == 0;
+}
+
+bool puppet_holds_ganondorf_sword() {
+    return puppet_holds(kSkinChoiceMasterSword, kGanondorfSkin);
 }
 
 J3DModel* puppet_skin_part(int part, const cXyz& scale) {
@@ -3317,6 +3389,7 @@ bool local_in_hiding_event(daAlink_c* alink) {
 
 void queue_puppet_nametag(daAlink_c* alink) {
     s_nametagDlst[s_pupId].mVisible = false;
+    if (local_in_hiding_event(alink)) return;
     if (!s_nametagEnabled || pup().nametagName[0] == '\0' || pup().model == nullptr) return;
     cXyz head;
     J3DModelData* modelData = pup().model->getModelData();
@@ -3380,6 +3453,7 @@ void on_alink_execute_puppet_post(ModContext*, void*, void*, void*) {
 
     fx_owner_window(false);
     daAlink_c* alink = daAlink_getAlinkActorClass();
+    sumo_after_player(alink);
     if (alink == nullptr) {
         for (int i = 0; i < kMaxPuppets; ++i) {
             PuppetScope scope(static_cast<uint8_t>(i));
@@ -3477,6 +3551,22 @@ void update_one_puppet(daAlink_c* alink) {
     if (pup().state == 2) {
         puppet_advance_frames(pup().under);
         puppet_advance_frames(pup().upper);
+
+        u16 sumoUnder = 0xFFFF, sumoUpper = 0xFFFF;
+        f32 sumoFrame = 0.0f;
+        if (sumo_puppet_anim(s_pupId, &sumoUnder, &sumoUpper, &sumoFrame)) {
+            auto single = [](PuppetAnimHalf& half, u16 idx, f32 frame) {
+                for (int i = 0; i < kAnmSlots; ++i) {
+                    half.resIdx[i] = i == 0 ? idx : 0xFFFF;
+                    half.ratio[i] = i == 0 ? 1.0f : 0.0f;
+                    half.rate[i] = 0.0f;
+                    half.frame[i] = frame;
+                    half.targetFrame[i] = frame;
+                }
+            };
+            single(pup().under, sumoUnder, sumoFrame);
+            single(pup().upper, sumoUpper != 0xFFFF ? sumoUpper : sumoUnder, sumoFrame);
+        }
         update_puppet_anim_selection(alink);
         sync_equipment_models();
     }
@@ -3968,6 +4058,10 @@ bool puppet_hook_player_active(uint8_t playerId) {
            s_puppetSlots[playerId].model != nullptr;
 }
 
+bool puppet_hook_is_wolf_of(uint8_t playerId) {
+    return puppet_hook_player_active(playerId) && outfit_files(s_puppetSlots[playerId].outfit).isWolf;
+}
+
 bool puppet_hook_get_pose_of(uint8_t playerId, float* x, float* y, float* z, short* angleY,
     float* speedX, float* speedZ) {
     if (!puppet_hook_player_active(playerId)) return false;
@@ -4205,6 +4299,8 @@ bool shape_vis_force_show(J3DModel* model, ShapeVisGuard& guard) {
     if (model == nullptr) return false;
     J3DModelData* modelData = model->getModelData();
     if (modelData == nullptr) return false;
+
+    if (standin_owns_data(modelData)) return false;
     const u16 num = modelData->getMaterialNum();
     if (num > kMaxEquipShapes) return false;
     guard.modelData = modelData;
@@ -4287,7 +4383,7 @@ void shape_vis_restore(ShapeVisGuard& guard) {
     guard.modelData = nullptr;
 }
 
-void draw_equipment_at_joint(J3DModel* model, u16 joint) {
+void draw_equipment_at_joint(J3DModel* model, u16 joint, int hideMaterial = -1) {
     if (model == nullptr || pup().model == nullptr) return;
     J3DModelData* bodyData = pup().model->getModelData();
     if (bodyData == nullptr || joint >= bodyData->getJointNum()) return;
@@ -4295,13 +4391,17 @@ void draw_equipment_at_joint(J3DModel* model, u16 joint) {
     const bool guarded = puppet_guard_begin(model, guard);
     ShapeVisGuard vis;
     const bool visGuarded = shape_vis_force_show(model, vis);
+    if (hideMaterial >= 0 && visGuarded && hideMaterial < model->getModelData()->getMaterialNum()) {
+        J3DMaterial* mat = model->getModelData()->getMaterialNodePointer(static_cast<u16>(hideMaterial));
+        if (mat != nullptr && mat->getShape() != nullptr) mat->getShape()->hide();
+    }
     renderModelAtMtx(model, pup().model->getAnmMtx(joint), nullptr);
     if (visGuarded) shape_vis_restore(vis);
     if (guarded) puppet_guard_end(guard);
 }
 
 void draw_equipment_on_back(J3DModel* model, u16 sheathJoint, f32 tx, f32 ty, f32 tz,
-    s16 rx, s16 ry, s16 rz) {
+    s16 rx, s16 ry, s16 rz, int hideMaterial = -1) {
     if (model == nullptr || pup().model == nullptr) return;
     J3DModelData* bodyData = pup().model->getModelData();
     if (bodyData == nullptr || sheathJoint >= bodyData->getJointNum()) return;
@@ -4312,6 +4412,10 @@ void draw_equipment_on_back(J3DModel* model, u16 sheathJoint, f32 tx, f32 ty, f3
     const bool guarded = puppet_guard_begin(model, guard);
     ShapeVisGuard vis;
     const bool visGuarded = shape_vis_force_show(model, vis);
+    if (hideMaterial >= 0 && visGuarded && hideMaterial < model->getModelData()->getMaterialNum()) {
+        J3DMaterial* mat = model->getModelData()->getMaterialNodePointer(static_cast<u16>(hideMaterial));
+        if (mat != nullptr && mat->getShape() != nullptr) mat->getShape()->hide();
+    }
     renderModelAtMtx(model, mDoMtx_stack_c::get(), nullptr);
     if (visGuarded) shape_vis_restore(vis);
     if (guarded) puppet_guard_end(guard);
@@ -4321,13 +4425,20 @@ void draw_puppet_equipment() {
 
     if (outfit_files(pup().outfit).isWolf) return;
 
+    if (sumo_hides_equipment(s_pupId)) return;
+
     if (pup().wantSwordVisible) {
         draw_equipment_at_joint(pup().sheathModel, pup().sheathJoint);
+
+        const bool own = pup().swordModel != nullptr &&
+                         !standin_owns_data(pup().swordModel->getModelData());
         if (pup().swordInHand) {
-            draw_equipment_at_joint(pup().swordModel, pup().swordJoint);
+            const int tie = own && pup().swordId == kPuppetSwordWood ? 1 : -1;
+            draw_equipment_at_joint(pup().swordModel, pup().swordJoint, tie);
         } else {
+            const int blade = own && pup().swordId == kPuppetSwordOrdon ? 0 : -1;
             draw_equipment_on_back(pup().swordModel, pup().sheathJoint,
-                -18.5f, 0.14f, 12.2f, 0, cM_deg2s(33.1f), 0);
+                -18.5f, 0.14f, 12.2f, 0, cM_deg2s(33.1f), 0, blade);
         }
     }
 
@@ -4343,6 +4454,8 @@ void draw_puppet_equipment() {
         }
     }
 }
+
+bool s_bodyNotDrawn = false;
 
 void render_puppet_body_with_upper_split(J3DModel* model, const cXyz& pos, const csXyz& angle,
     daAlink_c* alink) {
@@ -4414,7 +4527,7 @@ void render_puppet_body_with_upper_split(J3DModel* model, const cXyz& pos, const
     MaterialGuard matGuard;
     const bool matGuarded = material_guard_begin(model, matGuard);
 
-    mDoExt_modelUpdateDL(model);
+    if (!s_bodyNotDrawn) mDoExt_modelUpdateDL(model);
 
     if (matGuarded) material_guard_end(matGuard);
 
@@ -4504,8 +4617,8 @@ struct PuppetWarpScope {
     }
 };
 
-void draw_puppet_shadow(daAlink_c* alink) {
-    if (pup().model == nullptr) return;
+void draw_puppet_shadow(daAlink_c* alink, J3DModel* shape) {
+    if (pup().model == nullptr || shape == nullptr) return;
     dBgS_GndChk gndChk;
     cXyz probe(pup().pos.x, pup().pos.y + 100.0f, pup().pos.z);
     gndChk.SetPos(&probe);
@@ -4514,7 +4627,7 @@ void draw_puppet_shadow(daAlink_c* alink) {
     const bool wolf = outfit_files(pup().outfit).isWolf;
     cXyz center(pup().pos.x, pup().pos.y + (wolf ? 60.0f : 100.0f), pup().pos.z);
     const f32 bodyY = pup().pos.y + (wolf ? 50.0f : 80.0f);
-    pup().shadowKey = dComIfGd_setShadow(pup().shadowKey, 0, pup().model, &center, 800.0f,
+    pup().shadowKey = dComIfGd_setShadow(pup().shadowKey, 0, shape, &center, 800.0f,
         0.0f, bodyY, groundY, gndChk, &alink->tevStr, 0, 1.0f, dDlst_shadowControl_c::getSimpleTex());
 }
 
@@ -4585,6 +4698,7 @@ void on_alink_draw_puppet_post(ModContext*, void*, void*, void*) {
     notify_queue();
     daAlink_c* alink = daAlink_getAlinkActorClass();
     if (alink == nullptr) return;
+    ganon_draw_post(alink);
 
     const bool localInCutscene = local_in_hiding_event(alink);
 
@@ -4593,7 +4707,8 @@ void on_alink_draw_puppet_post(ModContext*, void*, void*, void*) {
         PuppetScope scope(static_cast<uint8_t>(i));
 
         s_nametagDlst[s_pupId].mVisible = false;
-        if (localInCutscene) continue;
+
+        if (localInCutscene && !sumo_shows_in_cutscene(s_pupId)) continue;
         if (pup().state != 2 || pup().model == nullptr) continue;
 
         const int peerRoom = pup().peerRoom;
@@ -5353,7 +5468,30 @@ void draw_puppet_horse(daAlink_c* alink) {
     dComIfGd_set3DlineMat(pup().horseReins);
 }
 
+struct PuppetPlaceOverride {
+    bool on = false;
+    cXyz pos;
+    csXyz angle;
+    PuppetPlaceOverride() {
+        cXyz at;
+        csXyz turn;
+        if (sumo_puppet_transform(s_pupId, &at, &turn)) {
+            on = true;
+            pos = pup().pos;
+            angle = pup().angle;
+            pup().pos = at;
+            pup().angle = turn;
+        }
+    }
+    ~PuppetPlaceOverride() {
+        if (!on) return;
+        pup().pos = pos;
+        pup().angle = angle;
+    }
+};
+
 void draw_one_puppet(daAlink_c* alink) {
+    PuppetPlaceOverride place;
 
     if (alink->mClothesChangeWaitTimer != 0) return;
 
@@ -5397,10 +5535,17 @@ void draw_one_puppet(daAlink_c* alink) {
         }
     }
 
+    const int standin = puppet_standin();
+    const bool asGanon = standin >= 0 && standin_puppet_ready(s_pupId, standin);
+
+    const int wolfLook = puppet_wolf_standin();
+    const bool asBeast = wolfLook >= 0 && beast_puppet_ready(s_pupId, wolfLook);
     BodyHandGuard bodyHands;
     const bool bodyHandsApplied =
         body_hand_shapes_apply(pup().model, pup().handL, pup().handR, bodyHands);
+    s_bodyNotDrawn = asGanon || asBeast;
     render_puppet_body_with_upper_split(pup().model, pup().pos, pup().angle, alink);
+    s_bodyNotDrawn = false;
     if (bodyHandsApplied) body_hand_shapes_restore(bodyHands);
     if (s_poseDiagLogs < 30 &&
         (pup().rootClearMask != 0 || pup().footAngles[0][0] != 0 ||
@@ -5417,11 +5562,53 @@ void draw_one_puppet(daAlink_c* alink) {
     s_poseCbSeen = 0;
     puppet_guard_end(bodyGuard);
 
+    if (asBeast) beast_puppet_draw(s_pupId, pup().model, &alink->tevStr);
+    if (asGanon) {
+        standin_puppet_draw(s_pupId, pup().model, pup().handL, pup().handR, &alink->tevStr);
+
+        standin_puppet_hold_begin(s_pupId, pup().model, pup().sheathJoint);
+    }
+
+    J3DModel* const ownSword = pup().swordModel;
+    J3DModel* const ownSheath = pup().sheathModel;
+    J3DModel* const ownShield = pup().shieldModel;
+    if (pup().swordId == kPuppetSwordOrdon && puppet_holds(kSkinChoiceOrdonSword, kHerosShadeSkin)) {
+        if (J3DModel* his = shade_puppet_weapon(s_pupId, kShadePieceSword)) pup().swordModel = his;
+    }
+    if (pup().sheathId == kPuppetSheathOrdon &&
+        puppet_holds(kSkinChoiceOrdonSword, kHerosShadeSkin)) {
+        if (J3DModel* his = shade_puppet_weapon(s_pupId, kShadePieceSheath)) pup().sheathModel = his;
+    }
+    if (std::strcmp(pup().shieldArc, "HyShd") == 0 &&
+        puppet_holds(kSkinChoiceHylianShield, kHerosShadeSkin)) {
+        if (J3DModel* his = shade_puppet_weapon(s_pupId, kShadePieceShield)) pup().shieldModel = his;
+    }
+    if (pup().swordId == kPuppetSwordMaster && !outfit_files(pup().outfit).isWolf &&
+        puppet_holds_ganondorf_sword()) {
+        J3DModel* hisSword = ganon_puppet_sword(s_pupId, false);
+        J3DModel* hisSheath = ganon_puppet_sword(s_pupId, true);
+        if (hisSword != nullptr && hisSheath != nullptr) {
+            pup().swordModel = hisSword;
+            if (pup().sheathId == kPuppetSheathMaster) pup().sheathModel = hisSheath;
+        }
+    }
+
     draw_puppet_equipment();
     draw_puppet_attachments(alink);
-    draw_puppet_shadow(alink);
+    pup().swordModel = ownSword;
+    pup().sheathModel = ownSheath;
+    pup().shieldModel = ownShield;
+    if (asGanon) standin_puppet_hold_end(pup().model);
+    J3DModel* shape = asGanon ? standin_puppet_model(s_pupId)
+                      : asBeast ? beast_puppet_model(s_pupId)
+                                : pup().model;
+    draw_puppet_shadow(alink, shape != nullptr ? shape : pup().model);
     queue_puppet_nametag(alink);
 
+    if (asGanon) {
+        draw_puppet_midna(alink);
+        return;
+    }
     if (pup().faceModel != nullptr) {
 
         PuppetGuard faceGuard;

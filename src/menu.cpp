@@ -502,7 +502,9 @@ ModResult group_unfinished(ModContext*, UiElementHandle pane, void*, ModError*) 
     add_panel_header(pane, "Unfinished", nullptr, "coop-danger");
 
     add_toggle(pane, "Story progress", world_story_var(),
-        "Cutscenes and quest flags are shared. Can break a quest.");
+        "Quest flags are shared. They are only ever added, never taken away, and you get them the "
+        "next time you change area, never in the middle of a scene. Fishing records, donations "
+        "and the like stay your own.");
     add_toggle(pane, "Enemy sync", enemies_enabled_var(),
         "Enemies fight all of you: one set shared between you, instead of a copy each. Can leave an "
         "enemy alive on one screen and dead on the other.");
@@ -658,7 +660,8 @@ ModResult group_messages(ModContext*, UiElementHandle pane, void*, ModError*) {
 
     svc_ui->pane_add_section(mod_ctx, pane, "What to show");
     add_toggle(pane, "Items they find", features_vars().notifyItems,
-        "When somebody finds something that matters: a key, an item, a heart piece.", on);
+        "When somebody finds something that matters: a key, an item, a heart piece. In a "
+        "randomizer it also says where they found it, and rupees and ammo are left out.", on);
     add_toggle(pane, "Players joining and leaving", notify_kind_var(kNotifyPlayers), nullptr, on);
     add_toggle(pane, "Randomizer", notify_kind_var(kNotifyRando),
         "The host's seed arriving, switching to it, and so on.", on);
@@ -789,6 +792,11 @@ bool add_slot_dropdown(UiElementHandle pane, int slot) {
         s_slotOptions[slot].push_back(s_modelTitles[i]);
         s_slotModelNames[slot].push_back(s_modelNames[i]);
     }
+
+    if (slot == kSkinChoiceVoice) {
+        s_slotOptions[slot].push_back("Silent");
+        s_slotModelNames[slot].push_back(kSilentVoice);
+    }
     for (const std::string& option : s_slotOptions[slot]) {
         s_slotOptionPtrs[slot].push_back(option.c_str());
     }
@@ -894,6 +902,7 @@ void build_models(UiElementHandle pane, SurfaceHandles& h, UiElementHandle detai
     s_modelTitles.clear();
     s_modelAbout.clear();
     for (int i = 0; i < skins_count(); ++i) {
+        if (skins_hidden(i)) continue;
         s_modelNames.push_back(skins_name(i));
         s_modelTitles.push_back(skins_title(i));
         s_modelAbout.push_back(model_help_rml(i));
@@ -1020,6 +1029,19 @@ void build_debug(UiElementHandle pane) {
     add_button(pane, "Spawn test puppet", [](ModContext*, void*) { coop_debug_spawn_puppet(); });
     add_button(pane, "Transform", [](ModContext*, void*) { coop_debug_force_transform(); });
     add_button(pane, "Give Midna", [](ModContext*, void*) { coop_debug_give_midna(); });
+    add_button(pane, "Be Ganondorf", [](ModContext*, void*) {
+        const bool on = ganon_debug_toggle();
+        features_toast(on ? "You're Ganondorf" : "You're Link again",
+            on ? "Link-sized, with all your own things. Press again to go back." : "");
+    }, nullptr, "Draws Ganondorf in your place, Link-sized, moving with your animations. Only "
+        "what you look like changes - your items, sword and everything else are still Link's. "
+        "Only on your screen.");
+    add_button(pane, "Be Beast Ganon", [](ModContext*, void*) {
+        const bool on = beast_debug_toggle();
+        features_toast(on ? "Your wolf is Beast Ganon" : "Your wolf is the wolf again",
+            on ? "Turn into the wolf to see him. Press again to go back." : "");
+    }, nullptr, "Puts Beast Ganon in your wolf's slot (or takes him out): the wolf is drawn as him, "
+        "wolf-sized. Other players see him too.");
     add_button(pane, "Test notifications", [](ModContext*, void*) { notify_debug_test(); },
         nullptr, "One of every kind at once, to see how they stack, where they sit and how long "
         "they stay. Load a save first - on the title screen they go to Dusklight's own.");

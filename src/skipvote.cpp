@@ -36,7 +36,8 @@ uint32_t s_resendTicks = 0;
 bool s_hooked = false;
 
 bool local_in_cutscene() {
-    return daAlink_getAlinkActorClass() != nullptr && boss_local_demo_running();
+    return daAlink_getAlinkActorClass() != nullptr &&
+           (boss_local_demo_running() || sumo_local_demo_running());
 }
 
 bool same_stage(const char* stage) {

@@ -110,7 +110,23 @@ struct AttachedModelSnapshot {
     float scale;
 };
 
+const uint16_t kAnmOtherArc = 0x8000;
+const uint16_t kAnmOtherArcCount = 8;
+
+inline uint16_t anm_pack(uint16_t arcNo, uint16_t index) {
+    if (index == 0xFFFF) return 0xFFFF;
+    if (arcNo == 0xFFFF) return index < kAnmOtherArc ? index : 0xFFFF;
+    if (arcNo == 0 || arcNo > kAnmOtherArcCount || index >= 0x400) return 0xFFFF;
+    return static_cast<uint16_t>(kAnmOtherArc | (arcNo << 10) | index);
+}
+inline bool anm_is_other_arc(uint16_t packed) {
+    return packed != 0xFFFF && (packed & kAnmOtherArc) != 0;
+}
+inline uint16_t anm_arc(uint16_t packed) { return (packed >> 10) & 0xF; }
+inline uint16_t anm_index(uint16_t packed) { return packed & 0x3FF; }
+
 struct AnmSlotSnapshot {
+
     uint16_t resIdx;
     float frame;
     float ratio;

@@ -58,6 +58,12 @@ struct Skin {
     bool hasCutscenes = false;
     bool hasVoice = false;
     uint32_t hash = 0;
+
+    bool builtin = false;
+
+    bool hidden = false;
+
+    bool silentVoice = false;
 };
 
 std::vector<Skin> s_skins;
@@ -193,10 +199,34 @@ void scan_dir(const std::filesystem::path& dir, int& count) {
     }
 }
 
+const char* const kByGame = "Game";
+
+void add_builtin(const char* name, const char* author, const char* about, int first, int last,
+    bool equipment, uint32_t hash, bool silentVoice, bool hidden) {
+    Skin skin;
+    skin.name = name;
+    skin.title = name;
+    skin.author = author;
+    skin.about = about;
+    skin.builtin = true;
+    for (int o = first; o <= last; ++o) skin.has[o][kSkinPartBody] = true;
+    skin.hasEquipment = equipment;
+    skin.hash = hash;
+    skin.silentVoice = silentVoice;
+    skin.hidden = hidden;
+    s_skins.push_back(skin);
+}
+
 void rescan() {
     s_skins.clear();
     s_scanned = true;
     int found = 0;
+
+    add_builtin(kGanondorfSkin, kByGame, "", kSkinOutfitHero, kSkinOutfitMagic, true, 0x6A4E0D0Fu, true, false);
+
+    add_builtin(kBeastGanonSkin, kByGame, "", kSkinOutfitWolf, kSkinOutfitWolf, false, 0x6A4E0D10u, false, true);
+
+    add_builtin(kHerosShadeSkin, kByGame, "", kSkinOutfitHero, kSkinOutfitWolf, true, 0x6A4E0D11u, true, false);
     std::filesystem::path dir;
     if (models_dir(dir)) scan_dir(dir, found);
     std::sort(s_skins.begin(), s_skins.end(),
@@ -510,6 +540,11 @@ int skins_count() {
     return static_cast<int>(s_skins.size());
 }
 
+bool skins_hidden(int index) {
+    if (!s_scanned) rescan();
+    return index >= 0 && index < static_cast<int>(s_skins.size()) && s_skins[index].hidden;
+}
+
 const char* skins_name(int index) {
     if (!s_scanned) rescan();
     if (index < 0 || index >= static_cast<int>(s_skins.size())) return "";
@@ -716,6 +751,11 @@ void skins_local_choices(SkinChoices* out) {
     if (out == nullptr) return;
     std::memset(out, 0, sizeof(*out));
     for (int i = 0; i < kSkinChoiceCount; ++i) {
+
+        if (i == kSkinChoiceVoice && skins_local_slot(i) == kSilentVoice) {
+            std::strncpy(out->name[i], kSilentVoice, kSkinNameMax - 1);
+            continue;
+        }
         const Skin* skin = find(skins_local_slot(i).c_str());
         if (skin == nullptr) continue;
         std::strncpy(out->name[i], skin->name.c_str(), kSkinNameMax - 1);
@@ -723,15 +763,21 @@ void skins_local_choices(SkinChoices* out) {
     }
 }
 
+std::string preset_value(const char* name, int slot) {
+    const std::string value = name != nullptr ? name : "";
+    if (slot != kSkinChoiceVoice || value.empty()) return value;
+    const Skin* skin = find(name);
+    return skin != nullptr && skin->silentVoice ? std::string(kSilentVoice) : value;
+}
+
 bool skins_all_same(const char* name) {
-    const std::string want = name != nullptr ? name : "";
     for (int i = 0; i < kSkinChoiceCount; ++i) {
 
         if (i >= kSkinChoiceFirstItem) {
             if (!skins_local_slot(i).empty()) return false;
             continue;
         }
-        if (skins_local_slot(i) != want) return false;
+        if (skins_local_slot(i) != preset_value(name, i)) return false;
     }
     return true;
 }
@@ -759,7 +805,8 @@ void skins_set_local_all(const char* name) {
         if (s_slotVar[i] == 0) continue;
 
         const bool piece = i >= kSkinChoiceFirstItem;
-        svc_config->set_string(mod_ctx, s_slotVar[i], (piece || name == nullptr) ? "" : name);
+        const std::string value = preset_value(name, i);
+        svc_config->set_string(mod_ctx, s_slotVar[i], (piece || name == nullptr) ? "" : value.c_str());
     }
     after_choice_change();
 }
@@ -789,7 +836,8 @@ J3DModelData* part_data(const char* name, int outfit, int part, bool forLink) {
     if (part < 0 || part >= kSkinPartCount) return nullptr;
     if (outfit < 0 || outfit >= kSkinOutfitCount) return nullptr;
     const Skin* skin = find(name);
-    if (skin == nullptr || !skin->has[outfit][part]) return nullptr;
+
+    if (skin == nullptr || skin->builtin || !skin->has[outfit][part]) return nullptr;
 
     for (const LoadedPart& loaded : s_loadedParts) {
         if (loaded.part != part || loaded.outfit != outfit || loaded.skin != skin->name ||
@@ -831,7 +879,7 @@ J3DModelData* skins_local_cutscene_data(const char* file) {
     const std::string mine = skins_local_slot(skins_slot_for_outfit(local_skin_outfit()));
     if (mine.empty() || file == nullptr || file[0] == '\0') return nullptr;
     const Skin* skin = find(mine.c_str());
-    if (skin == nullptr) return nullptr;
+    if (skin == nullptr || skin->builtin) return nullptr;
 
     for (const LoadedCutscene& loaded : s_loadedCutscenes) {
         if (loaded.skin != skin->name || loaded.file != file) continue;
@@ -872,6 +920,7 @@ J3DModelData* equipment_data(const char* name, const char* file, bool forLink) {
     if (file == nullptr || file[0] == '\0') return nullptr;
     const Skin* skin = find(name);
     if (skin == nullptr) return nullptr;
+    if (skin->builtin) return skin->name == kGanondorfSkin ? ganon_skin_equipment(file) : nullptr;
     const std::string key =
         std::string(skin->name) + (forLink ? "/equipment-link/" : "/equipment/") + file;
     for (const LoadedCutscene& loaded : s_loadedCutscenes) {
@@ -895,6 +944,10 @@ bool skins_ships_equipment_file(const char* name, const char* file) {
     if (!s_scanned) rescan();
     const Skin* skin = find(name);
     if (skin == nullptr || file == nullptr) return false;
+    if (skin->builtin) {
+        return (skin->name == kGanondorfSkin && ganon_skin_ships(file)) ||
+               (skin->name == kHerosShadeSkin && shade_skin_ships(file));
+    }
     std::error_code ec;
     const std::filesystem::path root(skin->path);
     if (exists_ci(root / "equipment" / file, ec) && !ec) return true;

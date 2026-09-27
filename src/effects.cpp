@@ -208,6 +208,17 @@ void on_local_sound_pre(ModContext*, void*, void*, void*) {
     voices_begin_local();
 }
 
+bool silence_ours(void* args, bool objectSound) {
+    if (s_suppress > 0 || !voices_local_silent()) return false;
+    if (!voices_is_link_voice(mods::arg<JAISoundID>(args, 1))) return false;
+    if (objectSound) {
+        Z2SoundObjBase* self = mods::arg<Z2SoundObjBase*>(args, 0);
+        return in_owner_window() || (self != nullptr && in_owned_memory(self));
+    }
+    const Vec* pos = mods::arg<const Vec*>(args, 2);
+    return in_owner_window() || (pos != nullptr && in_owned_memory(pos));
+}
+
 void on_obj_sound(void* args, uint8_t kind) {
     if (!s_captureSounds || s_suppress > 0) return;
     Z2SoundObjBase* self = mods::arg<Z2SoundObjBase*>(args, 0);
@@ -524,18 +535,36 @@ void fx_init() {
     const ModResult b = mods::hook::add_post<CoopFxObjLevelSound>(on_obj_level_sound_post);
     mods::hook::add_pre<CoopFxSeStart>(
         [](ModContext* ctx, void* a, void* r, void* u) -> HookAction {
+            if (silence_ours(a, false)) {
+                if (r != nullptr) *static_cast<bool*>(r) = false;
+                return HOOK_SKIP_ORIGINAL;
+            }
             on_local_sound_pre(ctx, a, r, u);
             return HOOK_CONTINUE;
         });
     mods::hook::add_pre<CoopFxSeStartLevel>(
         [](ModContext* ctx, void* a, void* r, void* u) -> HookAction {
+            if (silence_ours(a, false)) {
+                if (r != nullptr) *static_cast<bool*>(r) = false;
+                return HOOK_SKIP_ORIGINAL;
+            }
             on_local_sound_pre(ctx, a, r, u);
             return HOOK_CONTINUE;
         });
     mods::hook::add_pre<CoopFxObjSound>(
         [](ModContext* ctx, void* a, void* r, void* u) -> HookAction {
+            if (silence_ours(a, true)) {
+                if (r != nullptr) *static_cast<Z2SoundHandlePool**>(r) = nullptr;
+                return HOOK_SKIP_ORIGINAL;
+            }
             on_local_sound_pre(ctx, a, r, u);
             return HOOK_CONTINUE;
+        });
+    mods::hook::add_pre<CoopFxObjLevelSound>(
+        [](ModContext*, void* a, void* r, void*) -> HookAction {
+            if (!silence_ours(a, true)) return HOOK_CONTINUE;
+            if (r != nullptr) *static_cast<Z2SoundHandlePool**>(r) = nullptr;
+            return HOOK_SKIP_ORIGINAL;
         });
     const ModResult c = mods::hook::add_post<CoopFxSeStart>(on_se_start_post);
     const ModResult d = mods::hook::add_post<CoopFxSeStartLevel>(on_se_start_level_post);
@@ -647,10 +676,14 @@ void fx_on_sounds(const uint8_t* payload, size_t size, uint8_t from) {
         voices_begin_remote(haveIt ? voiceSkin : nullptr);
     }
 
+    const bool theySilent =
+        peer.present && std::strcmp(peer.skins.name[kSkinChoiceVoice], kSilentVoice) == 0;
+
     ++s_suppress;
     for (size_t i = 0; i < count; ++i) {
         MsgSoundEntry entry;
         std::memcpy(&entry, payload + 1 + i * sizeof(MsgSoundEntry), sizeof(entry));
+        if (theySilent && voices_is_link_voice(entry.id)) continue;
         const f32 px = x + entry.rel[0];
         const f32 py = y + entry.rel[1];
         const f32 pz = z + entry.rel[2];
@@ -673,6 +706,42 @@ void fx_on_sounds(const uint8_t* payload, size_t size, uint8_t from) {
     }
     --s_suppress;
     voices_end_remote();
+}
+
+void fx_play_for(uint8_t playerId, uint32_t soundId, const float* pos) {
+    Z2AudioMgr* se = Z2AudioMgr::getInterface();
+    if (se == nullptr || pos == nullptr) return;
+    const bool ours = playerId == coop_net_local_id();
+    const f32 volume = ours ? 1.0f : sound_volume();
+    if (volume <= 0.0f) return;
+    s8 reverb = 0;
+    if (ours) {
+        if (voices_local_silent() && voices_is_link_voice(soundId)) return;
+        voices_begin_local();
+        daAlink_c* alink = daAlink_getAlinkActorClass();
+        if (alink != nullptr) reverb = dComIfGp_getReverb(fopAcM_GetRoomNo(alink));
+    } else {
+        const CoopPeer& peer = features_peer_of(playerId);
+        const char* voiceSkin = peer.present ? peer.skins.name[kSkinChoiceVoice] : "";
+        if (std::strcmp(voiceSkin, kSilentVoice) == 0 && voices_is_link_voice(soundId)) return;
+        const bool haveIt = voiceSkin[0] != '\0' &&
+                            skins_have(voiceSkin, peer.skins.hash[kSkinChoiceVoice]);
+        voices_begin_remote(haveIt ? voiceSkin : nullptr);
+        if (peer.present && peer.inGame) reverb = dComIfGp_getReverb(static_cast<int>(peer.curRoom));
+    }
+    ++s_suppress;
+    Vec& at = s_oneShotPos[s_oneShotNext];
+    s_oneShotNext = (s_oneShotNext + 1) % 64;
+    at.x = pos[0];
+    at.y = pos[1];
+    at.z = pos[2];
+    se->seStart(JAISoundID(soundId), &at, 0, reverb, 1.0f, volume, -1.0f, -1.0f, 0);
+    --s_suppress;
+    if (ours) {
+        voices_end_local();
+    } else {
+        voices_end_remote();
+    }
 }
 
 void fx_on_particles(const uint8_t* payload, size_t size, uint8_t from) {

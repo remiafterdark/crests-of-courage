@@ -6,7 +6,9 @@
 
 #include "d/actor/d_a_alink.h"
 #include "d/actor/d_a_e_ym.h"
+#include "d/actor/d_a_kytag04.h"
 #include "d/actor/d_a_obj_drop.h"
+#include "d/d_kankyo.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_stage.h"
 #include "f_op/f_op_actor_mng.h"
@@ -36,12 +38,17 @@ bool s_applying = false;
 
 bool s_resync = true;
 
+uint32_t s_fullSince = 0;
+bool s_finishSaid = false;
+
 bool live() {
     return coop_net_connected() && daAlink_getAlinkActorClass() != nullptr &&
            dComIfGp_getStartStageName() != nullptr;
 }
 
 void reset_stage() {
+    s_fullSince = 0;
+    s_finishSaid = false;
     for (TrackedBug& b : s_bugs) b = TrackedBug{};
     for (bool& t : s_tboxWas) t = false;
     s_lastCount = -1;
@@ -243,6 +250,48 @@ void on_tear_got(const MsgTearGot& msg) {
         static_cast<int>(msg.save), count, static_cast<int>(msg.area));
 }
 
+struct TagFind {
+    kytag04_class* found = nullptr;
+};
+
+void* find_vessel_tag(void* proc, void* data) {
+    auto* actor = static_cast<fopAc_ac_c*>(proc);
+    if (actor == nullptr || fopAcM_GetName(actor) != fpcNm_KYTAG04_e) return nullptr;
+    auto* tag = static_cast<kytag04_class*>(actor);
+    if (tag->field_0x5b4 != 1 || tag->field_0x5b5 == 0xFF) return nullptr;
+    static_cast<TagFind*>(data)->found = tag;
+    return actor;
+}
+
+void finish_twilight() {
+    const int area = dComIfGp_getStartStageDarkArea();
+    const int need = dComIfGp_getNeedLightDropNum();
+    if (area < 0 || area > 3 || need <= 0 || !dKy_darkworld_check() ||
+        dComIfGs_getLightDropNum(static_cast<u8>(area)) < need) {
+        s_fullSince = 0;
+        return;
+    }
+    if (s_fullSince == 0) s_fullSince = s_tick;
+    if (s_tick - s_fullSince < 60 || dComIfGp_event_runCheck()) return;
+    TagFind find;
+    fopAcM_Search(find_vessel_tag, &find);
+    if (find.found == nullptr) {
+
+        if (!s_finishSaid) {
+            s_finishSaid = true;
+            coop_log::info("coop_mod: [TWILIGHT] the vessel is full but this room has no way out "
+                           "of it - the next twilit stage will take us");
+        }
+        return;
+    }
+    const int room = dComIfGp_roomControl_getStayNo();
+    if (dComIfGs_isSwitch(find.found->field_0x5b5, room)) return;
+    dComIfGs_onSwitch(find.found->field_0x5b5, room);
+    coop_log::info("coop_mod: [TWILIGHT] the vessel in area {} was filled by somebody else - "
+                   "warping to the spring (switch {})", area, static_cast<int>(find.found->field_0x5b5));
+    features_toast("The Vessel of Light is full", "The twilight is lifting.");
+}
+
 }
 
 void twilight_update() {
@@ -261,6 +310,7 @@ void twilight_update() {
     if (s_applying) return;
     watch_bugs();
     watch_tears();
+    finish_twilight();
 }
 
 void twilight_on_message(uint8_t type, const uint8_t* payload, size_t size) {
