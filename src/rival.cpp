@@ -18,6 +18,7 @@
 IMPORT_OPTIONAL_SERVICE(ActorService, svc_actor);
 
 DEFINE_HOOK_SYMBOL("daAlink_c::checkCutFastReady", bool(daAlink_c*), RivalCutFastReadyHook);
+DEFINE_HOOK_SYMBOL("daAlink_c::procHookshotFly", int(daAlink_c*), RivalHookshotFlyHook);
 
 bool rival_can_mortal_draw(fopAc_ac_c* target);
 
@@ -52,6 +53,8 @@ u32 s_frame = 0;
 
 fpc_ProcID s_rivalOf[kCoopMaxPlayers];
 
+fpc_ProcID s_flyAnchor = fpcM_ERROR_PROCESS_ID_e;
+
 const f32 kHumanRadius = 35.0f;
 const f32 kHumanHeight = 150.0f;
 const f32 kWolfRadius = 45.0f;
@@ -67,6 +70,7 @@ const f32 kStillEpsilon2 = 1.5f * 1.5f;
 const u8 kCombatGuard = 1;
 const u8 kCombatDown = 2;
 const u8 kCombatHurt = 4;
+const u8 kCombatOnPeahat = 8;
 
 const u32 kTakesEverything = 0xFFFFFFFEu;
 
@@ -164,19 +168,23 @@ int daCoopRival_c::Execute() {
     daAlink_c* alink = daAlink_getAlinkActorClass();
     f32 x, y, z;
     short angle = 0;
-    if (!pvp_active() || alink == nullptr ||
+    const bool pvp = pvp_active();
+    const u8 combat = puppet_hook_combat_of(mPlayer);
+    const bool anchor = (combat & kCombatOnPeahat) != 0;
+    if ((!pvp && !anchor) || alink == nullptr ||
         !puppet_hook_get_pose_of(mPlayer, &x, &y, &z, &angle, nullptr, nullptr)) {
         attention_info.flags = 0;
         return 1;
     }
-    const u8 combat = puppet_hook_combat_of(mPlayer);
     const bool wolf = puppet_hook_is_wolf_of(mPlayer);
 
     if (mBody.ChkTgHit()) {
         dCcD_GObjInf* at = mBody.GetTgHitGObj();
         fopAc_ac_c* hitter = mBody.GetTgHitAc();
-        if (at != nullptr && ours(hitter) && s_frame >= mNextHit) {
-            const bool clawshot = (at->GetAtType() & AT_TYPE_HOOKSHOT) != 0;
+        const bool clawshotAt = at != nullptr && (at->GetAtType() & AT_TYPE_HOOKSHOT) != 0;
+
+        if (at != nullptr && ours(hitter) && s_frame >= mNextHit && pvp && !(anchor && clawshotAt)) {
+            const bool clawshot = clawshotAt;
 
             cXyz from = (clawshot || hitter == nullptr) ? alink->current.pos
                                                         : hitter->current.pos;
@@ -245,7 +253,7 @@ int daCoopRival_c::Execute() {
         coop_log::info("coop_mod: [PVP] ending blow on {}", mPlayer);
     }
 
-    const bool hooked = fopAcM_checkHookCarryNow(this) != 0;
+    const bool hooked = fopAcM_checkHookCarryNow(this) != 0 && !anchor;
     if (!hooked) current.pos.set(x, y, z);
     old.pos = current.pos;
 
@@ -261,7 +269,7 @@ int daCoopRival_c::Execute() {
     eyePos.set(current.pos.x, current.pos.y + height * 0.85f, current.pos.z);
     attention_info.position.set(current.pos.x, current.pos.y + height + 20.0f, current.pos.z);
 
-    if (pvp_lock_on()) {
+    if (pvp && pvp_lock_on()) {
         attention_info.flags = fopAc_AttnFlag_BATTLE_e;
         attention_info.distances[fopAc_attn_BATTLE_e] = 3;
     } else {
@@ -298,11 +306,19 @@ int daCoopRival_c::Execute() {
 
     mBody.SetTgHitMark(CcG_Tg_UNK_MARK_6);
 
-    if (!guard) {
-        fopAcM_OnStatus(this, fopAcStts_UNK_0x80000_e);
-    } else if (!hooked) {
+    if (anchor) {
         fopAcM_OffStatus(this, fopAcStts_UNK_0x80000_e);
+        fopAcM_OnStatus(this, fopAcStts_UNK_0x200000_e);
+    } else {
+        fopAcM_OffStatus(this, fopAcStts_UNK_0x200000_e);
+        if (!guard) {
+            fopAcM_OnStatus(this, fopAcStts_UNK_0x80000_e);
+        } else if (!hooked) {
+            fopAcM_OffStatus(this, fopAcStts_UNK_0x80000_e);
+        }
     }
+
+    mBody.SetTgType(pvp ? kTakesEverything : AT_TYPE_HOOKSHOT);
 
     if (s_frame < mInvulnUntil && (combat & kCombatDown) == 0) {
         mBody.OffTgSetBit();
@@ -339,7 +355,7 @@ int daCoopRival_c::Execute() {
             to.z);
     }
 
-    if ((combat & kCombatDown) != 0 || finishing) {
+    if ((combat & kCombatDown) != 0 || finishing || anchor) {
         mBody.OffCoSetBit();
     } else {
         mBody.OnCoSetBit();
@@ -399,6 +415,32 @@ void rival_init() {
             if (!rival_can_mortal_draw(self->mAttention->LockonTarget(0))) *ready = false;
         });
     coop_log::info("coop_mod: [PVP] mortal draw gate hook: {}", static_cast<int>(draw));
+
+    const ModResult fly = mods::hook::add_pre<RivalHookshotFlyHook>(
+        [](ModContext*, void* args, void*, void*) -> HookAction {
+            auto* self = mods::arg<daAlink_c*>(args, 0);
+            s_flyAnchor = fpcM_ERROR_PROCESS_ID_e;
+            if (self == nullptr || self != daAlink_getAlinkActorClass()) return HOOK_CONTINUE;
+            fopAc_ac_c* target = self->mHookTargetAcKeep.getActor();
+            if (rival_is(target) && fopAcM_CheckStatus(target, fopAcStts_UNK_0x200000_e)) {
+                s_flyAnchor = fopAcM_GetID(target);
+            }
+            return HOOK_CONTINUE;
+        });
+    const ModResult flyPost = mods::hook::add_post<RivalHookshotFlyHook>(
+        [](ModContext*, void* args, void*, void*) {
+            auto* self = mods::arg<daAlink_c*>(args, 0);
+            if (s_flyAnchor == fpcM_ERROR_PROCESS_ID_e || self == nullptr) return;
+            const fpc_ProcID id = s_flyAnchor;
+            s_flyAnchor = fpcM_ERROR_PROCESS_ID_e;
+            if (self->mProcID != daAlink_c::PROC_FALL) return;
+            auto* anchor = static_cast<fopAc_ac_c*>(fopAcM_SearchByID(id));
+            if (anchor == nullptr || !fopAcM_CheckStatus(anchor, fopAcStts_UNK_0x200000_e)) return;
+            self->procHookshotRoofWaitInit(1, anchor, 0);
+            coop_log::info("coop_mod: [PVP] hanging off a player on a Peahat");
+        });
+    coop_log::info("coop_mod: [PVP] hang-off-a-player hooks: {}/{}", static_cast<int>(fly),
+        static_cast<int>(flyPost));
     coop_log::info("coop_mod: [PVP] rival actor {}", s_registered ? "registered" : "refused");
 }
 
@@ -407,11 +449,23 @@ void rival_update() {
     if (!s_registered) return;
     daAlink_c* alink = daAlink_getAlinkActorClass();
 
-    const bool on = pvp_active() && alink != nullptr && !dComIfGp_isEnableNextStage() &&
-                    !sumo_hides_equipment(coop_net_local_id());
+    const bool can = alink != nullptr && !dComIfGp_isEnableNextStage() &&
+                     !sumo_hides_equipment(coop_net_local_id());
+    const bool on = pvp_active() && can;
     for (u8 id = 0; id < kCoopMaxPlayers; ++id) {
-        const bool want = on && id != coop_net_local_id() &&
+        const bool here = id != coop_net_local_id() &&
                           puppet_hook_get_pose_of(id, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+        const bool anchor = here && (puppet_hook_combat_of(id) & kCombatOnPeahat) != 0;
+
+        if (!anchor && alink != nullptr && alink->mProcID == daAlink_c::PROC_HOOKSHOT_ROOF_WAIT) {
+            daCoopRival_c* rival = rival_actor(id);
+            if (rival != nullptr && alink->mCargoCarryAcKeep.getActor() == rival) {
+                fopAcM_cancelHookCarryNow(rival);
+                alink->procFallInit(1, 5.0f);
+                coop_log::info("coop_mod: [PVP] player {} let go of their Peahat - we drop", id);
+            }
+        }
+        const bool want = here && (on || (can && anchor));
         if (!want) {
             if (s_rivalOf[id] != fpcM_ERROR_PROCESS_ID_e) remove_rival(id);
             continue;
@@ -445,6 +499,7 @@ bool rival_hooked_pos(uint8_t player, cXyz* pos) {
     if (player >= kCoopMaxPlayers || !pvp_active()) return false;
     daCoopRival_c* rival = rival_actor(player);
     if (rival == nullptr || fopAcM_checkHookCarryNow(rival) == 0) return false;
+    if (fopAcM_CheckStatus(rival, fopAcStts_UNK_0x200000_e)) return false;
     if (pos != nullptr) *pos = rival->current.pos;
     return true;
 }

@@ -16,6 +16,7 @@
 #include "Z2AudioLib/Z2SeMgr.h"
 #include "d/actor/d_a_alink.h"
 #include "d/d_com_inf_game.h"
+#include "d/d_meter2_info.h"
 #include "d/d_item.h"
 #include "m_Do/m_Do_main.h"
 #include "d/d_item_data.h"
@@ -499,7 +500,10 @@ void apply_death_link(const MsgDeathLink& msg) {
 }
 
 void on_item_given(ModContext*, const ItemGiveInfo* info, void*) {
-    if (info == nullptr || info->origin != ITEM_GIVE_ORIGIN_GAME) return;
+    if (info == nullptr) return;
+
+    const bool queuedCheck = info->origin == ITEM_GIVE_ORIGIN_QUEUE && info->check_name != nullptr;
+    if (info->origin != ITEM_GIVE_ORIGIN_GAME && !queuedCheck) return;
     if (!coop_net_connected() || !coop_session(kSessItems, cfg_bool(s_vars.syncInventory, true))) return;
 
     if (info->item == dItemNo_UTAWA_HEART_e) s_heartGraceUntil = s_invTick + 120;
@@ -517,6 +521,35 @@ void on_item_given(ModContext*, const ItemGiveInfo* info, void*) {
     MsgItem msg{info->item};
     coop_net_send(kMsgItem, &msg, sizeof(msg));
     coop_log::info("coop_mod: [INV] relayed item {:#x}", info->item);
+}
+
+void equip_if_nothing_better(uint8_t item) {
+    const uint8_t sword = dComIfGs_getSelectEquipSword();
+    const uint8_t shield = dComIfGs_getSelectEquipShield();
+    switch (item) {
+    case dItemNo_WOOD_STICK_e:
+    case dItemNo_SWORD_e:
+    case dItemNo_MASTER_SWORD_e:
+    case dItemNo_LIGHT_SWORD_e:
+        if (sword == dItemNo_NONE_e || (item == dItemNo_SWORD_e && sword == dItemNo_WOOD_STICK_e) ||
+            (item == dItemNo_LIGHT_SWORD_e && sword == dItemNo_MASTER_SWORD_e))
+        {
+            dMeter2Info_setSword(item, false);
+            coop_log::info("coop_mod: [INV] equipped the {:#x} we were given", item);
+        }
+        break;
+    case dItemNo_WOOD_SHIELD_e:
+    case dItemNo_SHIELD_e:
+    case dItemNo_HYLIA_SHIELD_e:
+        if (shield == dItemNo_NONE_e || (item == dItemNo_SHIELD_e && shield == dItemNo_WOOD_SHIELD_e)) {
+            dMeter2Info_setShield(item, false);
+            if (daAlink_c* alink = daAlink_getAlinkActorClass()) alink->setShieldChange();
+            coop_log::info("coop_mod: [INV] equipped the {:#x} we were given", item);
+        }
+        break;
+    default:
+        break;
+    }
 }
 
 bool grant_equipment_without_equipping(uint8_t item) {
@@ -537,6 +570,7 @@ bool grant_equipment_without_equipping(uint8_t item) {
         return false;
     }
     dComIfGs_onItemFirstBit(item);
+    equip_if_nothing_better(item);
     return true;
 }
 
@@ -946,7 +980,7 @@ void apply_remote_bottle(uint8_t event, uint8_t item, uint8_t from) {
 
 void send_hello() {
     MsgHello msg{};
-    msg.version = kCoopProtocolVersion;
+    msg.version = kCoopWireVersion;
     copy_name(msg.name, features_local_name());
     coop_net_send(kMsgHello, &msg, sizeof(msg));
 }
@@ -1060,14 +1094,15 @@ void on_hello(const uint8_t* payload, size_t size, uint8_t from) {
     peer_slot(from).present = true;
     peer_slot(from).name = wire_name(msg.name);
     remember_name(from, peer_slot(from).name);
-    coop_log::info("coop_mod: hello from '{}' (protocol {})", peer_slot(from).name, msg.version);
-    if (msg.version != kCoopProtocolVersion) {
+    coop_log::info("coop_mod: hello from '{}' (version {})", peer_slot(from).name,
+        coop_version_text(msg.version));
+    if (msg.version != kCoopWireVersion) {
 
-        coop_log::info("coop_mod: refusing '{}' - protocol {} against our {}",
-            peer_slot(from).name, msg.version, kCoopProtocolVersion);
+        coop_log::info("coop_mod: refusing '{}' - version {} against our {}",
+            peer_slot(from).name, coop_version_text(msg.version), COOP_MOD_VERSION);
         toast("Different mod version",
-            peer_slot(from).name + " has version " + std::to_string(msg.version) + ", you have " +
-                std::to_string(kCoopProtocolVersion) + ". Everyone needs the same version.",
+            peer_slot(from).name + " has " + coop_version_text(msg.version) + ", you have " +
+                COOP_MOD_VERSION + ". Everyone needs the same version.",
             12000);
         coop_net_disconnect();
         return;

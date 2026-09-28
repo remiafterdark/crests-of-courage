@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <string>
@@ -380,7 +381,7 @@ void send_stun_requests() {
 }
 
 void say_hello() {
-    std::string hello = "{\"op\":\"hello\",\"v\":" + std::to_string(kCoopProtocolVersion) +
+    std::string hello = "{\"op\":\"hello\",\"v\":" + std::to_string(kCoopWireVersion) +
                         ",\"ep\":\"" + json_escape(s_mapped) + "\",\"port\":" +
                         std::to_string(s_localPort);
     if (s_host) {
@@ -539,8 +540,9 @@ bool on_punch(const std::string& from, const uint8_t* data, size_t size) {
 std::string error_text(const std::string& why, const std::string& detail) {
     if (why == "no_room") return "There is no room " + s_code + ". Check the code with the host.";
     if (why == "version") {
-        return "The host is on version " + detail + " and you are on " +
-               std::to_string(kCoopProtocolVersion) + ". You both need the same one.";
+        const int theirs = std::atoi(detail.c_str());
+        return "The host is on " + coop_version_text(static_cast<uint16_t>(theirs)) +
+               " and you are on " COOP_MOD_VERSION ". You both need the same one.";
     }
     if (why == "busy") return "That room is busy. Try again in a moment.";
     if (why == "taken") {

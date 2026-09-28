@@ -1,8 +1,33 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 const uint16_t kCoopProtocolVersion = 72;
+
+#ifndef COOP_MOD_VERSION
+#define COOP_MOD_VERSION "0.0.0"
+#endif
+constexpr uint16_t coop_version_number(const char* v) {
+    unsigned parts[3] = {0, 0, 0};
+    int part = 0;
+    for (; *v != '\0' && part < 3; ++v) {
+        if (*v == '.') {
+            ++part;
+        } else if (*v >= '0' && *v <= '9') {
+            parts[part] = parts[part] * 10 + static_cast<unsigned>(*v - '0');
+        }
+    }
+    return static_cast<uint16_t>(parts[0] * 10000 + parts[1] * 100 + parts[2]);
+}
+const uint16_t kCoopWireVersion = coop_version_number(COOP_MOD_VERSION);
+static_assert(kCoopWireVersion > 1000, "mod.json's version has to be a.b.c");
+
+inline std::string coop_version_text(uint16_t wire) {
+    if (wire < 1000) return "an older one";
+    return std::to_string(wire / 10000) + "." + std::to_string(wire / 100 % 100) + "." +
+           std::to_string(wire % 100);
+}
 
 const int kCoopMaxPlayers = 16;
 

@@ -287,6 +287,19 @@ struct Puppet {
     u16 horseIdleAnm = 0xFFFF;
     uint32_t horseIdleSeq = 0;
 
+    HorseSnapshot horseHist[4] = {};
+    int horseHistCount = 0;
+    struct RiderFrame {
+        uint32_t tick = 0;
+        cXyz pos;
+        csXyz angle;
+    };
+    RiderFrame riderHist[8] = {};
+    int riderHistCount = 0;
+    f32 netClock = 0.0f;
+    bool netClockSet = false;
+    uint32_t horseInterval = 2;
+
     MidnaSnapshot midna{};
     bool midnaActive = false;
     int midnaAge = 0;
@@ -777,6 +790,9 @@ void release_puppet() {
     pup().midnaActive = false;
 
     pup().horseAge = 1 << 20;
+    pup().horseHistCount = 0;
+    pup().riderHistCount = 0;
+    pup().netClockSet = false;
     retire_get_item_arc();
     pup().getItemNoCached = 0xFF;
     puppet_free_later(pup().model);
@@ -3448,6 +3464,11 @@ void queue_boss_overlay_from_draw() {
 void update_one_puppet(daAlink_c* alink);
 void horse_idle_tick();
 
+void net_clock_tick();
+void horse_hist_push(const HorseSnapshot& snap);
+void rider_hist_push(uint32_t tick, const cXyz& pos, const csXyz& angle);
+bool rider_on_clock(cXyz* pos, csXyz* angle);
+
 daAlink_c* s_builtAgainstAlink = nullptr;
 void* s_builtAgainstArcHeap = nullptr;
 
@@ -3503,6 +3524,7 @@ void on_alink_execute_puppet_post(ModContext*, void*, void*, void*) {
 void update_one_puppet(daAlink_c* alink) {
     if (pup().midnaActive && ++pup().midnaAge > kMidnaStaleTicks) pup().midnaActive = false;
     if (pup().horseAge < (1 << 20)) ++pup().horseAge;
+    net_clock_tick();
     horse_idle_tick();
     if (pup().getItemArcOld[0] != '\0' && --pup().getItemArcOldTimer <= 0) {
         unloadObjectArchive(pup().getItemArcOld);
@@ -3566,7 +3588,14 @@ void update_one_puppet(daAlink_c* alink) {
 
     update_puppet_vfx(alink);
 
-    if (pup().state != 0) {
+    cXyz ridePos;
+    csXyz rideAngle;
+    if (pup().state != 0 && rider_on_clock(&ridePos, &rideAngle)) {
+
+        pup().prevPos = pup().pos;
+        pup().pos = ridePos;
+        pup().angle = rideAngle;
+    } else if (pup().state != 0) {
         const f32 kPosSmoothing = 0.35f;
         pup().prevPos = pup().pos;
         pup().pos.x += (pup().targetPos.x - pup().pos.x) * kPosSmoothing;
@@ -3679,6 +3708,7 @@ void puppet_hook_on_horse_snapshot(uint8_t playerId, const HorseSnapshot& snap) 
     pup().horsePrev = last;
     pup().horse = snap;
     pup().horseAge = 0;
+    horse_hist_push(snap);
 }
 
 void puppet_hook_on_midna_snapshot(uint8_t playerId, const MidnaSnapshot& snap) {
@@ -3769,6 +3799,7 @@ void puppet_hook_on_network_snapshot(uint8_t playerId, float x, float y, float z
         sizeof(pup().wantShieldArc) - 1);
     pup().wantShieldArc[sizeof(pup().wantShieldArc) - 1] = '\0';
     const cXyz newTarget(x, y, z);
+    rider_hist_push(equipment.worldTick, newTarget, csXyz(angleX, angleY, angleZ));
 
     auto apply_slots = [](PuppetAnimHalf& half, const AnmSlotSnapshot* in) {
         for (int i = 0; i < kAnmSlots; ++i) {
@@ -5287,6 +5318,155 @@ void draw_puppet_midna(daAlink_c* alink) {
     j3dSys.setDrawBuffer(saved1, 1);
 }
 
+void horse_hist_push(const HorseSnapshot& snap) {
+    int& n = pup().horseHistCount;
+    if (snap.jointCount == 0) {
+        n = 0;
+        return;
+    }
+    if (n > 0) {
+        const uint32_t newest = pup().horseHist[n - 1].tick;
+        if (snap.tick <= newest) {
+
+            if (newest - snap.tick < 600) return;
+            n = 0;
+        } else {
+            const uint32_t gap = snap.tick - newest;
+            pup().horseInterval = gap < 1 ? 1 : (gap > 12 ? 12 : gap);
+        }
+    }
+    const int cap = static_cast<int>(sizeof(pup().horseHist) / sizeof(pup().horseHist[0]));
+    if (n == cap) {
+        for (int i = 1; i < cap; ++i) pup().horseHist[i - 1] = pup().horseHist[i];
+        --n;
+    }
+    pup().horseHist[n++] = snap;
+}
+
+void rider_hist_push(uint32_t tick, const cXyz& pos, const csXyz& angle) {
+    int& n = pup().riderHistCount;
+    if (n > 0) {
+        const uint32_t newest = pup().riderHist[n - 1].tick;
+        if (tick <= newest) {
+            if (newest - tick < 600) return;
+            n = 0;
+        }
+    }
+    const int cap = static_cast<int>(sizeof(pup().riderHist) / sizeof(pup().riderHist[0]));
+    if (n == cap) {
+        for (int i = 1; i < cap; ++i) pup().riderHist[i - 1] = pup().riderHist[i];
+        --n;
+    }
+    pup().riderHist[n].tick = tick;
+    pup().riderHist[n].pos = pos;
+    pup().riderHist[n].angle = angle;
+    ++n;
+}
+
+void net_clock_tick() {
+    uint32_t newest = 0;
+    bool any = false;
+    if (pup().horseHistCount > 0) {
+        newest = pup().horseHist[pup().horseHistCount - 1].tick;
+        any = true;
+    }
+    if (pup().riderHistCount > 0) {
+        const uint32_t t = pup().riderHist[pup().riderHistCount - 1].tick;
+        if (!any || t > newest) newest = t;
+        any = true;
+    }
+    if (!any) {
+        pup().netClockSet = false;
+        return;
+    }
+    const f32 target = static_cast<f32>(newest) - static_cast<f32>(pup().horseInterval + 2);
+    const f32 off = target - pup().netClock;
+    if (!pup().netClockSet || off > 30.0f || off < -30.0f) {
+        pup().netClock = target;
+        pup().netClockSet = true;
+        return;
+    }
+    pup().netClock += 1.0f + off * 0.05f;
+}
+
+void mtx_to_quat(const Mtx m, f32* q) {
+    const f32 tr = m[0][0] + m[1][1] + m[2][2];
+    if (tr > 0.0f) {
+        const f32 s = std::sqrt(tr + 1.0f) * 2.0f;
+        q[3] = 0.25f * s;
+        q[0] = (m[2][1] - m[1][2]) / s;
+        q[1] = (m[0][2] - m[2][0]) / s;
+        q[2] = (m[1][0] - m[0][1]) / s;
+    } else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) {
+        const f32 s = std::sqrt(1.0f + m[0][0] - m[1][1] - m[2][2]) * 2.0f;
+        q[3] = (m[2][1] - m[1][2]) / s;
+        q[0] = 0.25f * s;
+        q[1] = (m[0][1] + m[1][0]) / s;
+        q[2] = (m[0][2] + m[2][0]) / s;
+    } else if (m[1][1] > m[2][2]) {
+        const f32 s = std::sqrt(1.0f + m[1][1] - m[0][0] - m[2][2]) * 2.0f;
+        q[3] = (m[0][2] - m[2][0]) / s;
+        q[0] = (m[0][1] + m[1][0]) / s;
+        q[1] = 0.25f * s;
+        q[2] = (m[1][2] + m[2][1]) / s;
+    } else {
+        const f32 s = std::sqrt(1.0f + m[2][2] - m[0][0] - m[1][1]) * 2.0f;
+        q[3] = (m[1][0] - m[0][1]) / s;
+        q[0] = (m[0][2] + m[2][0]) / s;
+        q[1] = (m[1][2] + m[2][1]) / s;
+        q[2] = 0.25f * s;
+    }
+}
+
+s16 lerp_angle(s16 a, s16 b, f32 t) {
+    return static_cast<s16>(a + static_cast<s16>(static_cast<s16>(b - a) * t));
+}
+
+bool rider_on_clock(cXyz* pos, csXyz* angle) {
+    if (!pup().netClockSet || pup().riderHistCount < 2) return false;
+    if ((pup().horse.flags & kHorseFlagRiding) == 0 || pup().horseAge > 20 ||
+        pup().horse.jointCount == 0) {
+        return false;
+    }
+    const auto* h = pup().riderHist;
+    const int n = pup().riderHistCount;
+    const f32 at = pup().netClock;
+    int i = 0;
+    while (i < n - 2 && static_cast<f32>(h[i + 1].tick) <= at) ++i;
+    const f32 span = static_cast<f32>(h[i + 1].tick - h[i].tick);
+    f32 t = span > 0.0f ? (at - static_cast<f32>(h[i].tick)) / span : 1.0f;
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    pos->x = h[i].pos.x + (h[i + 1].pos.x - h[i].pos.x) * t;
+    pos->y = h[i].pos.y + (h[i + 1].pos.y - h[i].pos.y) * t;
+    pos->z = h[i].pos.z + (h[i + 1].pos.z - h[i].pos.z) * t;
+    angle->x = lerp_angle(h[i].angle.x, h[i + 1].angle.x, t);
+    angle->y = lerp_angle(h[i].angle.y, h[i + 1].angle.y, t);
+    angle->z = lerp_angle(h[i].angle.z, h[i + 1].angle.z, t);
+    return true;
+}
+
+bool horse_on_clock(const HorseSnapshot** a, const HorseSnapshot** b, f32* t) {
+    const int n = pup().horseHistCount;
+    if (!pup().netClockSet || n < 2) return false;
+    const HorseSnapshot* h = pup().horseHist;
+    const f32 at = pup().netClock;
+    int i = 0;
+    while (i < n - 2 && static_cast<f32>(h[i + 1].tick) <= at) ++i;
+    if (h[i].jointCount != h[i + 1].jointCount ||
+        (h[i].flags & kHorseFlagRiding) != (h[i + 1].flags & kHorseFlagRiding)) {
+        return false;
+    }
+    const f32 span = static_cast<f32>(h[i + 1].tick - h[i].tick);
+    f32 f = span > 0.0f ? (at - static_cast<f32>(h[i].tick)) / span : 1.0f;
+    if (f < 0.0f) f = 0.0f;
+    if (f > 1.0f) f = 1.0f;
+    *a = &h[i];
+    *b = &h[i + 1];
+    *t = f;
+    return true;
+}
+
 const Mtx* s_horsePose[kHorseJoints] = {};
 const int kHorseStaleTicks = 20;
 
@@ -5403,16 +5583,7 @@ bool horse_idle_pose(J3DModel* model, const Mtx base, Mtx* out, int count,
     return true;
 }
 
-void horse_blend_joint(int j, Mtx out) {
-    const HorseJointSnapshot& b = pup().horse.joints[j];
-    if (!pup().horsePrevValid) {
-        horse_joint_mtx(b, out);
-        return;
-    }
-    f32 t = static_cast<f32>(pup().horseAge) / static_cast<f32>(pup().horseGap);
-    if (t > 1.0f) t = 1.0f;
-    if (t < 0.0f) t = 0.0f;
-    const HorseJointSnapshot& a = pup().horsePrev.joints[j];
+void horse_blend_joint(const HorseJointSnapshot& a, const HorseJointSnapshot& b, f32 t, Mtx out) {
     f32 dot = 0.0f;
     for (int k = 0; k < 4; ++k) dot += static_cast<f32>(a.q[k]) * static_cast<f32>(b.q[k]);
     const f32 sign = dot < 0.0f ? -1.0f : 1.0f;
@@ -5425,6 +5596,24 @@ void horse_blend_joint(int j, Mtx out) {
         mix.p[k] = static_cast<int16_t>(a.p[k] * (1.0f - t) + b.p[k] * t);
     }
     horse_joint_mtx(mix, out);
+}
+
+void horse_blend_base(const float a[12], const float b[12], f32 t, Mtx out) {
+    Mtx ma, mb;
+    unpack_mtx12(a, ma);
+    unpack_mtx12(b, mb);
+    f32 qa[4], qb[4];
+    mtx_to_quat(ma, qa);
+    mtx_to_quat(mb, qb);
+    f32 dot = 0.0f;
+    for (int k = 0; k < 4; ++k) dot += qa[k] * qb[k];
+    const f32 sign = dot < 0.0f ? -1.0f : 1.0f;
+    HorseJointSnapshot mix{};
+    for (int k = 0; k < 4; ++k) {
+        mix.q[k] = static_cast<int16_t>((qa[k] * sign * (1.0f - t) + qb[k] * t) * 32000.0f);
+    }
+    horse_joint_mtx(mix, out);
+    for (int r = 0; r < 3; ++r) out[r][3] = ma[r][3] + (mb[r][3] - ma[r][3]) * t;
 }
 
 void draw_puppet_horse(daAlink_c* alink) {
@@ -5445,10 +5634,21 @@ void draw_puppet_horse(daAlink_c* alink) {
     }
     J3DModel* model = pup().horseModel;
 
+    const HorseSnapshot* from = nullptr;
+    const HorseSnapshot* to = nullptr;
+    f32 along = 0.0f;
+    const bool blended = (snap.flags & kHorseFlagIdle) == 0 && horse_on_clock(&from, &to, &along);
     Mtx rel;
-    unpack_mtx12(snap.baseMtx, rel);
+    if (blended) {
+        horse_blend_base(from->baseMtx, to->baseMtx, along, rel);
+    } else {
+        unpack_mtx12(snap.baseMtx, rel);
+    }
+
+    const uint8_t drawnFlags = blended ? to->flags : snap.flags;
+    const int drawnJoints = blended ? to->jointCount : snap.jointCount;
     Mtx base;
-    if ((snap.flags & kHorseFlagRiding) != 0) {
+    if ((drawnFlags & kHorseFlagRiding) != 0) {
 
         mDoMtx_concat(pup().model->getBaseTRMtx(), rel, base);
     } else {
@@ -5464,9 +5664,13 @@ void draw_puppet_horse(daAlink_c* alink) {
     for (int j = 0; j < kHorseJoints; ++j) {
         if (idle) {
             s_horsePose[j] = j < idleCount ? &joints[j] : nullptr;
-        } else if (j < snap.jointCount) {
+        } else if (j < drawnJoints) {
             Mtx local;
-            horse_blend_joint(j, local);
+            if (blended) {
+                horse_blend_joint(from->joints[j], to->joints[j], along, local);
+            } else {
+                horse_joint_mtx(snap.joints[j], local);
+            }
             mDoMtx_concat(base, local, joints[j]);
             s_horsePose[j] = &joints[j];
         } else {

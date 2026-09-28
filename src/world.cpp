@@ -1412,11 +1412,8 @@ void handle_full(const MsgWorldFull& msg) {
         if (msg.size != kCollectSize) return;
         auto* cur = reinterpret_cast<uint8_t*>(&info->getSavedata().getPlayer().getCollect());
         for (int i = 0; i < kCollectSize; ++i) {
-            if (i == kCollectPohIndex) {
-                if (msg.data[i] > cur[i]) cur[i] = msg.data[i];
-            } else {
-                cur[i] = static_cast<uint8_t>(cur[i] | msg.data[i]);
-            }
+            if (i == kCollectPohIndex) continue;
+            cur[i] = static_cast<uint8_t>(cur[i] | msg.data[i]);
         }
         if (s_collect.have) std::memcpy(s_collect.bytes, cur, kCollectSize);
         break;
@@ -1974,11 +1971,8 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
         if (msg.size != kCollectSize) return;
         auto* cur = reinterpret_cast<uint8_t*>(&info->getSavedata().getPlayer().getCollect());
         for (int i = 0; i < kCollectSize; ++i) {
-            if (i == kCollectPohIndex) {
-                if (msg.set[i] > cur[i]) cur[i] = msg.set[i];
-            } else {
-                cur[i] = static_cast<uint8_t>(cur[i] | msg.set[i]);
-            }
+            if (i == kCollectPohIndex) continue;
+            cur[i] = static_cast<uint8_t>(cur[i] | msg.set[i]);
         }
         if (s_collect.have) std::memcpy(s_collect.bytes, cur, kCollectSize);
         break;

@@ -1159,6 +1159,12 @@ void apply_debug_give_kit() {
                    "hearts, both swords, both shields, all seven hidden skills)");
 }
 
+dmg_rod_class* held_fishing_rod(daAlink_c* alink) {
+    fopAc_ac_c* actor = fopAcM_SearchByID(alink->mItemAcKeep.getID());
+    if (actor == nullptr || fopAcM_GetName(actor) != fpcNm_MG_ROD_e) return nullptr;
+    return reinterpret_cast<dmg_rod_class*>(actor);
+}
+
 void send_local_snapshot() {
     const bool modelsUnsafe = local_models_are_unsafe();
 
@@ -1267,9 +1273,13 @@ void send_local_snapshot() {
 
         snapshot.bootsVisible = alink->checkEquipHeavyBoots() ? 1 : 0;
 
+        fopAc_ac_c* hungFrom = alink->mCargoCarryAcKeep.getActor();
+        const bool onPeahat = alink->mProcID == daAlink_c::PROC_HOOKSHOT_ROOF_WAIT && hungFrom != nullptr &&
+                              fopAcM_GetName(hungFrom) == fpcNm_E_PH_e;
         snapshot.combat = static_cast<uint8_t>((alink->checkUpperGuardAnime() ? 1 : 0) |
                                                (alink->checkCameraLargeDamage() ? 2 : 0) |
-                                               (alink->mDamageTimer != 0 ? 4 : 0));
+                                               (alink->mDamageTimer != 0 ? 4 : 0) |
+                                               (onPeahat ? 8 : 0));
         for (int i = 0; i < 3; ++i) {
             snapshot.hat[i] = alink->field_0x302c[7 + i];
             snapshot.hat[3 + i] = alink->field_0x3040[7 + i];
@@ -1483,9 +1493,7 @@ void send_local_snapshot() {
                 }
             } else if (daAlink_c::checkFishingRodItem(equip)) {
 
-                fopAc_ac_c* rodActor = alink->mItemAcKeep.getActor();
-                if (rodActor != nullptr && looks_like_live_data(rodActor)) {
-                    dmg_rod_class* rod = reinterpret_cast<dmg_rod_class*>(rodActor);
+                if (dmg_rod_class* rod = held_fishing_rod(alink)) {
                     snapshot.chainKind =
                         (rod->kind == MG_ROD_KIND_UKI) ? kPuppetChainRodUki : kPuppetChainRodLure;
                     snapshot.chainCount = kPuppetChainPts;
@@ -1626,9 +1634,7 @@ void send_local_snapshot() {
         }
 
         if (!modelsUnsafe && bodyData != nullptr && daAlink_c::checkFishingRodItem(alink->mEquipItem)) {
-            fopAc_ac_c* rodActor = alink->mItemAcKeep.getActor();
-            if (rodActor != nullptr && looks_like_live_data(rodActor)) {
-                dmg_rod_class* rod = reinterpret_cast<dmg_rod_class*>(rodActor);
+            if (dmg_rod_class* rod = held_fishing_rod(alink)) {
                 if (rod->kind == MG_ROD_KIND_UKI) {
 
                     if (rod->uki_model != nullptr && looks_like_live_data(rod->uki_model)) {
@@ -2161,6 +2167,7 @@ void send_local_horse() {
         HorseSnapshot none{};
         none.magic = kHorseSnapshotMagic;
         none.seq = ++g_horseSeq;
+        none.tick = coop_local_world_frames();
         none.playerId = g_localId;
         send_horse_datagram(none);
         return;
@@ -2182,6 +2189,7 @@ void send_local_horse() {
     HorseSnapshot snap{};
     snap.magic = kHorseSnapshotMagic;
     snap.seq = ++g_horseSeq;
+    snap.tick = coop_local_world_frames();
     snap.playerId = g_localId;
     snap.room = static_cast<int8_t>(fopAcM_GetRoomNo(horse));
     MtxP base = model->getBaseTRMtx();

@@ -376,8 +376,7 @@ int players_in_session() {
 
 std::string net_text() {
     sample_rates();
-    std::string out = std::string("Crests of Courage ") + COOP_MOD_VERSION + ", protocol " +
-                      std::to_string(kCoopProtocolVersion) + "\n\n";
+    std::string out = std::string("Crests of Courage ") + COOP_MOD_VERSION + "\n\n";
     if (!coop_net_connected()) return out + "Not connected.";
     const int players = players_in_session();
     out += coop_net_is_host() ? std::string("Hosting")
@@ -564,7 +563,7 @@ ModResult group_advanced(ModContext*, UiElementHandle pane, void*, ModError*) {
     s_backup = joinsync_backup_summary();
     svc_ui->pane_add_text(mod_ctx, pane, s_backup.c_str(), nullptr);
 
-    static const std::string kVersionLine = "Version " + std::to_string(kCoopProtocolVersion);
+    static const std::string kVersionLine = std::string("Version ") + COOP_MOD_VERSION;
     svc_ui->pane_add_text(mod_ctx, pane, kVersionLine.c_str(), nullptr);
     return MOD_OK;
 }
