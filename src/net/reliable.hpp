@@ -121,6 +121,7 @@ public:
 
     uint32_t conn() const { return m_conn; }
     bool heard_any() const { return m_heardAny; }
+    bool overflowed() const { return m_overflowed; }
     bool dead(uint64_t nowMs) const { return m_overflowed || nowMs - m_lastHeardMs > kDeadAfterMs; }
     bool idle() const { return m_pending.empty() && m_inflight.empty(); }
     uint32_t smoothed_rtt_ms() const { return m_srttMs; }

@@ -113,7 +113,14 @@ CoopNetTraffic g_traffic;
 void udp_send(std::string_view endpoint, std::span<const std::byte> bytes) {
     g_traffic.txBytes += bytes.size();
     ++g_traffic.txPackets;
-    g_udp.send_to(endpoint, bytes);
+
+    if (g_udp.send_to(endpoint, bytes) != MOD_OK) {
+        static uint32_t s_refused = 0;
+        if (s_refused++ % 600 == 0) {
+            coop_log::warn("coop_mod: [NET] udp send to {} refused ({} so far)", endpoint,
+                s_refused);
+        }
+    }
 }
 bool g_isHost = true;
 bool g_handshakeSent = false;
@@ -142,11 +149,14 @@ struct PeerLink {
     std::string udpEndpoint;
     bool haveUdp = false;
 
+    uint32_t udpHeardTick = 0;
+
     uint32_t lastRecvSeq = 0;
     bool haveRecvSeq = false;
 };
 PeerLink g_links[kCoopMaxPlayers];
 
+const uint32_t kUdpRelearnTicks = 60;
 const int32_t kSeqRestartGap = 240;
 
 bool fresh_seq(bool& have, uint32_t& last, uint32_t seq) {
@@ -167,6 +177,8 @@ uint32_t g_playerQuiet[kCoopMaxPlayers] = {};
 uint32_t g_snapIn[kCoopMaxPlayers] = {};
 uint32_t g_snapStale[kCoopMaxPlayers] = {};
 uint32_t g_snapUnknown = 0;
+
+uint32_t g_playerSnapTick[kCoopMaxPlayers] = {};
 
 uint32_t g_playerWorldTick[kCoopMaxPlayers] = {};
 bool g_playerWorldSeen[kCoopMaxPlayers] = {};
@@ -437,6 +449,15 @@ void handle_tcp_event(const mods::net::Event& event) {
         case NET_EVENT_CONNECTED:
 
             coop_log::info("coop_mod: connected to host");
+
+            if (!g_isHost && event.endpoint.rfind("tcp://", 0) == 0) {
+                const std::string udp = "udp://" + std::string{event.endpoint.substr(6)};
+                if (udp != g_links[kCoopHostId].udpEndpoint) {
+                    coop_log::info("coop_mod: host's udp endpoint {} (was {})", udp,
+                        g_links[kCoopHostId].udpEndpoint);
+                    g_links[kCoopHostId].udpEndpoint = udp;
+                }
+            }
             g_statusText = "Connected";
             on_session_up();
             break;
@@ -739,6 +760,21 @@ bool handle_reliable_datagram(const mods::net::Event& event) {
     const uint64_t now = steady_ms();
 
     int id = udp_link_for(from);
+    if (id < 0) {
+
+        for (int i = 0; i < kCoopMaxPlayers; ++i) {
+            PeerLink& moved = g_links[i];
+            if (!moved.used || !moved.viaUdp || moved.rel.conn() != h.conn) continue;
+            if (!g_isHost && !moved.helloAcked) break;
+            if (g_tickCounter - moved.udpHeardTick <= kUdpRelearnTicks) break;
+            coop_log::info("coop_mod: player {} udp endpoint moved {} -> {} (room code)", i,
+                moved.udpEndpoint, from);
+            moved.udpEndpoint = from;
+            id = i;
+            break;
+        }
+    }
+    if (id >= 0) g_links[id].udpHeardTick = g_tickCounter;
     if (id >= 0 && g_links[id].rel.conn() != h.conn) {
 
         if (!g_isHost || h.kind != rudp::kKindHello) return true;
@@ -838,7 +874,9 @@ void flush_udp_links() {
         }
         link.rel.flush(now, send);
         if (link.rel.dead(now)) {
-            drop_link(i, link.rel.heard_any() ? "timed out" : "never answered");
+
+            drop_link(i, link.rel.overflowed() ? "fell too far behind - 4 MB unacknowledged"
+                         : link.rel.heard_any() ? "timed out" : "never answered");
             if (!g_isHost) puppet_hook_request_release();
         }
     }
@@ -954,6 +992,14 @@ void handle_udp_event(const mods::net::Event& event) {
                 g_links[claim].haveUdp = true;
                 id = claim;
                 coop_log::info("coop_mod: learned player {} udp endpoint {}", id, event.endpoint);
+            } else if (claim < kCoopMaxPlayers && g_links[claim].used && !g_links[claim].viaUdp &&
+                       g_links[claim].haveUdp &&
+                       g_tickCounter - g_links[claim].udpHeardTick > kUdpRelearnTicks) {
+
+                coop_log::info("coop_mod: player {} udp endpoint moved {} -> {}", claim,
+                    g_links[claim].udpEndpoint, event.endpoint);
+                g_links[claim].udpEndpoint = std::string{event.endpoint};
+                id = claim;
             }
         }
         if (id < 0) {
@@ -966,6 +1012,7 @@ void handle_udp_event(const mods::net::Event& event) {
         }
 
         snapshot.playerId = static_cast<uint8_t>(id);
+        g_links[id].udpHeardTick = g_tickCounter;
     } else {
 
         id = snapshot.playerId;
@@ -981,6 +1028,7 @@ void handle_udp_event(const mods::net::Event& event) {
     }
     PeerLink& from = g_links[id];
     ++g_snapIn[id];
+    g_playerSnapTick[id] = g_tickCounter;
     if (!fresh_seq(from.haveRecvSeq, from.lastRecvSeq, snapshot.seq)) {
         ++g_snapStale[id];
         return;
@@ -2414,6 +2462,11 @@ void announce_local_pause() {
 
 bool coop_world_stalled(uint8_t playerId) {
     return coop_ticks_since_world(playerId) >= kWorldStallTicks;
+}
+
+bool coop_player_unheard(uint8_t playerId) {
+    if (playerId >= kCoopMaxPlayers || playerId == g_localId || g_playerPaused[playerId]) return false;
+    return coop_world_stalled(playerId) && g_tickCounter - g_playerSnapTick[playerId] > 60;
 }
 
 uint32_t coop_net_ticks_since_rx() {

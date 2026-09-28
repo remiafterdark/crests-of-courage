@@ -250,7 +250,8 @@ std::string party_text() {
         out += where_text(p);
         const std::string ping = ping_text(id);
         if (!ping.empty()) out += ping;
-        if (coop_player_paused(id)) out += ", paused";
+        if (coop_player_unheard(id)) out += ", no signal";
+        else if (coop_player_paused(id)) out += ", paused";
     }
     if (out.empty()) return "Connected.\n\nWaiting for somebody to join.";
     return out;
@@ -285,7 +286,10 @@ void push_players(SurfaceHandles& h) {
             const CoopPeer& p = features_peer_of(id);
             if (!p.present || !p.inGame) continue;
             h.rowIds.push_back(id);
-            h.rowLabels.push_back(p.name + (coop_player_paused(id) ? " (paused)" : "") + ", " +
+            const char* state = coop_player_unheard(id)  ? " (no signal)"
+                                : coop_player_paused(id) ? " (paused)"
+                                                         : "";
+            h.rowLabels.push_back(p.name + state + ", " +
                                   where_text(p) + ping_text(id));
             joined += h.rowLabels.back() + " ";
         }

@@ -23,6 +23,8 @@ bool coop_world_stalled(uint8_t playerId);
 
 bool coop_player_paused(uint8_t playerId);
 
+bool coop_player_unheard(uint8_t playerId);
+
 bool coop_local_paused();
 void coop_net_set_player_paused(uint8_t playerId, bool paused);
 
@@ -688,6 +690,7 @@ void puppet_hook_release_player(uint8_t playerId);
 bool puppet_hook_player_active(uint8_t playerId);
 
 bool puppet_hook_sword_mtx(uint8_t playerId, float out[3][4], bool* master);
+bool puppet_hook_pose_fresh(uint8_t playerId);
 bool puppet_hook_get_pose_of(uint8_t playerId, float* x, float* y, float* z, short* angleY,
     float* speedX, float* speedZ);
 bool puppet_hook_is_wolf_of(uint8_t playerId);

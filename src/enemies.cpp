@@ -559,6 +559,17 @@ uint32_t placement_key(fopAc_ac_c* actor) {
     }
     if (slot < 0) slot = 0;
     if (s_keyCache[slot].key != 0) {
+
+        int freed = -1;
+        for (int i = 0; i < kKeyCacheMax; ++i) {
+            if (s_keyCache[i].key != 0 && fopAcM_SearchByID(s_keyCache[i].id) == nullptr) {
+                s_keyCache[i] = KeyCacheEntry{};
+                if (freed < 0) freed = i;
+            }
+        }
+        if (freed >= 0) slot = freed;
+    }
+    if (s_keyCache[slot].key != 0) {
         ++s_keyCacheEvictions;
         if (s_keyCacheEvictions <= 4) {
             coop_log::warn("coop_mod: [ENEMY] key cache full ({} entries) - evicting a key last "

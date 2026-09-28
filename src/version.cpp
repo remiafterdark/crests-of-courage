@@ -94,18 +94,19 @@ void ask() {
     }
 
     static const HttpHeader kHeaders[] = {
-        {"User-Agent", "crests-of-courage"},
         {"Accept", "application/vnd.github+json"},
     };
     HttpRequestDesc desc = HTTP_REQUEST_DESC_INIT;
     desc.url = kLatestUrl;
     desc.headers = kHeaders;
-    desc.header_count = 2;
+    desc.header_count = 1;
     desc.total_timeout_ms = 15000;
     desc.max_body_bytes = 256 * 1024;
     HttpRequestHandle handle = 0;
-    if (svc_http->request(mod_ctx, &desc, on_latest, nullptr, &handle) != MOD_OK) {
-        coop_log::info("coop_mod: [VERSION] could not start the update check");
+    const ModResult started = svc_http->request(mod_ctx, &desc, on_latest, nullptr, &handle);
+    if (started != MOD_OK) {
+        coop_log::warn("coop_mod: [VERSION] could not start the update check ({})",
+            static_cast<int>(started));
     }
 }
 

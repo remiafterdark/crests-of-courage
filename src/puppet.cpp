@@ -4263,6 +4263,12 @@ bool puppet_hook_get_pose_of(uint8_t playerId, float* x, float* y, float* z, sho
     return true;
 }
 
+bool puppet_hook_pose_fresh(uint8_t playerId) {
+    if (!puppet_hook_player_active(playerId)) return false;
+    const Puppet& q = s_puppetSlots[playerId];
+    return q.snapFrame != 0 && s_puppetFrame - q.snapFrame <= 60;
+}
+
 bool puppet_hook_rides_spinner(uint8_t playerId) {
     if (!puppet_hook_player_active(playerId)) return false;
     for (const AttachedModelSnapshot& att : s_puppetSlots[playerId].attached) {

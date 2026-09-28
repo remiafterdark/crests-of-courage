@@ -1175,7 +1175,8 @@ bool ground_under_player(uint8_t playerId) {
     const CoopPeer& who = features_peer_of(playerId);
     f32 x = who.x, y = who.y, z = who.z;
     f32 live[3];
-    if (puppet_hook_get_pose_of(playerId, &live[0], &live[1], &live[2], nullptr, nullptr, nullptr)) {
+    if (puppet_hook_pose_fresh(playerId) &&
+        puppet_hook_get_pose_of(playerId, &live[0], &live[1], &live[2], nullptr, nullptr, nullptr)) {
         x = live[0];
         y = live[1];
         z = live[2];
@@ -1191,7 +1192,8 @@ void place_at_player(daAlink_c* alink, uint8_t playerId) {
 
     f32 px = who.x, py = who.y, pz = who.z;
     f32 live[3] = {0.0f, 0.0f, 0.0f};
-    if (puppet_hook_get_pose_of(playerId, &live[0], &live[1], &live[2], nullptr, nullptr,
+    if (puppet_hook_pose_fresh(playerId) &&
+        puppet_hook_get_pose_of(playerId, &live[0], &live[1], &live[2], nullptr, nullptr,
             nullptr)) {
         px = live[0];
         py = live[1];
