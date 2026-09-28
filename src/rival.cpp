@@ -29,7 +29,7 @@ class daCoopRival_c : public fopEn_enemy_c {
 public:
     u8 mPlayer;
     dCcD_Stts mStts;
-    dCcD_Cyl mBody;
+    dCcD_Cps mBody;
     s16 mShieldAngle;
     u32 mNextHit;
     u32 mHeadLockUntil;
@@ -60,7 +60,7 @@ const u32 kHitGap = 10;
 
 const u32 kTheirInvincibleFrames = 10;
 const u32 kEndingBlowCooldown = 180;
-const u8 kPinReleaseFrames = 5;
+const u8 kPinReleaseFrames = 2;
 const u32 kHeadLockFrames = 60;
 const u32 kDrawStillFrames = 30;
 const f32 kStillEpsilon2 = 1.5f * 1.5f;
@@ -70,15 +70,30 @@ const u8 kCombatHurt = 4;
 
 const u32 kTakesEverything = 0xFFFFFFFEu;
 
-const dCcD_SrcCyl kBodySrc = {
+const dCcD_SrcCps kBodySrc = {
     {
         {0x0, {{0x0, 0x0, 0x0}, {kTakesEverything, 0x3}, 0x75}},
         {dCcD_SE_NONE, 0x0, 0x0, 0x0, 0x0},
         {dCcD_SE_NONE, 0x0, 0x0, 0x0, 0x2},
         {0x0},
     },
-    {{{0.0f, 0.0f, 0.0f}, kHumanRadius, kHumanHeight}},
+    {{{0.0f, 0.0f, 0.0f}, {0.0f, kHumanHeight, 0.0f}, kHumanRadius}},
 };
+
+const int kHumanHead = 4;
+const int kHumanFootL = 0x15;
+const int kHumanFootR = 0x1A;
+const int kWolfShoulders[2] = {16, 21};
+const int kWolfHips[2] = {28, 33};
+
+bool midpoint_of(u8 player, int a, int b, cXyz* out) {
+    cXyz pa, pb;
+    if (!puppet_hook_joint_pos(player, a, &pa) || !puppet_hook_joint_pos(player, b, &pb)) {
+        return false;
+    }
+    out->set((pa.x + pb.x) * 0.5f, (pa.y + pb.y) * 0.5f, (pa.z + pb.z) * 0.5f);
+    return true;
+}
 
 bool ours(fopAc_ac_c* hitter) {
     daAlink_c* alink = daAlink_getAlinkActorClass();
@@ -163,14 +178,19 @@ int daCoopRival_c::Execute() {
         if (at != nullptr && ours(hitter) && s_frame >= mNextHit) {
             const bool clawshot = (at->GetAtType() & AT_TYPE_HOOKSHOT) != 0;
 
-            const cXyz from = (clawshot || hitter == nullptr) ? alink->current.pos
-                                                              : hitter->current.pos;
+            cXyz from = (clawshot || hitter == nullptr) ? alink->current.pos
+                                                        : hitter->current.pos;
             const bool blocked = mBody.ChkTgShieldHit();
 
             const bool sword = hitter == alink &&
                                (at->GetAtType() & (AT_TYPE_NORMAL_SWORD | AT_TYPE_MASTER_SWORD)) != 0;
-            send_to_them(mPlayer, *at, clawshot ? kPvpPull : kPvpHit, from, blocked,
-                sword ? alink->getCutType() : 0);
+            const u8 cut = sword ? static_cast<u8>(alink->getCutType()) : 0;
+
+            if (cut == daPy_py_c::CUT_TYPE_MORTAL_DRAW_A || cut == daPy_py_c::CUT_TYPE_MORTAL_DRAW_B) {
+                from.x -= cM_ssin(alink->shape_angle.y) * 300.0f;
+                from.z -= cM_scos(alink->shape_angle.y) * 300.0f;
+            }
+            send_to_them(mPlayer, *at, clawshot ? kPvpPull : kPvpHit, from, blocked, cut);
             mNextHit = s_frame + kHitGap;
             if (!clawshot && !blocked && (at->GetAtType() & AT_TYPE_SHIELD_ATTACK) == 0) {
                 mInvulnUntil = s_frame + kTheirInvincibleFrames;
@@ -291,9 +311,39 @@ int daCoopRival_c::Execute() {
         mBody.OnTgSetBit();
     }
 
-    mBody.SetC(current.pos);
+    cXyz from, to;
+    bool shaped = false;
+    if (wolf) {
+        shaped = midpoint_of(mPlayer, kWolfShoulders[0], kWolfShoulders[1], &from) &&
+                 midpoint_of(mPlayer, kWolfHips[0], kWolfHips[1], &to);
+    } else {
+        shaped = midpoint_of(mPlayer, kHumanFootL, kHumanFootR, &from) &&
+                 puppet_hook_joint_pos(mPlayer, kHumanHead, &to);
+    }
+    if (!shaped) {
+        from.set(current.pos.x, current.pos.y + radius, current.pos.z);
+        to.set(current.pos.x, current.pos.y + height - radius, current.pos.z);
+    }
+    mBody.SetStartEnd(from, to);
     mBody.SetR(radius);
-    mBody.SetH(height);
+
+    {
+        const cXyz mid((from.x + to.x) * 0.5f, (from.y + to.y) * 0.5f, (from.z + to.z) * 0.5f);
+        const f32 top = (from.y > to.y ? from.y : to.y) + radius;
+        eyePos = wolf ? mid : to;
+        attention_info.position.set(mid.x, top + 20.0f, mid.z);
+    }
+    if ((combat & kCombatDown) != 0 && s_frame % 60 == 0) {
+        coop_log::info("coop_mod: [PVP] {} down - body {} from ({:.0f},{:.0f},{:.0f}) to ({:.0f},{:.0f},{:.0f})",
+            mPlayer, shaped ? "shaped" : "UPRIGHT (no joints)", from.x, from.y, from.z, to.x, to.y,
+            to.z);
+    }
+
+    if ((combat & kCombatDown) != 0 || finishing) {
+        mBody.OffCoSetBit();
+    } else {
+        mBody.OnCoSetBit();
+    }
     dComIfG_Ccsp()->Set(&mBody);
     return 1;
 }

@@ -3482,6 +3482,7 @@ void on_alink_execute_puppet_post(ModContext*, void*, void*, void*) {
     daAlink_c* alink = daAlink_getAlinkActorClass();
     sumo_after_player(alink);
     pvp_after_player(alink);
+    spinner_after_player(alink);
     if (alink == nullptr) {
         for (int i = 0; i < kMaxPuppets; ++i) {
             PuppetScope scope(static_cast<uint8_t>(i));
@@ -4097,17 +4098,21 @@ bool puppet_hook_is_wolf_of(uint8_t playerId) {
     return puppet_hook_player_active(playerId) && outfit_files(s_puppetSlots[playerId].outfit).isWolf;
 }
 
-bool puppet_hook_torso_of(uint8_t playerId, cXyz* out) {
-    if (out == nullptr || !puppet_hook_player_active(playerId)) return false;
+bool puppet_hook_joint_pos(uint8_t playerId, int joint, cXyz* out) {
+    if (out == nullptr || joint < 0 || !puppet_hook_player_active(playerId)) return false;
     const Puppet& q = s_puppetSlots[playerId];
     J3DModelData* data = q.model->getModelData();
-    if (data == nullptr || data->getJointNum() <= kBackbone2Joint) return false;
-    MtxP m = q.model->getAnmMtx(kBackbone2Joint);
-    const cXyz torso(m[0][3], m[1][3], m[2][3]);
-    const f32 dx = torso.x - q.pos.x, dy = torso.y - q.pos.y, dz = torso.z - q.pos.z;
+    if (data == nullptr || joint >= data->getJointNum()) return false;
+    MtxP m = q.model->getAnmMtx(joint);
+    const cXyz at(m[0][3], m[1][3], m[2][3]);
+    const f32 dx = at.x - q.pos.x, dy = at.y - q.pos.y, dz = at.z - q.pos.z;
     if (!(dx * dx + dy * dy + dz * dz < 300.0f * 300.0f)) return false;
-    *out = torso;
+    *out = at;
     return true;
+}
+
+bool puppet_hook_torso_of(uint8_t playerId, cXyz* out) {
+    return puppet_hook_joint_pos(playerId, kBackbone2Joint, out);
 }
 
 bool puppet_hook_get_pose_of(uint8_t playerId, float* x, float* y, float* z, short* angleY,
@@ -4121,6 +4126,14 @@ bool puppet_hook_get_pose_of(uint8_t playerId, float* x, float* y, float* z, sho
     if (speedX != nullptr) *speedX = q.pos.x - q.prevPos.x;
     if (speedZ != nullptr) *speedZ = q.pos.z - q.prevPos.z;
     return true;
+}
+
+bool puppet_hook_rides_spinner(uint8_t playerId) {
+    if (!puppet_hook_player_active(playerId)) return false;
+    for (const AttachedModelSnapshot& att : s_puppetSlots[playerId].attached) {
+        if (att.kind == kPuppetHeldSpinner) return true;
+    }
+    return false;
 }
 
 bool puppet_hook_get_anim(uint8_t playerId, uint16_t* resIdx, float* frame) {

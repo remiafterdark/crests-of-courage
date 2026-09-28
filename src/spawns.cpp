@@ -166,8 +166,15 @@ void write_actor_kind(fopAc_ac_c* actor, s16 name, uint8_t kind) {
 }
 
 u32 create_param_for_kind(s16 name, u32 param, uint8_t kind) {
-    if (name == fpcNm_NBOMB_e && kind == daNbomb_c::TYPE_INSECT_PLAYER) {
+    if (name != fpcNm_NBOMB_e) return param;
+    if (kind == daNbomb_c::TYPE_INSECT_PLAYER) {
         return static_cast<u32>(dBomb_c::PRM_INSECT_BOMB_PLAYER);
+    }
+    if (kind == daNbomb_c::TYPE_INSECT_ENEMY) {
+        return static_cast<u32>(dBomb_c::PRM_ENEMY_BOMB_BOOMERANG);
+    }
+    if (kind == daNbomb_c::TYPE_WATER_ENEMY) {
+        return static_cast<u32>(dBomb_c::PRM_UNK_15);
     }
     return param;
 }
@@ -385,6 +392,17 @@ void on_fast_create_post(ModContext*, void* args, void* retval, void*) {
     if (!procname_is_replicated(procName)) return;
     auto* actor = *static_cast<fopAc_ac_c**>(retval);
     if (actor == nullptr) return;
+
+    if (procName == fpcNm_NBOMB_e &&
+        mods::arg<u32>(args, 1) == static_cast<u32>(dBomb_c::PRM_ENEMY_BOMB_BOOMERANG)) {
+        enemies_note_boomerang_bomb();
+    }
+
+    if (procName == fpcNm_NBOMB_e &&
+        (mods::arg<u32>(args, 1) == static_cast<u32>(dBomb_c::PRM_ENEMY_BOMB) ||
+         mods::arg<u32>(args, 1) == static_cast<u32>(dBomb_c::PRM_ENEMY_BOMB_HOOKSHOT))) {
+        enemies_note_enemy_bomb();
+    }
     on_local_spawn(actor, procName, mods::arg<u32>(args, 1));
 }
 
@@ -552,6 +570,8 @@ void* attach_caught_bomb(void* proc, void* data) {
     auto* scan = static_cast<CatchScan*>(data);
     if (fopAcM_GetName(actor) != fpcNm_NBOMB_e) return nullptr;
     if (!param_is_boomerang_carry(fopAcM_GetParam(actor))) return nullptr;
+
+    if (spawns_is_replica(actor)) return nullptr;
     const fpc_ProcID id = fopAcM_GetID(actor);
     if (already_ridden(id)) return nullptr;
 
@@ -752,6 +772,27 @@ void run_self_test() {
         at.x, at.y, at.z, bomb != nullptr ? "created" : "FAILED");
 }
 
+}
+
+bool spawns_ride_bomb_on_boomerang_of(uint8_t owner, fopAc_ac_c* bomb) {
+    if (bomb == nullptr) return false;
+    for (int i = 0; i < kMaxSpawns; ++i) {
+        const Replica& r = s_replica[i];
+        if (!r.used || r.procName != fpcNm_BOOMERANG_e || static_cast<uint8_t>(r.netId >> 28) != owner) {
+            continue;
+        }
+        auto* boom = static_cast<fopAc_ac_c*>(fopAcM_SearchByID(r.id));
+        if (boom == nullptr) continue;
+        CatchScan scan{};
+        scan.boomPos = boom->current.pos;
+        scan.boomNetId = r.netId;
+
+        bomb->current.pos = boom->current.pos;
+        bomb->old.pos = bomb->current.pos;
+        attach_caught_bomb(bomb, &scan);
+        return scan.attached > 0;
+    }
+    return false;
 }
 
 bool spawns_is_replica(fopAc_ac_c* actor) {

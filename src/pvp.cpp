@@ -184,7 +184,8 @@ void apply_hit(const MsgPvpHit& hit) {
     const SkillPower* skill = power.skill;
     const cXyz from(hit.from[0], hit.from[1], hit.from[2]);
 
-    if (alink->checkCameraLargeDamage()) {
+    const bool endingBlow = hit.cut == daPy_py_c::CUT_TYPE_DOWN || hit.cut == daPy_py_c::CUT_TYPE_FINISH_STAB;
+    if (alink->checkCameraLargeDamage() || endingBlow) {
         if (skill == nullptr) return;
         alink->setDamagePoint(dmg, FALSE, FALSE, 0);
         hit_spark(alink, from, 1, hit.atType);

@@ -18,6 +18,7 @@
 #include "d/d_tresure.h"
 #include "d/d_bg_w.h"
 #include "d/d_stage.h"
+#include "d/d_kankyo.h"
 #include "f_op/f_op_actor_iter.h"
 #include "mods/service.hpp"
 #include "mods/svc/hook.hpp"
@@ -161,6 +162,132 @@ uint8_t* mem_bytes(dSv_memory_c& memory) {
     return reinterpret_cast<uint8_t*>(&memory.getBit());
 }
 
+struct LocalSwitch {
+    int8_t room;
+    uint8_t sw;
+};
+const int kLocalSwitchMax = 48;
+LocalSwitch s_localSw[kLocalSwitchMax];
+int s_localSwCount = 0;
+
+void add_local_switch(int8_t room, int sw) {
+    if (sw < 0 || sw >= 0xF0 || s_localSwCount >= kLocalSwitchMax) return;
+    for (int i = 0; i < s_localSwCount; ++i) {
+        if (s_localSw[i].sw == sw && s_localSw[i].room == room) return;
+    }
+    s_localSw[s_localSwCount++] = {room, static_cast<uint8_t>(sw)};
+}
+
+void* collect_local_switch(void* proc, void*) {
+    auto* actor = static_cast<fopAc_ac_c*>(proc);
+    if (actor == nullptr || !fopAcM_IsActor(actor)) return nullptr;
+    const s16 name = fopAcM_GetName(actor);
+    const int8_t room = static_cast<int8_t>(fopAcM_GetRoomNo(actor));
+    const u32 param = fopAcM_GetParam(actor);
+    if (name == fpcNm_SWC00_e) {
+        const int type = (actor->shape_angle.x & 0xF00) >> 8;
+        if ((type == 0 || type == 4) && (param & 0xFF) != 0xFF) add_local_switch(room, param & 0xFF);
+    } else if (name == fpcNm_E_YMB_e) {
+        add_local_switch(room, 5);
+    } else if (name == fpcNm_Tag_Mist_e) {
+        const int top = param & 0xFF;
+        const int count = (param >> 16) & 0xFF;
+        for (int i = 0; i < count && top + i < 0xFF; ++i) add_local_switch(room, top + i);
+    } else if (name == fpcNm_Tag_Spinner_e) {
+        if ((param & 0xFF) != 0xFF) add_local_switch(room, param & 0xFF);
+    }
+    return nullptr;
+}
+
+void refresh_local_switches() {
+    s_localSwCount = 0;
+    fpcM_Search(collect_local_switch, nullptr);
+}
+
+uint8_t mem_local_mask(const char*, int byte) {
+    uint8_t mask = 0;
+    for (int i = 0; i < s_localSwCount; ++i) {
+        const int sw = s_localSw[i].sw;
+        if (sw >= 0x80) continue;
+        if (byte == 0x08 + 4 * (sw >> 5) + (3 - ((sw & 31) >> 3))) mask |= static_cast<uint8_t>(1 << (sw & 7));
+    }
+    return mask;
+}
+
+uint8_t dan_local_mask(int byte) {
+    uint8_t mask = 0;
+    for (int i = 0; i < s_localSwCount; ++i) {
+        const int sw = s_localSw[i].sw - 0x80;
+        if (sw < 0 || sw >= 0x40) continue;
+        if (byte == 4 * (sw >> 5) + ((sw & 31) >> 3)) mask |= static_cast<uint8_t>(1 << (sw & 7));
+    }
+    return mask;
+}
+
+uint8_t zone_local_mask(int room, int byte) {
+    uint8_t mask = 0;
+    for (int i = 0; i < s_localSwCount; ++i) {
+        if (s_localSw[i].room != room) continue;
+        const int sw = s_localSw[i].sw;
+        int at = -1;
+        int bit = 0;
+        if (sw >= 0xC0 && sw < 0xE0) {
+            const int n = sw - 0xC0;
+            at = 2 * (n >> 4) + (1 - ((n & 15) >> 3));
+            bit = n & 7;
+        } else if (sw >= 0xE0 && sw < 0xF0) {
+            const int n = sw - 0xE0;
+            at = 0x04 + (1 - (n >> 3));
+            bit = n & 7;
+        }
+        if (byte == at) mask |= static_cast<uint8_t>(1 << bit);
+    }
+    return mask;
+}
+
+template <typename Mask>
+void keep_local_bits(uint8_t* bytes, const uint8_t* before, int size, Mask mask_of) {
+    for (int b = 0; b < size; ++b) {
+        const uint8_t m = mask_of(b);
+        if (m != 0) bytes[b] = static_cast<uint8_t>((bytes[b] & ~m) | (before[b] & m));
+    }
+}
+
+void keep_mem_local(const char* stage, uint8_t* mem, const uint8_t* before) {
+    keep_local_bits(mem, before, kMemSize, [stage](int b) { return mem_local_mask(stage, b); });
+}
+
+void keep_dan_local(uint8_t* dan, const uint8_t* before) {
+    keep_local_bits(dan, before, kDanSize, [](int b) { return dan_local_mask(b); });
+}
+
+void keep_zone_local(int room, uint8_t* zone, const uint8_t* before) {
+    keep_local_bits(zone, before, kZoneBitSize, [room](int b) { return zone_local_mask(room, b); });
+}
+
+uint32_t hash_bytes(const uint8_t* data, int size, int skipByte);
+
+uint32_t memory_hash(const char* stage, const uint8_t* mem) {
+    uint8_t copy[kMemSize];
+    std::memcpy(copy, mem, kMemSize);
+    for (int b = 0; b < kMemSize; ++b) copy[b] = static_cast<uint8_t>(copy[b] & ~mem_local_mask(stage, b));
+    return hash_bytes(copy, kMemSize, kKeyOffset);
+}
+
+uint32_t dan_hash(const uint8_t* dan) {
+    uint8_t copy[kDanSize];
+    std::memcpy(copy, dan, kDanSize);
+    for (int b = 0; b < kDanSize; ++b) copy[b] = static_cast<uint8_t>(copy[b] & ~dan_local_mask(b));
+    return hash_bytes(copy, kDanSize, -1);
+}
+
+uint32_t zone_hash(int room, const uint8_t* zone) {
+    uint8_t copy[kZoneBitSize];
+    std::memcpy(copy, zone, kZoneBitSize);
+    for (int b = 0; b < kZoneBitSize; ++b) copy[b] = static_cast<uint8_t>(copy[b] & ~zone_local_mask(room, b));
+    return hash_bytes(copy, kZoneBitSize, -1);
+}
+
 void send_delta(const Baseline& b, WorldRegion region, int8_t room, int offset, int size,
     const uint8_t* set, const uint8_t* clr) {
     MsgWorldDelta msg{};
@@ -204,8 +331,25 @@ void keep_private(uint8_t* bytes, const uint8_t* before, uint8_t (*mask_of)(int)
     }
 }
 
+const uint16_t kTmpPrivateFlags[] = {
+    0x0004, 0x0002, 0x0001, 0x0180, 0x0140,
+    0x0508, 0x0504, 0x0502, 0x0501, 0x0680,
+    0x0908,
+    0x0E10,
+};
+
+uint8_t tmp_private(int byte) {
+    static uint8_t mask[kEventSize] = {};
+    static bool built = false;
+    if (!built) {
+        for (uint16_t flag : kTmpPrivateFlags) mask[flag >> 8] |= static_cast<uint8_t>(flag);
+        built = true;
+    }
+    return static_cast<uint8_t>(mask[byte] | skills_tmp_private(byte));
+}
+
 void keep_private_tmp(uint8_t* tmp, const uint8_t* before) {
-    keep_private(tmp, before, skills_tmp_private);
+    keep_private(tmp, before, tmp_private);
 }
 
 const uint16_t kStoryPrivateFlags[] = {
@@ -217,6 +361,19 @@ const uint16_t kStoryPrivateFlags[] = {
     0x2F04,
     0x3920,
     0x6110,
+    0x3801, 0x3980,
+    0x1D40,
+    0x0902, 0x0B80, 0x4501,
+    0x1201,
+    0x1540,
+    0x1510,
+    0x2520,
+    0x3002,
+    0x3E20, 0x4508, 0x4504,
+    0x4004,
+    0x4710,
+    0x5C04, 0x5D08, 0x5D04, 0x5D02,
+    0x6140,
 };
 const int kStoryRegistersFrom = 0xF1;
 
@@ -312,6 +469,7 @@ void diff_region(WorldRegion region, int8_t room, uint8_t* cur, uint8_t* base, i
 
 void take_baseline(dSv_info_c* info, const char stage[8], int saveNo) {
     s_base = Baseline{};
+    refresh_local_switches();
     for (int i = 0; i < kRooms; ++i) s_askedRoom[i] = false;
     s_askedStage = false;
     s_base.have = true;
@@ -542,6 +700,7 @@ void scan() {
     }
     const bool dungeon = coop_session(kSessDungeon, cfg_bool(s_dungeonVar, true));
     const bool story = coop_session(kSessStory, cfg_bool(s_storyVar, false));
+    refresh_local_switches();
     if (dungeon) ask_for_new_regions(info, stage, saveNo);
 
     uint8_t* mem = mem_bytes(info->getMemory());
@@ -552,6 +711,8 @@ void scan() {
             send_delta(s_base, kRegionKeys, -1, 0, 1, value, zero);
             coop_log::info("coop_mod: [WORLD] small keys now {}", mem[kKeyOffset]);
         }
+
+        keep_mem_local(stage, s_base.mem, mem);
         diff_region(kRegionMemory, -1, mem, s_base.mem, kMemSize, kKeyOffset);
     }
     s_base.mem[kKeyOffset] = mem[kKeyOffset];
@@ -566,6 +727,7 @@ void scan() {
         s_base.danStage = dan.mStageNo;
         std::memcpy(s_base.dan, danBytes, kDanSize);
     } else {
+        keep_dan_local(s_base.dan, danBytes);
         diff_region(kRegionDan, -1, danBytes, s_base.dan, kDanSize);
     }
 
@@ -584,6 +746,7 @@ void scan() {
         } else {
 
             if (dungeon_stage(stage)) {
+                keep_zone_local(room, s_base.zone[room], bits);
                 diff_region(kRegionZone, static_cast<int8_t>(room), bits, s_base.zone[room],
                     kZoneBitSize);
             } else {
@@ -996,19 +1159,17 @@ void send_digest(dSv_info_c* info, const char stage[8], int saveNo) {
     std::memcpy(msg.stage, stage, 8);
     msg.saveNo = static_cast<int8_t>(saveNo);
 
-    msg.memoryHash = hash_bytes(mem_bytes(info->getMemory()), kMemSize, kKeyOffset);
+    msg.memoryHash = memory_hash(msg.stage, mem_bytes(info->getMemory()));
     dSv_danBit_c& dan = info->getDan();
-    msg.danHash = dan.mStageNo == saveNo
-                      ? hash_bytes(reinterpret_cast<uint8_t*>(&dan) + kDanOffset, kDanSize)
-                      : 0u;
-    msg.tmpHash = hash_shared(info->getTmp().mEvent, skills_tmp_private);
+    msg.danHash = dan.mStageNo == saveNo ? dan_hash(reinterpret_cast<uint8_t*>(&dan) + kDanOffset) : 0u;
+    msg.tmpHash = hash_shared(info->getTmp().mEvent, tmp_private);
     const int here = dComIfGp_roomControl_getStayNo();
     msg.room = static_cast<int8_t>(here);
     msg.zoneHash = 0;
     for (int i = 0; i < kZones; ++i) {
         dSv_zone_c& zone = info->getZone(i);
         if (zone.getRoomNo() != here) continue;
-        msg.zoneHash = hash_bytes(reinterpret_cast<uint8_t*>(&zone.getBit()), kZoneBitSize);
+        msg.zoneHash = zone_hash(here, reinterpret_cast<uint8_t*>(&zone.getBit()));
         break;
     }
     msg.visitedHash = visited_hash(info);
@@ -1062,12 +1223,10 @@ void handle_digest(const MsgWorldDigest& msg, uint8_t from) {
 
     if (std::memcmp(stage, msg.stage, 8) != 0 || saveNo != msg.saveNo) return;
 
-    const uint32_t mine = hash_bytes(mem_bytes(info->getMemory()), kMemSize, kKeyOffset);
+    const uint32_t mine = memory_hash(stage, mem_bytes(info->getMemory()));
     dSv_danBit_c& dan = info->getDan();
-    const uint32_t myDan = dan.mStageNo == saveNo
-                               ? hash_bytes(reinterpret_cast<uint8_t*>(&dan) + kDanOffset, kDanSize)
-                               : 0u;
-    const uint32_t myTmp = hash_shared(info->getTmp().mEvent, skills_tmp_private);
+    const uint32_t myDan = dan.mStageNo == saveNo ? dan_hash(reinterpret_cast<uint8_t*>(&dan) + kDanOffset) : 0u;
+    const uint32_t myTmp = hash_shared(info->getTmp().mEvent, tmp_private);
 
     bool zoneDiffers = false;
     const int here = dComIfGp_roomControl_getStayNo();
@@ -1076,7 +1235,7 @@ void handle_digest(const MsgWorldDigest& msg, uint8_t from) {
         for (int i = 0; i < kZones; ++i) {
             dSv_zone_c& zone = info->getZone(i);
             if (zone.getRoomNo() != here) continue;
-            myZone = hash_bytes(reinterpret_cast<uint8_t*>(&zone.getBit()), kZoneBitSize);
+            myZone = zone_hash(here, reinterpret_cast<uint8_t*>(&zone.getBit()));
             break;
         }
         if (myZone != msg.zoneHash) {
@@ -1095,7 +1254,9 @@ void handle_digest(const MsgWorldDigest& msg, uint8_t from) {
     const uint32_t myEvent = story_hash(info);
 
     const bool eventOk = !storyOn || myEvent == msg.eventHash || msg.storyRules != kStoryRules;
-    if (mine == msg.memoryHash && myDan == msg.danHash && myTmp == msg.tmpHash &&
+
+    const bool tmpOk = myTmp == msg.tmpHash || msg.storyRules != kStoryRules;
+    if (mine == msg.memoryHash && myDan == msg.danHash && tmpOk &&
         myStatusB == msg.statusBHash && myCollect == msg.collectHash &&
         myLightDrop == msg.lightDropHash && eventOk) {
         return;
@@ -1208,7 +1369,11 @@ void handle_full(const MsgWorldFull& msg) {
         uint8_t* mem = mem_bytes(info->getMemory());
         uint8_t newlySet[8] = {};
         for (int i = 0; i < 8; ++i) newlySet[i] = static_cast<uint8_t>(msg.data[i] & ~mem[i]);
+        uint8_t memBefore[kMemSize];
+        std::memcpy(memBefore, mem, kMemSize);
         merge_full(mem, baselineValid ? s_base.mem : nullptr, msg.data, kMemSize, true);
+        keep_mem_local(stage, mem, memBefore);
+        if (baselineValid) keep_mem_local(stage, s_base.mem, memBefore);
         open_chests_from_bits(newlySet);
         remove_collected_from_bits(newlySet);
         break;
@@ -1216,8 +1381,13 @@ void handle_full(const MsgWorldFull& msg) {
     case kRegionDan: {
         dSv_danBit_c& dan = info->getDan();
         if (msg.size != kDanSize || dan.mStageNo != saveNo) return;
-        merge_full(reinterpret_cast<uint8_t*>(&dan) + kDanOffset,
-            (baselineValid && s_base.haveDan) ? s_base.dan : nullptr, msg.data, kDanSize, false);
+        uint8_t* danBytes = reinterpret_cast<uint8_t*>(&dan) + kDanOffset;
+        uint8_t danBefore[kDanSize];
+        std::memcpy(danBefore, danBytes, kDanSize);
+        merge_full(danBytes, (baselineValid && s_base.haveDan) ? s_base.dan : nullptr, msg.data,
+            kDanSize, false);
+        keep_dan_local(danBytes, danBefore);
+        if (baselineValid && s_base.haveDan) keep_dan_local(s_base.dan, danBefore);
         break;
     }
     case kRegionTmp: {
@@ -1295,7 +1465,13 @@ void handle_full(const MsgWorldFull& msg) {
             if (baselineValid && s_base.haveZone[msg.room]) {
                 base = actors ? s_base.zoneActor[msg.room] : s_base.zone[msg.room];
             }
+            uint8_t zoneBefore[kZoneActorSize > kZoneBitSize ? kZoneActorSize : kZoneBitSize];
+            std::memcpy(zoneBefore, target, expect);
             merge_full(target, base, msg.data, expect, false);
+            if (!actors) {
+                keep_zone_local(msg.room, target, zoneBefore);
+                if (base != nullptr) keep_zone_local(msg.room, base, zoneBefore);
+            }
             break;
         }
         break;
@@ -1602,6 +1778,19 @@ void world_update() {
     run_self_test();
 }
 
+bool world_hold_story_flag(uint16_t flag) {
+    dSv_info_c* info = dComIfGs_getSaveInfo();
+    if (info == nullptr) return false;
+    const int b = flag >> 8;
+    const uint8_t bit = static_cast<uint8_t>(flag & 0xFF);
+    if (b < 0 || b >= kEventSize || bit == 0) return false;
+    const uint8_t have = info->getSavedata().getEvent().mEvent[b];
+    if ((have & bit) == bit || (s_storyPending[b] & bit) == bit) return false;
+    s_storyPending[b] = static_cast<uint8_t>(s_storyPending[b] | bit);
+    s_storyPendingBits += bit_count(static_cast<uint8_t>(bit & ~have));
+    return true;
+}
+
 void world_on_connected() {
     s_base.have = false;
     s_lightDrop.have = false;
@@ -1697,8 +1886,12 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
                 newlySet[at] = static_cast<uint8_t>(msg.set[i] & ~target[at]);
             }
         }
+        uint8_t memBefore[kMemSize];
+        std::memcpy(memBefore, target, kMemSize);
         apply_bytes(target, slotBaselineValid ? s_base.mem : nullptr, msg, kKeyOffset);
         if (sameSlot) {
+            keep_mem_local(stage, target, memBefore);
+            if (slotBaselineValid) keep_mem_local(stage, s_base.mem, memBefore);
 
             open_chests_from_bits(newlySet);
             remove_collected_from_bits(newlySet);
@@ -1716,8 +1909,12 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
     case kRegionDan: {
         dSv_danBit_c& dan = info->getDan();
         if (!here || dan.mStageNo != msg.saveNo || msg.offset + msg.size > kDanSize) return;
-        apply_bytes(reinterpret_cast<uint8_t*>(&dan) + kDanOffset,
-            (baselineValid && s_base.haveDan) ? s_base.dan : nullptr, msg);
+        uint8_t* danBytes = reinterpret_cast<uint8_t*>(&dan) + kDanOffset;
+        uint8_t danBefore[kDanSize];
+        std::memcpy(danBefore, danBytes, kDanSize);
+        apply_bytes(danBytes, (baselineValid && s_base.haveDan) ? s_base.dan : nullptr, msg);
+        keep_dan_local(danBytes, danBefore);
+        if (baselineValid && s_base.haveDan) keep_dan_local(s_base.dan, danBefore);
         break;
     }
     case kRegionZone: {
@@ -1725,8 +1922,13 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
         for (int i = 0; i < kZones; ++i) {
             dSv_zone_c& zone = info->getZone(i);
             if (zone.getRoomNo() != msg.room) continue;
-            apply_bytes(reinterpret_cast<uint8_t*>(&zone.getBit()),
-                (baselineValid && s_base.haveZone[msg.room]) ? s_base.zone[msg.room] : nullptr, msg);
+            uint8_t* zoneBytes = reinterpret_cast<uint8_t*>(&zone.getBit());
+            uint8_t zoneBefore[kZoneBitSize];
+            std::memcpy(zoneBefore, zoneBytes, kZoneBitSize);
+            const bool haveBase = baselineValid && s_base.haveZone[msg.room];
+            apply_bytes(zoneBytes, haveBase ? s_base.zone[msg.room] : nullptr, msg);
+            keep_zone_local(msg.room, zoneBytes, zoneBefore);
+            if (haveBase) keep_zone_local(msg.room, s_base.zone[msg.room], zoneBefore);
             break;
         }
         break;

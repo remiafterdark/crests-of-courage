@@ -46,6 +46,7 @@
 #include <string>
 #include <vector>
 #include <cstdio>
+#include <span>
 #include <string_view>
 
 void puppet_hook_init();
@@ -106,6 +107,14 @@ uint32_t g_ticksSinceRx = 0;
 
 mods::net::Socket g_listener;
 mods::net::Socket g_udp;
+
+CoopNetTraffic g_traffic;
+
+void udp_send(std::string_view endpoint, std::span<const std::byte> bytes) {
+    g_traffic.txBytes += bytes.size();
+    ++g_traffic.txPackets;
+    g_udp.send_to(endpoint, bytes);
+}
 bool g_isHost = true;
 bool g_handshakeSent = false;
 bool g_connecting = false;
@@ -276,6 +285,8 @@ void send_frame_to(PeerLink& link, uint8_t type, uint8_t from, const void* paylo
     if (size > 0 && payload != nullptr) {
         std::memcpy(frame.data() + sizeof(header), payload, size);
     }
+    g_traffic.txBytes += frame.size();
+    ++g_traffic.txPackets;
     link.sock.send({frame.data(), frame.size()});
 }
 
@@ -313,7 +324,7 @@ void send_bye(PeerLink& link) {
     std::vector<uint8_t> packet;
     link.rel.control_packet(packet, rudp::kKindBye);
     for (int i = 0; i < 3; ++i) {
-        g_udp.send_to(link.udpEndpoint,
+        udp_send(link.udpEndpoint,
             {reinterpret_cast<const std::byte*>(packet.data()), packet.size()});
     }
 }
@@ -426,6 +437,8 @@ void handle_tcp_event(const mods::net::Event& event) {
                 break;
             }
             const uint8_t* bytes = reinterpret_cast<const uint8_t*>(event.data.data());
+            g_traffic.rxBytes += event.data.size();
+            ++g_traffic.rxPackets;
             link.rx.insert(link.rx.end(), bytes, bytes + event.data.size());
 
             process_tcp_rx(link, g_isHost ? static_cast<uint8_t>(id) : kCoopNoPlayer);
@@ -690,7 +703,7 @@ void handle_midna_datagram(const mods::net::Event& event) {
         for (int i = 0; i < kCoopMaxPlayers; ++i) {
             if (i == id || !g_links[i].used || !g_links[i].haveUdp) continue;
             if (!worth_sending(static_cast<uint8_t>(id), i, snap.seq)) continue;
-            g_udp.send_to(g_links[i].udpEndpoint,
+            udp_send(g_links[i].udpEndpoint,
                 {reinterpret_cast<const std::byte*>(&snap), sizeof(snap)});
         }
     }
@@ -732,7 +745,7 @@ bool handle_reliable_datagram(const mods::net::Event& event) {
             refused.rel.start(h.conn, now);
             std::vector<uint8_t> bye;
             refused.rel.control_packet(bye, rudp::kKindBye);
-            g_udp.send_to(from, {reinterpret_cast<const std::byte*>(bye.data()), bye.size()});
+            udp_send(from, {reinterpret_cast<const std::byte*>(bye.data()), bye.size()});
             return true;
         }
         coop_log::info("coop_mod: player {} connected from {} (room code)", id, from);
@@ -757,7 +770,7 @@ bool handle_reliable_datagram(const mods::net::Event& event) {
 
         std::vector<uint8_t> ack;
         link.rel.control_packet(ack, rudp::kKindHelloAck);
-        g_udp.send_to(from, {reinterpret_cast<const std::byte*>(ack.data()), ack.size()});
+        udp_send(from, {reinterpret_cast<const std::byte*>(ack.data()), ack.size()});
     }
     if (!g_isHost && !link.helloAcked) {
 
@@ -789,7 +802,7 @@ void flush_udp_links() {
         PeerLink& link = g_links[i];
         if (!link.used || !link.viaUdp) continue;
         const auto send = [&](const uint8_t* data, size_t size) {
-            g_udp.send_to(link.udpEndpoint, {reinterpret_cast<const std::byte*>(data), size});
+            udp_send(link.udpEndpoint, {reinterpret_cast<const std::byte*>(data), size});
         };
         if (!g_isHost && !link.helloAcked) {
             if (now - link.createdMs > 8000) {
@@ -845,7 +858,7 @@ void handle_horse_datagram(const mods::net::Event& event) {
         for (int i = 0; i < kCoopMaxPlayers; ++i) {
             if (i == id || !g_links[i].used || !g_links[i].haveUdp) continue;
             if (!worth_sending(static_cast<uint8_t>(id), i, snap.seq)) continue;
-            g_udp.send_to(g_links[i].udpEndpoint,
+            udp_send(g_links[i].udpEndpoint,
                 {reinterpret_cast<const std::byte*>(&snap), sizeof(snap)});
         }
     }
@@ -888,6 +901,8 @@ void handle_udp_event(const mods::net::Event& event) {
         }
         return;
     }
+    g_traffic.rxBytes += event.data.size();
+    ++g_traffic.rxPackets;
 
     if (online_on_datagram(std::string{event.endpoint},
             reinterpret_cast<const uint8_t*>(event.data.data()), event.data.size())) {
@@ -956,7 +971,7 @@ void handle_udp_event(const mods::net::Event& event) {
         for (int i = 0; i < kCoopMaxPlayers; ++i) {
             if (i == id || !g_links[i].used || !g_links[i].haveUdp) continue;
             if (!worth_sending(static_cast<uint8_t>(id), i, snapshot.seq)) continue;
-            g_udp.send_to(g_links[i].udpEndpoint,
+            udp_send(g_links[i].udpEndpoint,
                 {reinterpret_cast<const std::byte*>(&snapshot), sizeof(snapshot)});
         }
     }
@@ -1113,11 +1128,20 @@ void apply_debug_give_kit() {
         }
     }
     if (daAlink_getAlinkActorClass() == nullptr || svc_item == nullptr) return;
-    static const int kKit[] = {dItemNo_COPY_ROD_e, dItemNo_BOMB_BAG_LV1_e, dItemNo_KANTERA_e,
-        dItemNo_BOW_e, dItemNo_BOOMERANG_e, dItemNo_HORSE_FLUTE_e};
+
+    static const int kKit[] = {dItemNo_COPY_ROD_e, dItemNo_BOMB_BAG_LV1_e, dItemNo_BOMB_BAG_LV1_e,
+        dItemNo_BOMB_BAG_LV1_e, dItemNo_KANTERA_e, dItemNo_BOW_e, dItemNo_ARROW_LV3_e,
+        dItemNo_BOOMERANG_e, dItemNo_HORSE_FLUTE_e, dItemNo_PACHINKO_e, dItemNo_HOOKSHOT_e,
+        dItemNo_W_HOOKSHOT_e, dItemNo_HVY_BOOTS_e, dItemNo_SPINNER_e, dItemNo_IRONBALL_e,
+        dItemNo_FISHING_ROD_1_e, dItemNo_HAWK_EYE_e, dItemNo_WALLET_LV3_e, dItemNo_EMPTY_BOTTLE_e,
+        dItemNo_EMPTY_BOTTLE_e, dItemNo_EMPTY_BOTTLE_e, dItemNo_EMPTY_BOTTLE_e, dItemNo_WEAR_ZORA_e,
+        dItemNo_ARMOR_e, dItemNo_MAGIC_LV1_e};
     for (int item : kKit) {
         svc_item->give_item(mod_ctx, nullptr, static_cast<uint8_t>(item), ITEM_GIVE_SILENT);
     }
+
+    dComIfGs_setMaxLife(100);
+    dComIfGs_setLife(80);
 
     dComIfGs_setCollectSword(COLLECT_ORDON_SWORD);
     dComIfGs_setCollectSword(COLLECT_MASTER_SWORD);
@@ -1131,8 +1155,8 @@ void apply_debug_give_kit() {
         dSv_event_flag_c::F_0343, dSv_event_flag_c::F_0344};
     for (u16 bit : kHiddenSkills) dComIfGs_onEventBit(bit);
     s_done = true;
-    coop_log::info("coop_mod: [DEBUG] test kit given (rod, bombs, lantern, bow, boomerang, horse "
-                   "call, both swords, both shields, all seven hidden skills)");
+    coop_log::info("coop_mod: [DEBUG] test kit given (every item, both armours, Shadow Crystal, 20 "
+                   "hearts, both swords, both shields, all seven hidden skills)");
 }
 
 void send_local_snapshot() {
@@ -1885,7 +1909,7 @@ void send_local_snapshot() {
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         if (!g_links[i].used || !g_links[i].haveUdp) continue;
         if (!worth_sending(g_localId, i, snapshot.seq)) continue;
-        g_udp.send_to(g_links[i].udpEndpoint,
+        udp_send(g_links[i].udpEndpoint,
             {reinterpret_cast<const std::byte*>(&snapshot), sizeof(snapshot)});
     }
     drive_fake_players(snapshot);
@@ -1955,7 +1979,7 @@ void send_midna_datagram(const MidnaSnapshot& snap) {
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         if (!g_links[i].used || !g_links[i].haveUdp) continue;
         if (!worth_sending(g_localId, i, snap.seq)) continue;
-        g_udp.send_to(g_links[i].udpEndpoint,
+        udp_send(g_links[i].udpEndpoint,
             {reinterpret_cast<const std::byte*>(&snap), sizeof(snap)});
     }
 }
@@ -2113,7 +2137,7 @@ void send_horse_datagram(const HorseSnapshot& snap) {
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         if (!g_links[i].used || !g_links[i].haveUdp) continue;
         if (!worth_sending(g_localId, i, snap.seq)) continue;
-        g_udp.send_to(g_links[i].udpEndpoint,
+        udp_send(g_links[i].udpEndpoint,
             {reinterpret_cast<const std::byte*>(&snap), sizeof(snap)});
     }
 }
@@ -2252,6 +2276,24 @@ uint32_t coop_net_ticks_since_player(uint8_t playerId) {
     if (playerId == g_localId) return 0;
     if (playerId >= kCoopMaxPlayers) return 0xFFFFFFFFu;
     return g_playerQuiet[playerId];
+}
+
+CoopNetTraffic coop_net_traffic() {
+    return g_traffic;
+}
+
+bool coop_net_link_info(uint8_t playerId, CoopLinkInfo* out) {
+    if (playerId >= kCoopMaxPlayers || out == nullptr) return false;
+    const PeerLink& link = g_links[playerId];
+    if (!link.used) return false;
+    *out = CoopLinkInfo{};
+    out->udp = link.viaUdp;
+    if (link.viaUdp) {
+        out->rttMs = link.rel.smoothed_rtt_ms();
+        out->resends = link.rel.resends();
+        out->queuedBytes = link.rel.queued_bytes();
+    }
+    return true;
 }
 
 int32_t coop_net_ping_ms(uint8_t playerId) {
@@ -2457,7 +2499,7 @@ void coop_net_join_code() {
 
 void coop_udp_send_raw(const std::string& endpoint, const void* data, size_t size) {
     if (!g_udp) return;
-    g_udp.send_to(endpoint, {static_cast<const std::byte*>(data), size});
+    udp_send(endpoint, {static_cast<const std::byte*>(data), size});
 }
 
 void coop_online_punched(const std::string& endpoint, uint64_t token) {

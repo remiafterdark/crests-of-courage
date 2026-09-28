@@ -47,6 +47,7 @@ DEFINE_HOOK_SYMBOL("daNpcWrestler_c::setWrestlerVoice", void(daNpcWrestler_c*), 
 DEFINE_HOOK_SYMBOL("daAlink_c::setClothesChange", void(daAlink_c*, int), SumoClothesHook);
 DEFINE_HOOK_SYMBOL("dMeter2Draw_c::getActionString", char*(dMeter2Draw_c*, u8, u8, u8*), SumoLabelHook);
 DEFINE_HOOK_SYMBOL("daNpcWrestler_c::setNextAction", bool(daNpcWrestler_c*), SumoNextActionHook);
+DEFINE_HOOK_SYMBOL("daNpcBouS_c::Execute", int(daNpcBouS_c*), SumoBoExecuteHook);
 
 extern const ConfigService* svc_config;
 
@@ -115,7 +116,6 @@ struct State {
     bool home = false;
     cXyz homePos;
     s16 homeAngle = 0;
-    bool sawTalk = false;
     bool sawWrestler = false;
     bool rematch = false;
     std::string name;
@@ -253,7 +253,30 @@ void take_challenge(u8 from) {
     s.name = features_peer_name(from);
     s.lastHeard = s_frame;
     set_phase(kAsked);
+    features_toast("Sumo", (s.name + " wants to wrestle! Face them in the ring and press A.").c_str());
     coop_log::info("coop_mod: [SUMO] {} challenged us", from);
+}
+
+void spawn_wrestler(daNpcBouS_c* bo);
+
+void accept_challenge() {
+    daNpcBouS_c* bo = find_bo();
+    if (bo == nullptr) {
+        send(s.opponent, kSumoAnswer, 0);
+        reset();
+        return;
+    }
+    send(s.opponent, kSumoAnswer, 1);
+    s.lastHeard = s_frame;
+    spawn_wrestler(bo);
+    set_phase(kStarting);
+    coop_log::info("coop_mod: [SUMO] accepted {}'s challenge", s.opponent);
+}
+
+HookAction on_bo_execute_pre(ModContext*, void* args, void*, void*) {
+    if (s.phase == kIdle) return HOOK_CONTINUE;
+    if (auto* bo = mods::arg<daNpcBouS_c*>(args, 0)) bo->mForcibleTalk = 0;
+    return HOOK_CONTINUE;
 }
 
 void spawn_wrestler(daNpcBouS_c* bo) {
@@ -356,9 +379,8 @@ uint16_t talk_query(ModContext*, const FlowQueryContext* query, void*) {
     auto* speaker = static_cast<fopAc_ac_c*>(const_cast<void*>(query->speaker_actor));
     const s16 name = fopAcM_GetName(speaker);
     TalkPath path = kTalkTheirOwn;
-    if (s.phase == kAsked && name == fpcNm_NPC_BOU_S_e) {
-        path = kTalkChallenge;
-    } else if (s.phase == kMatch && s.result != 0 && name == fpcNm_NPC_WRESTLER_e) {
+
+    if (s.phase == kMatch && s.result != 0 && name == fpcNm_NPC_WRESTLER_e) {
         path = we_won(s.result) ? kTalkWeWon : kTalkWeLost;
     }
     if (query->phase == FLOW_QUERY_PHASE_EXECUTE && path != kTalkTheirOwn) {
@@ -1046,10 +1068,18 @@ void sumo_after_player(daAlink_c* alink) {
         coop_log::info("coop_mod: [SUMO] debug: Bo counts as beaten");
     }
 
-    const u8 target = s.phase == kIdle ? prompt_target(alink) : kCoopNoPlayer;
-    if (s.phase == kIdle && s_promptFor != kCoopNoPlayer && s_promptFor == target &&
-        alink->doTrigger()) {
-        challenge(target);
+    u8 target = kCoopNoPlayer;
+    if (s.phase == kIdle) {
+        target = prompt_target(alink);
+    } else if (s.phase == kAsked && prompt_target(alink) == s.opponent) {
+        target = s.opponent;
+    }
+    if (s_promptFor != kCoopNoPlayer && s_promptFor == target && alink->doTrigger()) {
+        if (s.phase == kIdle) {
+            challenge(target);
+        } else if (s.phase == kAsked) {
+            accept_challenge();
+        }
     }
 
     if (s_waitingFrom != kCoopNoPlayer) {
@@ -1061,7 +1091,7 @@ void sumo_after_player(daAlink_c* alink) {
             s_waitingFrom = kCoopNoPlayer;
         }
     }
-    s_promptFor = s.phase == kIdle ? target : kCoopNoPlayer;
+    s_promptFor = (s.phase == kIdle || s.phase == kAsked) ? target : kCoopNoPlayer;
     s_labelActive = s_promptFor != kCoopNoPlayer;
     if (s_labelActive && dComIfGp_getDoStatus() == 0) {
         dComIfGp_setDoStatus(BUTTON_STATUS_SPEAK, BUTTON_STATUS_FLAG_NONE);
@@ -1078,41 +1108,15 @@ void sumo_after_player(daAlink_c* alink) {
             reset();
         }
         break;
-    case kAsked: {
+    case kAsked:
 
-        if (dComIfGp_event_runCheck()) {
-            f32 x, y, z;
-            if (puppet_hook_get_pose_of(s.opponent, &x, &y, &z, nullptr, nullptr, nullptr)) {
-                const cXyz them(x, y, z);
-                const s16 toThem = cLib_targetAngleY(&alink->current.pos, &them);
-                alink->shape_angle.y = toThem;
-                alink->current.angle.y = toThem;
-            }
-        }
-
-        if (wrestler != nullptr) {
-            send(s.opponent, kSumoAnswer, 1);
-            s.lastHeard = s_frame;
-            set_phase(kStarting);
-            coop_log::info("coop_mod: [SUMO] accepted {}'s challenge", s.opponent);
-            break;
-        }
-        if (dComIfGp_event_runCheck()) {
-            s.sawTalk = true;
-        } else if (s.sawTalk || s_frame - s.since > kCallTimeout) {
-
-            if (daNpcBouS_c* bo = find_bo()) bo->mForcibleTalk = 0;
+        if (s_frame - s.since > kAskTimeout) {
             send(s.opponent, kSumoAnswer, 0);
-            coop_log::info("coop_mod: [SUMO] declined {}'s challenge", s.opponent);
+            features_toast("Sumo", ("You didn't take " + s.name + "'s challenge.").c_str());
+            coop_log::info("coop_mod: [SUMO] declined {}'s challenge (no answer)", s.opponent);
             reset();
-        } else if (daNpcBouS_c* bo = find_bo()) {
-
-            bo->mForcibleTalk = 1;
-            bo->eventInfo.onCondition(dEvtCnd_CANTALK_e);
-            fopAcM_orderSpeakEvent(bo, 0, 0);
         }
         break;
-    }
     case kStarting:
     case kMatch:
         if (wrestler != nullptr) {
@@ -1198,7 +1202,7 @@ void sumo_on_message(const uint8_t* payload, size_t size, uint8_t from) {
         if (from == s_waitingFrom) s_waitingFrom = kCoopNoPlayer;
         if (from != s.opponent) return;
         if (s.phase == kAsked) {
-            if (daNpcBouS_c* bo = find_bo()) bo->mForcibleTalk = 0;
+            features_toast("Sumo", (s.name + " took back the challenge.").c_str());
             reset();
         }
         return;
@@ -1300,7 +1304,6 @@ void sumo_init() {
     testDesc.type = CONFIG_VAR_BOOL;
     testDesc.default_bool = false;
     if (svc_config->register_var(mod_ctx, &testDesc, &s_testVar) != MOD_OK) s_testVar = 0;
-    register_rewords();
     build_talks();
     int resolved = 0;
     for (int i = 0; i < kActCount; ++i) {
@@ -1332,6 +1335,7 @@ void sumo_init() {
         static_cast<int>(mods::hook::add_pre<SumoVoiceHook>(on_wrestler_voice_pre)),
         static_cast<int>(mods::hook::add_pre<SumoGoHomeHook>(on_go_home_pre)),
         static_cast<int>(mods::hook::add_post<SumoGoHomeHook>(on_go_home_post)),
+        static_cast<int>(mods::hook::add_pre<SumoBoExecuteHook>(on_bo_execute_pre)),
     };
     int failed = 0;
     for (int result : results) failed += result != 0 ? 1 : 0;

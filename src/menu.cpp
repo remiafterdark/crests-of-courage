@@ -11,6 +11,8 @@
 
 #include "d/d_com_inf_game.h"
 
+#include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -23,12 +25,16 @@ struct SurfaceHandles {
     UiElementHandle models = 0;
     UiElementHandle party = 0;
     UiElementHandle invite = 0;
+    UiElementHandle net = 0;
+    UiElementHandle netPeers = 0;
     UiListHandle players = 0;
     std::string lastStatus;
     std::string lastPeer;
     std::string lastModels;
     std::string lastParty;
     std::string lastInvite;
+    std::string lastNet;
+    std::string lastNetPeers;
     std::string lastList;
 
     std::string lastBackup;
@@ -304,6 +310,110 @@ void push_players(SurfaceHandles& h) {
 
 void sort_presets(SurfaceHandles& h);
 
+struct NetRates {
+    uint64_t sampledMs = 0;
+    CoopNetTraffic last{};
+    double upKBs = 0.0, downKBs = 0.0;
+    double upPackets = 0.0, downPackets = 0.0;
+    uint64_t resendsLast[kCoopMaxPlayers] = {};
+    uint64_t resendsPerSec[kCoopMaxPlayers] = {};
+};
+NetRates s_rates;
+
+uint64_t now_ms() {
+    using namespace std::chrono;
+    return static_cast<uint64_t>(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
+}
+
+void sample_rates() {
+    const uint64_t now = now_ms();
+    const CoopNetTraffic t = coop_net_traffic();
+    if (s_rates.sampledMs == 0) {
+        s_rates.sampledMs = now;
+        s_rates.last = t;
+        return;
+    }
+    const uint64_t dt = now - s_rates.sampledMs;
+    if (dt < 1000) return;
+    const double secs = static_cast<double>(dt) / 1000.0;
+    s_rates.upKBs = static_cast<double>(t.txBytes - s_rates.last.txBytes) / 1024.0 / secs;
+    s_rates.downKBs = static_cast<double>(t.rxBytes - s_rates.last.rxBytes) / 1024.0 / secs;
+    s_rates.upPackets = static_cast<double>(t.txPackets - s_rates.last.txPackets) / secs;
+    s_rates.downPackets = static_cast<double>(t.rxPackets - s_rates.last.rxPackets) / secs;
+    for (int i = 0; i < kCoopMaxPlayers; ++i) {
+        CoopLinkInfo link;
+        const uint64_t resends = coop_net_link_info(static_cast<uint8_t>(i), &link) ? link.resends : 0;
+        s_rates.resendsPerSec[i] = resends >= s_rates.resendsLast[i] ? resends - s_rates.resendsLast[i] : 0;
+        s_rates.resendsLast[i] = resends;
+    }
+    s_rates.sampledMs = now;
+    s_rates.last = t;
+}
+
+std::string fmt_size(uint64_t bytes) {
+    char buf[32];
+    if (bytes >= 1024ull * 1024ull) {
+        std::snprintf(buf, sizeof(buf), "%.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+    } else {
+        std::snprintf(buf, sizeof(buf), "%.1f KB", static_cast<double>(bytes) / 1024.0);
+    }
+    return buf;
+}
+
+std::string fmt_rate(double kbs, double packets) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.1f KB/s, %.0f packets/s", kbs, packets);
+    return buf;
+}
+
+int players_in_session() {
+    int n = 0;
+    for (int i = 0; i < kCoopMaxPlayers; ++i) {
+        if (coop_net_player_present(static_cast<uint8_t>(i))) ++n;
+    }
+    return n;
+}
+
+std::string net_text() {
+    sample_rates();
+    std::string out = std::string("Crests of Courage ") + COOP_MOD_VERSION + ", protocol " +
+                      std::to_string(kCoopProtocolVersion) + "\n\n";
+    if (!coop_net_connected()) return out + "Not connected.";
+    const int players = players_in_session();
+    out += coop_net_is_host() ? std::string("Hosting")
+                              : "Joined as player " + std::to_string(coop_net_local_id());
+    out += ", " + std::to_string(players) + (players == 1 ? " player\n\n" : " players\n\n");
+    const CoopNetTraffic t = coop_net_traffic();
+    out += "Upload: " + fmt_rate(s_rates.upKBs, s_rates.upPackets) + "\n";
+    out += "Download: " + fmt_rate(s_rates.downKBs, s_rates.downPackets) + "\n\n";
+    out += "Since launch: " + fmt_size(t.txBytes) + " up, " + fmt_size(t.rxBytes) + " down";
+    return out;
+}
+
+std::string net_peers_text() {
+    if (!coop_net_connected()) return "";
+    std::string out;
+    for (int i = 0; i < kCoopMaxPlayers; ++i) {
+        const uint8_t id = static_cast<uint8_t>(i);
+        if (id == coop_net_local_id() || !coop_net_player_present(id)) continue;
+        const CoopPeer& p = features_peer_of(id);
+        if (!out.empty()) out += "\n\n";
+        out += (p.present && !p.name.empty()) ? p.name : "Player " + std::to_string(id);
+        const int32_t ms = coop_net_ping_ms(id);
+        out += ms >= 0 ? "\nPing: " + std::to_string(ms) + " ms" : std::string("\nPing: measuring");
+        CoopLinkInfo link;
+        if (!coop_net_link_info(id, &link)) {
+            out += "\nThrough the host";
+        } else if (!link.udp) {
+            out += "\nDirect connection (TCP)";
+        } else {
+            out += "\nRoom code (UDP), " + std::to_string(s_rates.resendsPerSec[id]) + " resent/s";
+            if (link.queuedBytes > 0) out += ", " + fmt_size(link.queuedBytes) + " waiting";
+        }
+    }
+    return out.empty() ? "Nobody else is here yet." : out;
+}
+
 void refresh(SurfaceHandles& h) {
     if (h.status != 0) {
         const std::string text = status_text();
@@ -339,6 +449,20 @@ void refresh(SurfaceHandles& h) {
         if (text != h.lastParty) {
             h.lastParty = text;
             svc_ui->elem_set_text(mod_ctx, h.party, h.lastParty.c_str());
+        }
+    }
+    if (h.net != 0) {
+        const std::string text = net_text();
+        if (text != h.lastNet) {
+            h.lastNet = text;
+            svc_ui->elem_set_text(mod_ctx, h.net, h.lastNet.c_str());
+        }
+    }
+    if (h.netPeers != 0) {
+        const std::string text = net_peers_text();
+        if (text != h.lastNetPeers) {
+            h.lastNetPeers = text;
+            svc_ui->elem_set_text(mod_ctx, h.netPeers, h.lastNetPeers.c_str());
         }
     }
     push_players(h);
@@ -1139,6 +1263,16 @@ ModResult tab_models(
     return MOD_OK;
 }
 
+ModResult tab_network(
+    ModContext*, UiWindowHandle, UiElementHandle left, UiElementHandle right, void*, ModError*) {
+    s_window = SurfaceHandles{};
+    s_window.lastNet = net_text();
+    svc_ui->pane_add_text(mod_ctx, left, s_window.lastNet.c_str(), &s_window.net);
+    s_window.lastNetPeers = net_peers_text();
+    svc_ui->pane_add_text(mod_ctx, right, s_window.lastNetPeers.c_str(), &s_window.netPeers);
+    return MOD_OK;
+}
+
 ModResult tab_debug(
     ModContext*, UiWindowHandle, UiElementHandle left, UiElementHandle, void*, ModError*) {
     s_window = SurfaceHandles{};
@@ -1323,9 +1457,9 @@ void open_window() {
     version_remind();
     if (s_windowHandle != 0) return;
 
-    const size_t tabCount = features_debug_menu() ? 6 : 5;
-    UiTabDesc tabs[6] = {UI_TAB_DESC_INIT, UI_TAB_DESC_INIT, UI_TAB_DESC_INIT, UI_TAB_DESC_INIT,
-        UI_TAB_DESC_INIT, UI_TAB_DESC_INIT};
+    const size_t tabCount = features_debug_menu() ? 7 : 6;
+    UiTabDesc tabs[7] = {UI_TAB_DESC_INIT, UI_TAB_DESC_INIT, UI_TAB_DESC_INIT, UI_TAB_DESC_INIT,
+        UI_TAB_DESC_INIT, UI_TAB_DESC_INIT, UI_TAB_DESC_INIT};
     tabs[0].title = "Connect";
     tabs[0].build = tab_connect;
     tabs[0].update = update_window;
@@ -1343,9 +1477,12 @@ void open_window() {
     tabs[4].build = tab_models;
     tabs[4].update = update_window;
 
-    tabs[5].title = "Debug";
-    tabs[5].build = tab_debug;
+    tabs[5].title = "Network";
+    tabs[5].build = tab_network;
     tabs[5].update = update_window;
+    tabs[6].title = "Debug";
+    tabs[6].build = tab_debug;
+    tabs[6].update = update_window;
 
     UiWindowDesc desc = UI_WINDOW_DESC_INIT;
     desc.tabs = tabs;

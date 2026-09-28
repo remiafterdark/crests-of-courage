@@ -13,6 +13,7 @@
 
 #include "d/actor/d_a_alink.h"
 #include "d/actor/d_a_obj_iceblock.h"
+#include "d/actor/d_a_obj_so.h"
 #include "d/actor/d_a_cstatue.h"
 #include "d/actor/d_a_cstaF.h"
 #include "d/actor/d_a_crod.h"
@@ -50,6 +51,7 @@
 #include "d/actor/d_a_e_ba.h"
 #include "d/actor/d_a_e_bg.h"
 #include "d/actor/d_a_e_bi.h"
+#include "d/d_bomb.h"
 #include "d/actor/d_a_e_bs.h"
 #include "d/actor/d_a_e_bu.h"
 #include "d/actor/d_a_e_cr.h"
@@ -145,6 +147,8 @@
 #include <cstddef>
 
 DEFINE_HOOK(&fpcEx_Execute, EnemyExecuteHook);
+DEFINE_HOOK_SYMBOL("dComIfGs_onSwitch", void(int, int), EnemySwitchHook);
+DEFINE_HOOK_SYMBOL("dComIfGs_offSwitch", void(int, int), EnemySwitchOffHook);
 
 DEFINE_HOOK_SYMBOL("daCstatue_c::setAnime", void(daCstatue_c*), CoopStatueSetAnimeHook);
 
@@ -579,6 +583,15 @@ bool procname_is_boss(s16 name) {
     case 0x1DB:
     case 0x1DC:
     case 0x2ED:
+
+    case 0x1B1:
+    case 0x1C2:
+    case 0x200:
+    case 0x208:
+
+    case 0x1D7:
+    case 0x1CB:
+    case 0x1E4:
         return true;
     default:
         return false;
@@ -592,6 +605,26 @@ bool syncable(fopAc_ac_c* actor) {
         const s16 name = fopAcM_GetName(actor);
         if (name == fpcNm_E_YC_e || name == fpcNm_E_YR_e) return false;
         if (name == fpcNm_E_RDY_e && dKy_darkworld_check()) return false;
+
+        const u32 arg0 = fopAcM_GetParam(actor) & 0xff;
+        if (name == fpcNm_E_RDB_e) return false;
+        if (name == fpcNm_E_RD_e && (arg0 == 4 || arg0 == 5 || arg0 == 11 || arg0 == 12)) return false;
+        if (name == fpcNm_E_WB_e && (arg0 == 5 || arg0 == 7 || arg0 == 8 || arg0 == 9)) return false;
+
+        if (name == fpcNm_E_ZH_e) return false;
+
+        if (name == fpcNm_E_PM_e) return false;
+        if (name == fpcNm_E_FS_e && fopAcM_GetLinkId(actor) != fpcM_ERROR_PROCESS_ID_e) return false;
+
+        if ((name == fpcNm_E_MK_e || name == fpcNm_E_MK_BO_e) && fopAcM_GetRoomNo(actor) == 4 &&
+            std::strcmp(dComIfGp_getStartStageName(), "D_MN05") == 0) {
+            return false;
+        }
+
+        if (name == fpcNm_NPC_KN_e || name == fpcNm_L7lowDr_e || name == fpcNm_DR_e ||
+            name == fpcNm_L7ODR_e || name == fpcNm_NPC_LF_e || name == fpcNm_NPC_TR_e) {
+            return false;
+        }
     }
 
     if (procname_is_boss(fopAcM_GetName(actor))) return false;
@@ -727,6 +760,8 @@ struct Tracked {
     bool describedEver = false;
 
     bool carriedByUs = false;
+
+    uint32_t convertedByUsTick = 0;
     f32 targetBlend = 0.0f;
 
     int lonelyTicks = 0;
@@ -837,6 +872,10 @@ Remote* find_or_add_remote(int8_t room, uint32_t key) {
 
 void reset_movers();
 
+void reset_cages();
+void capture_cage_bars();
+void apply_pending_cages();
+
 void reset_tables() {
     for (int i = 0; i < kMaxTracked; ++i) {
         s_tracked[i] = Tracked{};
@@ -848,6 +887,7 @@ void reset_tables() {
 
     for (int i = 0; i < kMaxPendingObjectHits; ++i) s_pendingObjectHits[i] = PendingHit{};
     reset_movers();
+    reset_cages();
     s_selfTestTicks = 0;
     s_selfTestDone = false;
 }
@@ -1658,7 +1698,8 @@ const EnemyTmrLayout kEnemyTmr[] = {
     TMR(0x02e8, e_th_ball_class,         mTimers),
     TMR(0x02ed, e_mk_bo_class,           timers),
     TMR(0x02ee, e_mm_mt_class,           m_timer),
-    TMR(0x0304, e_bi_class,              timer),
+
+    { (int16_t)0x0304, (uint16_t)offsetof(e_bi_class, timer), (uint8_t)5 },
     TMR(0x1BF, e_st_class,            mTimers),
 };
 #undef TMR
@@ -1793,6 +1834,7 @@ void sweep(EnemyList& list, bool host) {
         }
 
         t->carriedByUs = fopAcM_checkCarryNow(actor) != 0;
+        if (t->carriedByUs && t->procName == fpcNm_E_BI_e) t->convertedByUsTick = s_tick;
 
         if (!we_own(room, key)) {
             bool heardOfIt = false;
@@ -1840,6 +1882,15 @@ void sweep(EnemyList& list, bool host) {
         if (!t.used || t.seen) continue;
 
         const bool catchable = t.procName == fpcNm_E_BI_e;
+
+        if (catchable && !t.killed && !t.goneSent && t.convertedByUsTick != 0 &&
+            s_tick - t.convertedByUsTick < 90 && room_is_loaded(t.room)) {
+            send_gone(t.room, t.key);
+            coop_log::info("coop_mod: [ENEMY] our Bombling became our bomb (room {} key={:#010x}) - "
+                           "telling the others to drop theirs", static_cast<int>(t.room), t.key);
+            t = Tracked{};
+            continue;
+        }
         if (!t.killed && t.runtime && !t.goneSent && !catchable && room_is_loaded(t.room)) {
             if (quiet) continue;
             send_gone(t.room, t.key);
@@ -2285,7 +2336,147 @@ void lie_end() {
     s_lie.player = nullptr;
 }
 
+fpc_ProcID s_execStack[8];
+int s_execDepth = 0;
+bool s_applyingEnemySwitch = false;
+int s_enemySwitchesSent = 0;
+int s_enemySwitchesApplied = 0;
+
+bool s_switchWasOn = false;
+bool s_switchOffWasOn = false;
+char s_switchSentStage[9] = {};
+uint16_t s_switchSent[64];
+int s_switchSentCount = 0;
+char s_switchGotStage[9] = {};
+uint16_t s_switchGot[64];
+int s_switchGotCount = 0;
+
+uint16_t switch_key(int sw, int room) {
+    return static_cast<uint16_t>((sw & 0xFF) | ((room & 0xFF) << 8));
+}
+
+struct SwitchSet {
+    char* stage;
+    uint16_t* keys;
+    int* count;
+    void sync_stage(const char* now) {
+        if (std::strncmp(stage, now, 8) == 0) return;
+        std::memset(stage, 0, 9);
+        std::memcpy(stage, now, strnlen(now, 8));
+        *count = 0;
+    }
+    int find(uint16_t key) const {
+        for (int i = 0; i < *count; ++i) {
+            if (keys[i] == key) return i;
+        }
+        return -1;
+    }
+    bool add(uint16_t key) {
+        if (find(key) >= 0 || *count >= 64) return false;
+        keys[(*count)++] = key;
+        return true;
+    }
+    bool remove(uint16_t key) {
+        const int i = find(key);
+        if (i < 0) return false;
+        keys[i] = keys[--(*count)];
+        return true;
+    }
+};
+SwitchSet sent_switches() { return {s_switchSentStage, s_switchSent, &s_switchSentCount}; }
+SwitchSet got_switches() { return {s_switchGotStage, s_switchGot, &s_switchGotCount}; }
+
+HookAction on_switch_pre(ModContext*, void* args, void*, void*) {
+    s_switchWasOn = dComIfGs_isSwitch(mods::arg<int>(args, 0), mods::arg<int>(args, 1));
+    return HOOK_CONTINUE;
+}
+
+bool switch_first_send(const char* stage, int sw, int room) {
+    SwitchSet set = sent_switches();
+    set.sync_stage(stage);
+    return set.add(switch_key(sw, room));
+}
+
+HookAction on_switch_off_pre(ModContext*, void* args, void*, void*) {
+    s_switchOffWasOn = dComIfGs_isSwitch(mods::arg<int>(args, 0), mods::arg<int>(args, 1));
+    return HOOK_CONTINUE;
+}
+
+void on_switch_off_post(ModContext*, void* args, void*, void*) {
+    if (!s_switchOffWasOn || s_applyingEnemySwitch || !coop_net_connected()) return;
+    const char* stage = dComIfGp_getStartStageName();
+    if (stage == nullptr) return;
+    const int sw = mods::arg<int>(args, 0);
+    const int room = mods::arg<int>(args, 1);
+    SwitchSet set = sent_switches();
+    set.sync_stage(stage);
+    if (!set.remove(switch_key(sw, room))) return;
+    MsgEnemySwitch msg{};
+    std::memcpy(msg.stage, stage, strnlen(stage, sizeof(msg.stage)));
+    msg.sw = static_cast<int16_t>(sw);
+    msg.room = static_cast<int8_t>(room);
+    msg.off = 1;
+    coop_net_send(kMsgEnemySwitch, &msg, sizeof(msg));
+    coop_log::info("coop_mod: [ENEMY] relayed switch {} (room {}) turned off again - telling "
+                   "everybody", sw, room);
+}
+
+void on_switch_post(ModContext*, void* args, void*, void*) {
+    if (s_switchWasOn || s_applyingEnemySwitch || s_execDepth <= 0 || s_execDepth > 8) return;
+    if (!coop_net_connected() || !enemies_enabled_now()) return;
+    fopAc_ac_c* actor = fopAcM_SearchByID(s_execStack[s_execDepth - 1]);
+
+    if (actor == nullptr || fopAcM_GetGroup(actor) != fopAc_ENEMY_e || !syncable(actor)) return;
+    const s16 name = fopAcM_GetName(actor);
+
+    if (name == fpcNm_E_YMB_e && mods::arg<int>(args, 0) == 5) return;
+    const char* stage = dComIfGp_getStartStageName();
+    if (stage == nullptr) return;
+    if (!switch_first_send(stage, mods::arg<int>(args, 0), mods::arg<int>(args, 1))) return;
+    MsgEnemySwitch msg{};
+    std::memcpy(msg.stage, stage, strnlen(stage, sizeof(msg.stage)));
+    msg.sw = static_cast<int16_t>(mods::arg<int>(args, 0));
+    msg.room = static_cast<int8_t>(mods::arg<int>(args, 1));
+    msg.procName = name;
+    coop_net_send(kMsgEnemySwitch, &msg, sizeof(msg));
+    ++s_enemySwitchesSent;
+    coop_log::info("coop_mod: [ENEMY] enemy {:#x} turned switch {} (room {}) on - telling everybody",
+        static_cast<unsigned>(name), static_cast<int>(msg.sw), static_cast<int>(msg.room));
+}
+
+void apply_enemy_switch(const MsgEnemySwitch& msg) {
+    const char* stage = dComIfGp_getStartStageName();
+    if (stage == nullptr || std::strncmp(stage, msg.stage, 8) != 0) return;
+    if (daAlink_getAlinkActorClass() == nullptr) return;
+    SwitchSet got = got_switches();
+    got.sync_stage(stage);
+    if (msg.off != 0) {
+
+        if (!got.remove(switch_key(msg.sw, msg.room)) || !dComIfGs_isSwitch(msg.sw, msg.room)) return;
+        s_applyingEnemySwitch = true;
+        dComIfGs_offSwitch(msg.sw, msg.room);
+        s_applyingEnemySwitch = false;
+        coop_log::info("coop_mod: [ENEMY] switch {} (room {}) off again, as where it was set",
+            static_cast<int>(msg.sw), static_cast<int>(msg.room));
+        return;
+    }
+    if (dComIfGs_isSwitch(msg.sw, msg.room)) return;
+    got.add(switch_key(msg.sw, msg.room));
+    s_applyingEnemySwitch = true;
+    dComIfGs_onSwitch(msg.sw, msg.room);
+    s_applyingEnemySwitch = false;
+    ++s_enemySwitchesApplied;
+    coop_log::info("coop_mod: [ENEMY] switch {} (room {}) on - another player's enemy {:#x} set it",
+        static_cast<int>(msg.sw), static_cast<int>(msg.room), static_cast<unsigned>(msg.procName));
+}
+
 HookAction on_proc_execute_pre(ModContext*, void* args, void*, void*) {
+
+    {
+        auto* proc = mods::arg<base_process_class*>(args, 0);
+        if (s_execDepth < 8) s_execStack[s_execDepth] = proc != nullptr ? proc->id : fpcM_ERROR_PROCESS_ID_e;
+        ++s_execDepth;
+    }
 
     {
         auto* proc = mods::arg<base_process_class*>(args, 0);
@@ -2332,6 +2523,7 @@ HookAction on_proc_execute_pre(ModContext*, void* args, void*, void*) {
 bool repin_after_execute(base_process_class* proc);
 
 void on_proc_execute_post(ModContext*, void* args, void*, void*) {
+    if (s_execDepth > 0) --s_execDepth;
 
     repin_after_execute(mods::arg<base_process_class*>(args, 0));
     if (--s_lieDepth != 0) return;
@@ -2460,6 +2652,11 @@ void capture_landed_hits(EnemyList& list) {
             if (!blow_is_ours(attacker)) {
 
                 if (launched_by_us(attacker)) claim_for_us(t, room, key);
+                return false;
+            }
+
+            if (t->procName == fpcNm_E_BI_e && (atInf->GetAtType() & AT_TYPE_HOOKSHOT) != 0) {
+                t->convertedByUsTick = s_tick;
                 return false;
             }
 
@@ -2748,10 +2945,46 @@ void collect_enemies_and_breakables(EnemyList& enemies, BreakableList& breakable
 }
 
 fopAc_ac_c* find_local_breakable(BreakableList& list, int8_t room, uint32_t key) {
+    fopAc_ac_c* found = nullptr;
     for (int i = 0; i < list.count; ++i) {
-        if (list.rooms[i] == room && list.keys[i] == key) return list.actors[i];
+        if (list.rooms[i] != room || list.keys[i] != key) continue;
+        if (found != nullptr) return nullptr;
+        found = list.actors[i];
     }
-    return nullptr;
+    return found;
+}
+
+bool is_door(fopAc_ac_c* actor) {
+    switch (fopAcM_GetName(actor)) {
+    case fpcNm_DOOR20_e:
+    case fpcNm_KNOB20_e:
+    case fpcNm_BOSS_DOOR_e:
+    case fpcNm_DBDOOR_e:
+    case fpcNm_L1BOSS_DOOR_e:
+    case fpcNm_L1MBOSS_DOOR_e:
+    case fpcNm_L5BOSS_DOOR_e:
+    case fpcNm_PushDoor_e:
+    case fpcNm_SPIRAL_DOOR_e:
+    case fpcNm_OBJ_KEYHOLE_e:
+    case fpcNm_Obj_Lv5Key_e:
+    case fpcNm_Obj_Stopper_e:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void note_move_applied(fopAc_ac_c* actor) {
+    static int16_t s_seen[64] = {};
+    static int s_seenCount = 0;
+    const int16_t name = fopAcM_GetName(actor);
+    for (int i = 0; i < s_seenCount; ++i) {
+        if (s_seen[i] == name) return;
+    }
+    if (s_seenCount < 64) s_seen[s_seenCount++] = name;
+    coop_log::info("coop_mod: [OBJ] first move applied to proc {:#x} setID={} room={}",
+        static_cast<int>(name), static_cast<int>(actor->setID),
+        static_cast<int>(fopAcM_GetRoomNo(actor)));
 }
 
 const int kMaxObjPos = kMaxBreakables;
@@ -3200,6 +3433,7 @@ void capture_moved_objects(BreakableList& list) {
         const uint32_t key = list.keys[i];
 
         if (is_pushable_block(actor)) continue;
+        if (is_door(actor)) continue;
 
         if (carry_driven_elsewhere(room, key)) continue;
         ObjPos* last = remember_position(room, key, actor->current.pos, actor->shape_angle);
@@ -3346,6 +3580,8 @@ void apply_pending_moves() {
         if (actor == nullptr) actor = find_by_placement(list, msg);
         if (actor == nullptr) continue;
 
+        if (is_door(actor)) continue;
+
         if (fpcM_IsCreating(fopAcM_GetID(actor))) continue;
 
         if (carry_driven_here(msg.room, msg.key)) continue;
@@ -3379,6 +3615,7 @@ void apply_pending_moves() {
         m->lastPos = actor->current.pos;
         m->tail = kMoverTailTicks;
         ++s_movesApplied;
+        note_move_applied(actor);
     }
 }
 
@@ -4257,7 +4494,7 @@ HookAction on_statue_set_anime(ModContext*, void* args, void*, void*) {
     return HOOK_SKIP_ORIGINAL;
 }
 
-const int kMaxSeenCarryables = 64;
+const int kMaxSeenCarryables = 128;
 struct SeenCarryable {
     bool used = false;
     fpc_ProcID id = fpcM_ERROR_PROCESS_ID_e;
@@ -4269,11 +4506,28 @@ struct SeenCarryable {
 SeenCarryable s_seenCarryables[kMaxSeenCarryables];
 uint32_t s_brokenSent = 0;
 
-void capture_broken_carryables(BreakableList& list) {
+struct CarryableList {
+    fopAc_ac_c* actors[kMaxSeenCarryables];
+    int count = 0;
+};
 
-    for (int i = 0; i < list.count; ++i) {
-        fopAc_ac_c* actor = list.actors[i];
-        if (fopAcM_GetName(actor) != fpcNm_Obj_Carry_e) continue;
+void* collect_carryable(void* proc, void* data) {
+    auto* list = static_cast<CarryableList*>(data);
+    auto* actor = static_cast<fopAc_ac_c*>(proc);
+    if (actor == nullptr || list->count >= kMaxSeenCarryables) return nullptr;
+    if (fopAcM_GetName(actor) != fpcNm_Obj_Carry_e) return nullptr;
+    if (fopAcM_checkCarryNow(actor) != 0) return nullptr;
+    if (boss_room(fopAcM_GetRoomNo(actor))) return nullptr;
+    list->actors[list->count++] = actor;
+    return nullptr;
+}
+
+void capture_broken_carryables() {
+    CarryableList pots;
+    fopAcM_Search(collect_carryable, &pots);
+
+    for (int i = 0; i < pots.count; ++i) {
+        fopAc_ac_c* actor = pots.actors[i];
         const fpc_ProcID id = fopAcM_GetID(actor);
         SeenCarryable* slot = nullptr;
         SeenCarryable* free = nullptr;
@@ -4287,8 +4541,8 @@ void capture_broken_carryables(BreakableList& list) {
             *slot = SeenCarryable{};
             slot->used = true;
             slot->id = id;
-            slot->key = list.keys[i];
-            slot->room = list.rooms[i];
+            slot->key = compute_placement_key(actor);
+            slot->room = fopAcM_GetRoomNo(actor);
         }
         slot->pos = actor->current.pos;
         slot->seenTick = s_tick;
@@ -4538,7 +4792,8 @@ void on_collision_move_post(ModContext*, void*, void*, void*) {
         collect_enemies_and_breakables(list, breakables);
         if (enemiesOn && hits) capture_landed_hits(list);
         if (hits && breakables_enabled()) capture_landed_object_hits(breakables);
-        if (breakables_enabled()) capture_broken_carryables(breakables);
+        if (hits && breakables_enabled()) capture_cage_bars();
+        if (breakables_enabled()) capture_broken_carryables();
 
         if (movers_enabled()) {
             capture_block_pushes(breakables);
@@ -4774,6 +5029,11 @@ uint32_t coop_local_world_frames() {
 void enemies_init() {
     const ModResult pre = mods::hook::add_pre<EnemyExecuteHook>(on_proc_execute_pre);
     const ModResult post = mods::hook::add_post<EnemyExecuteHook>(on_proc_execute_post);
+    mods::hook::add_pre<EnemySwitchHook>(on_switch_pre);
+    mods::hook::add_pre<EnemySwitchOffHook>(on_switch_off_pre);
+    mods::hook::add_post<EnemySwitchOffHook>(on_switch_off_post);
+    const ModResult sw = mods::hook::add_post<EnemySwitchHook>(on_switch_post);
+    coop_log::info("coop_mod: [ENEMY] switch watch hook: {}", static_cast<int>(sw));
     const ModResult ccPre = mods::hook::add_pre<EnemyCollisionHook>(on_collision_move_pre);
     const ModResult ccPost = mods::hook::add_post<EnemyCollisionHook>(on_collision_move_post);
     const ModResult statue = mods::hook::add_pre<CoopStatueSetAnimeHook>(on_statue_set_anime);
@@ -4814,7 +5074,260 @@ void enemies_on_local_unpause() {
     s_unpauseSnapTicks = kUnpauseSnapTicks;
 }
 
+namespace {
+
+struct CageSeen {
+    fpc_ProcID id = fpcM_ERROR_PROCESS_ID_e;
+    uint8_t mask = 0;
+};
+const int kMaxCages = 8;
+CageSeen s_cageSeen[kMaxCages];
+
+struct PendingCage {
+    bool used = false;
+    MsgCageBars msg{};
+};
+PendingCage s_pendingCage[kMaxCages];
+
+bool is_bar_cage(fopAc_ac_c* actor) {
+    if (actor == nullptr || fopAcM_GetName(actor) != fpcNm_OBJ_SO_e) return false;
+    if (fpcM_IsCreating(fopAcM_GetID(actor))) return false;
+
+    return reinterpret_cast<obj_so_class*>(actor)->field_0xdae == 2;
+}
+
+uint8_t cage_mask(fopAc_ac_c* actor) {
+    auto* so = reinterpret_cast<obj_so_class*>(actor);
+    uint8_t mask = 0;
+    for (int i = 0; i < 8; ++i) {
+        if (so->field_0x1a98[i] == 2) mask |= static_cast<uint8_t>(1u << i);
+    }
+    return mask;
+}
+
+CageSeen* cage_seen(fpc_ProcID id) {
+    CageSeen* free = nullptr;
+    for (CageSeen& c : s_cageSeen) {
+        if (c.id == id) return &c;
+        if (free == nullptr && c.id == fpcM_ERROR_PROCESS_ID_e) free = &c;
+    }
+    if (free == nullptr) {
+
+        for (CageSeen& c : s_cageSeen) {
+            if (fopAcM_SearchByID(c.id) == nullptr) c = CageSeen{};
+        }
+        for (CageSeen& c : s_cageSeen) {
+            if (c.id == fpcM_ERROR_PROCESS_ID_e) { free = &c; break; }
+        }
+        if (free == nullptr) return nullptr;
+    }
+    free->id = id;
+    free->mask = 0;
+    return free;
+}
+
+void* collect_cage(void* proc, void* data) {
+    auto* out = static_cast<fopAc_ac_c**>(data);
+    auto* actor = static_cast<fopAc_ac_c*>(proc);
+    if (!is_bar_cage(actor)) return nullptr;
+    for (int i = 0; i < kMaxCages; ++i) {
+        if (out[i] == nullptr) { out[i] = actor; break; }
+    }
+    return nullptr;
+}
+
+void capture_cage_bars() {
+    fopAc_ac_c* cages[kMaxCages] = {};
+    fopAcM_Search(collect_cage, cages);
+    for (fopAc_ac_c* actor : cages) {
+        if (actor == nullptr) continue;
+        CageSeen* seen = cage_seen(fopAcM_GetID(actor));
+        if (seen == nullptr) continue;
+        const uint8_t now = cage_mask(actor);
+        if ((now & ~seen->mask) == 0) continue;
+        seen->mask |= now;
+        MsgCageBars msg{};
+        msg.room = static_cast<int8_t>(fopAcM_GetRoomNo(actor));
+        msg.mask = now;
+        msg.home[0] = actor->home.pos.x;
+        msg.home[1] = actor->home.pos.y;
+        msg.home[2] = actor->home.pos.z;
+        coop_net_send(kMsgCageBars, &msg, sizeof(msg));
+        coop_log::info("coop_mod: [OBJ] cage room={} bars broken here {:#04x}",
+            static_cast<int>(msg.room), static_cast<int>(now));
+    }
+}
+
+void on_cage_bars(const MsgCageBars& msg) {
+    for (PendingCage& p : s_pendingCage) {
+        if (p.used && p.msg.room == msg.room && p.msg.home[0] == msg.home[0] &&
+            p.msg.home[2] == msg.home[2]) {
+            p.msg.mask |= msg.mask;
+            return;
+        }
+    }
+    for (PendingCage& p : s_pendingCage) {
+        if (p.used) continue;
+        p.used = true;
+        p.msg = msg;
+        return;
+    }
+}
+
+void apply_pending_cages() {
+    for (PendingCage& p : s_pendingCage) {
+        if (!p.used) continue;
+        fopAc_ac_c* cages[kMaxCages] = {};
+        fopAcM_Search(collect_cage, cages);
+        fopAc_ac_c* actor = nullptr;
+        const cXyz home(p.msg.home[0], p.msg.home[1], p.msg.home[2]);
+        for (fopAc_ac_c* c : cages) {
+            if (c != nullptr && fopAcM_GetRoomNo(c) == p.msg.room && (c->home.pos - home).abs() < 30.0f) {
+                actor = c;
+                break;
+            }
+        }
+        if (actor == nullptr) {
+            p = PendingCage{};
+            continue;
+        }
+        auto* so = reinterpret_cast<obj_so_class*>(actor);
+        CageSeen* seen = cage_seen(fopAcM_GetID(actor));
+        if (seen != nullptr) seen->mask |= p.msg.mask;
+        const uint8_t missing = static_cast<uint8_t>(p.msg.mask & ~cage_mask(actor));
+        if (missing == 0) {
+            p = PendingCage{};
+            continue;
+        }
+        if (so->field_0x1056 != 0) continue;
+        int bar = 0;
+        while ((missing & (1u << bar)) == 0) ++bar;
+        dCcD_Cyl& box = so->field_0x10b8[bar];
+        fopAc_ac_c* stand_in = dComIfGp_getPlayer(0);
+        if (stand_in == nullptr) continue;
+        static dCcD_Stts s_cageStts;
+        static dCcD_Sph s_cageBlow;
+        s_cageStts.Init(0xFF, 0xFF, stand_in);
+        s_cageBlow.SetStts(&s_cageStts);
+        s_cageBlow.SetAtType(AT_TYPE_NORMAL_SWORD);
+        s_cageBlow.SetAtAtp(3);
+        s_cageBlow.SetAtSpl(static_cast<dCcG_At_Spl>(0));
+        s_cageBlow.SetAtMtrl(0);
+        cXyz at = so->field_0x618[bar + 2];
+        s_cageBlow.SetC(at);
+        s_cageBlow.SetR(10.0f);
+        box.SetTgHit(&s_cageBlow);
+        box.OnTgHitNoActor();
+        box.SetTgHitPos(at);
+        coop_log::info("coop_mod: [OBJ] cage room={} knocking out bar {} (theirs {:#04x})",
+            static_cast<int>(p.msg.room), bar, static_cast<int>(p.msg.mask));
+
+    }
+}
+
+void reset_cages() {
+    for (CageSeen& c : s_cageSeen) c = CageSeen{};
+    for (PendingCage& p : s_pendingCage) p = PendingCage{};
+}
+
+}
+
+struct PendingCatch {
+    bool used = false;
+    int8_t room = -1;
+    uint32_t key = 0;
+    uint8_t from = kCoopNoPlayer;
+    uint32_t since = 0;
+};
+const int kMaxPendingCatches = 8;
+PendingCatch s_pendingCatch[kMaxPendingCatches];
+const uint32_t kCatchGraceTicks = 12;
+const uint32_t kCatchGiveUpTicks = 90;
+
+void on_bomb_caught(const MsgBombCaught& msg, uint8_t from) {
+    for (PendingCatch& p : s_pendingCatch) {
+        if (p.used && p.room == msg.room && p.key == msg.key) return;
+    }
+    for (PendingCatch& p : s_pendingCatch) {
+        if (p.used) continue;
+        p = PendingCatch{true, msg.room, msg.key, from, s_tick};
+        coop_log::info("coop_mod: [ENEMY] player {}'s boomerang caught Bombling room={} key={:#010x}",
+            static_cast<int>(from), static_cast<int>(msg.room), msg.key);
+        return;
+    }
+}
+
+void process_pending_catches() {
+    for (PendingCatch& p : s_pendingCatch) {
+        if (!p.used) continue;
+        const uint32_t waited = s_tick - p.since;
+        Tracked* t = find_tracked(p.room, p.key);
+        auto* actor = t != nullptr ? static_cast<fopAc_ac_c*>(fopAcM_SearchByID(t->id)) : nullptr;
+        if (actor == nullptr || fopAcM_GetName(actor) != fpcNm_E_BI_e || actor->health <= 0) {
+            p = PendingCatch{};
+            continue;
+        }
+        if (waited < kCatchGraceTicks) continue;
+        if (waited > kCatchGiveUpTicks || dComIfGp_event_runCheck()) {
+            p = PendingCatch{};
+            continue;
+        }
+        fopAc_ac_c* bomb = nullptr;
+        {
+            CoopActorLayer layer;
+            bomb = dBomb_c::createEnemyBombBoomerang(&actor->eyePos, &actor->current.angle,
+                fopAcM_GetRoomNo(actor));
+        }
+        fopAcM_delete(actor);
+        const bool riding = spawns_ride_bomb_on_boomerang_of(p.from, bomb);
+        coop_log::info("coop_mod: [ENEMY] caught Bombling room={} key={:#010x} for player {} - their "
+                       "replica missed it ({}; bomb {})",
+            static_cast<int>(p.room), p.key, static_cast<int>(p.from),
+            bomb != nullptr ? "made" : "NOT made", riding ? "on their boomerang" : "loose");
+        p = PendingCatch{};
+    }
+}
+
+void enemies_note_enemy_bomb() {
+    if (!coop_net_connected() || !enemies_enabled_now()) return;
+    if (s_execDepth <= 0 || s_execDepth > 8) return;
+    fopAc_ac_c* actor = fopAcM_SearchByID(s_execStack[s_execDepth - 1]);
+    if (actor == nullptr || fopAcM_GetName(actor) != fpcNm_E_BI_e || !syncable(actor)) return;
+    const int8_t room = static_cast<int8_t>(fopAcM_GetRoomNo(actor));
+    const uint32_t key = placement_key(actor);
+    if (key == 0) return;
+    Tracked* t = find_tracked(room, key);
+    if (t != nullptr) {
+        if (t->goneSent) return;
+        t->goneSent = true;
+        t->convertedByUsTick = s_tick;
+    }
+    send_gone(room, key);
+    coop_log::info("coop_mod: [ENEMY] our Bombling became our bomb (room {} key={:#010x}) - "
+                   "telling the others to drop theirs", static_cast<int>(room), key);
+}
+
+void enemies_note_boomerang_bomb() {
+    if (!coop_net_connected() || !enemies_enabled_now()) return;
+    if (s_execDepth <= 0 || s_execDepth > 8) return;
+    fopAc_ac_c* actor = fopAcM_SearchByID(s_execStack[s_execDepth - 1]);
+    if (actor == nullptr || fopAcM_GetName(actor) != fpcNm_E_BI_e || !syncable(actor)) return;
+    auto* bi = reinterpret_cast<e_bi_class*>(actor);
+    cCcD_Obj* hitBy = bi->at_info.mpCollider;
+    fopAc_ac_c* boom = hitBy != nullptr ? hitBy->GetAc() : nullptr;
+
+    if (boom == nullptr || fopAcM_GetName(boom) != fpcNm_BOOMERANG_e || spawns_is_replica(boom)) return;
+    MsgBombCaught msg{};
+    msg.room = static_cast<int8_t>(fopAcM_GetRoomNo(actor));
+    msg.key = placement_key(actor);
+    if (msg.key == 0) return;
+    coop_net_send(kMsgBombCaught, &msg, sizeof(msg));
+    coop_log::info("coop_mod: [ENEMY] our boomerang caught Bombling room={} key={:#010x} - telling "
+                   "the others", static_cast<int>(msg.room), msg.key);
+}
+
 void enemies_update() {
+    process_pending_catches();
     ++s_tick;
     if (s_unpauseSnapTicks > 0) --s_unpauseSnapTicks;
     note_loaded_rooms(dComIfGs_getSaveInfo());
@@ -4837,6 +5350,7 @@ void enemies_update() {
         if (objects_live()) {
             age_breakable_quiet();
             if (real_hits_enabled() && breakables_enabled()) inject_pending_object_hits();
+            if (real_hits_enabled() && breakables_enabled()) apply_pending_cages();
             if (movers_enabled()) {
                 apply_pending_pushes();
                 apply_pending_moves();
@@ -4864,6 +5378,7 @@ void enemies_update() {
 
     age_breakable_quiet();
     if (real_hits_enabled() && breakables_enabled()) inject_pending_object_hits();
+    if (real_hits_enabled() && breakables_enabled()) apply_pending_cages();
     if (movers_enabled()) {
         apply_pending_pushes();
         apply_pending_moves();
@@ -4887,6 +5402,7 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
     if (type == kMsgRoomClaim || type == kMsgRoomOwner) {
         if (!enemies_setting_on() && !bosses_setting_on()) return;
     } else if (type == kMsgObjectHit || type == kMsgObjectMove || type == kMsgCarry ||
+               type == kMsgCageBars ||
                type == kMsgTorch || type == kMsgAnimal) {
         if (!breakables_enabled() && !movers_enabled()) return;
     } else if (!enemies_setting_on()) {
@@ -5046,6 +5562,27 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
         }
         coop_log::info("coop_mod: [ENEMY] dropped a relayed blow - {} already queued",
             kMaxPendingHits);
+        break;
+    }
+    case kMsgCageBars: {
+        if (size < sizeof(MsgCageBars) || !real_hits_enabled() || !breakables_enabled()) return;
+        MsgCageBars msg;
+        std::memcpy(&msg, payload, sizeof(msg));
+        on_cage_bars(msg);
+        break;
+    }
+    case kMsgBombCaught: {
+        if (size < sizeof(MsgBombCaught)) return;
+        MsgBombCaught msg;
+        std::memcpy(&msg, payload, sizeof(msg));
+        on_bomb_caught(msg, from);
+        break;
+    }
+    case kMsgEnemySwitch: {
+        if (size < sizeof(MsgEnemySwitch)) return;
+        MsgEnemySwitch msg;
+        std::memcpy(&msg, payload, sizeof(msg));
+        apply_enemy_switch(msg);
         break;
     }
     case kMsgEnemyClaim: {

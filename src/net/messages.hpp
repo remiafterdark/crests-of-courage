@@ -81,6 +81,35 @@ enum CoopMsgType : uint8_t {
     kMsgEnemyClaim = 61,
     kMsgSumo = 62,
     kMsgSumoState = 63,
+    kMsgEnemySwitch = 64,
+    kMsgSharedStory = 65,
+    kMsgBombCaught = 66,
+    kMsgCageBars = 67,
+};
+
+struct MsgCageBars {
+    int8_t room;
+    uint8_t mask;
+    uint8_t pad[2];
+    float home[3];
+};
+
+struct MsgBombCaught {
+    int8_t room;
+    uint8_t pad[3];
+    uint32_t key;
+};
+
+struct MsgSharedStory {
+    uint32_t bits;
+};
+
+struct MsgEnemySwitch {
+    char stage[8];
+    int16_t sw;
+    int8_t room;
+    uint8_t off;
+    int16_t procName;
 };
 
 enum SumoKind : uint8_t {
@@ -489,7 +518,7 @@ struct MsgWorldDigest {
 
     uint8_t storyRules;
 };
-const uint8_t kStoryRules = 1;
+const uint8_t kStoryRules = 2;
 
 struct MsgDeathLink {
     char name[kCoopNameMax];

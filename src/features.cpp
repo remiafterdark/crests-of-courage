@@ -951,24 +951,58 @@ void send_hello() {
     coop_net_send(kMsgHello, &msg, sizeof(msg));
 }
 
-const u16 kSharedStoryFlags[] = {dSv_event_flag_c::M_067};
+const u16 kSharedStoryFlags[] = {
+    dSv_event_flag_c::M_067,
+    dSv_event_flag_c::M_022,
+    dSv_event_flag_c::M_031,
+    dSv_event_flag_c::M_045,
+    dSv_event_flag_c::F_0265,
+    dSv_event_flag_c::F_0266,
+    dSv_event_flag_c::F_0267,
+    dSv_event_flag_c::F_0268,
+    dSv_event_flag_c::M_009,
+    dSv_event_flag_c::F_0550,
+    dSv_event_flag_c::M_021,
+    dSv_event_flag_c::M_051,
+    dSv_event_flag_c::M_023,
+    dSv_event_flag_c::M_015,
 
-uint8_t shared_story_bits() {
+    dSv_event_flag_c::M_050,
+    dSv_event_flag_c::M_092,
+    dSv_event_flag_c::M_018,
+    dSv_event_flag_c::M_032,
+    dSv_event_flag_c::F_0400,
+    dSv_event_flag_c::M_035,
+    dSv_event_flag_c::M_029,
+    dSv_event_flag_c::F_0361,
+    dSv_event_flag_c::F_0354,
+
+};
+static_assert(sizeof(kSharedStoryFlags) / sizeof(kSharedStoryFlags[0]) <= 32, "MsgSharedStory is 32 bits");
+
+uint32_t shared_story_bits() {
     if (daAlink_getAlinkActorClass() == nullptr) return 0;
-    uint8_t bits = 0;
+    uint32_t bits = 0;
     for (int i = 0; i < static_cast<int>(sizeof(kSharedStoryFlags) / sizeof(kSharedStoryFlags[0])); ++i) {
-        if (dComIfGs_isEventBit(kSharedStoryFlags[i])) bits |= static_cast<uint8_t>(1u << i);
+        if (dComIfGs_isEventBit(kSharedStoryFlags[i])) bits |= 1u << i;
     }
     return bits;
 }
 
-void take_shared_story_bits(uint8_t bits) {
+void take_shared_story_bits(uint32_t bits) {
     if (bits == 0 || daAlink_getAlinkActorClass() == nullptr || dComIfGp_event_runCheck()) return;
     for (int i = 0; i < static_cast<int>(sizeof(kSharedStoryFlags) / sizeof(kSharedStoryFlags[0])); ++i) {
         if ((bits & (1u << i)) == 0 || dComIfGs_isEventBit(kSharedStoryFlags[i])) continue;
-        dComIfGs_onEventBit(kSharedStoryFlags[i]);
-        coop_log::info("coop_mod: [STORY] shared flag {:#06x} on from another player",
-            kSharedStoryFlags[i]);
+        if (i == 0) {
+
+            dComIfGs_onEventBit(kSharedStoryFlags[i]);
+            coop_log::info("coop_mod: [STORY] shared flag {:#06x} on from another player",
+                kSharedStoryFlags[i]);
+        } else if (rando_join_sync_allowed() && world_hold_story_flag(kSharedStoryFlags[i])) {
+
+            coop_log::info("coop_mod: [STORY] shared flag {:#06x} from another player - on at our "
+                           "next stage load", kSharedStoryFlags[i]);
+        }
     }
 }
 
@@ -994,8 +1028,12 @@ void send_presence() {
         msg.life = dComIfGs_getLife();
         msg.maxLife = dComIfGs_getMaxLife();
     }
-    msg.storyBits = shared_story_bits();
+    const uint32_t storyBits = shared_story_bits();
+    msg.storyBits = static_cast<uint8_t>(storyBits & 0xFF);
     coop_net_send(kMsgPresence, &msg, sizeof(msg));
+    MsgSharedStory story{};
+    story.bits = storyBits;
+    coop_net_send(kMsgSharedStory, &story, sizeof(story));
 }
 
 struct LifeGuess {
@@ -1080,6 +1118,7 @@ struct PendingTeleport {
     bool sawEvent = false;
     uint32_t watchTicks = 0;
     cXyz placedAt;
+    int reloads = 0;
 };
 PendingTeleport s_teleport;
 
@@ -1129,6 +1168,11 @@ void place_at_player(daAlink_c* alink, uint8_t playerId) {
         pos.z);
 }
 
+bool in_our_room(uint8_t playerId) {
+    const CoopPeer& who = features_peer_of(playerId);
+    return who.curRoom < 0 || who.curRoom == dComIfGp_roomControl_getStayNo();
+}
+
 bool arrival_cutscene_pending() {
     const int id = dComIfGp_getEventManager().mException.mEventInfoIdx;
     return id >= 0 && id != 0xFF;
@@ -1170,7 +1214,8 @@ void update_pending_teleport() {
             if (alink->mDemo.getDemoType() != 0) return;
             s_teleport.active = false;
             const cXyz now = alink->current.pos;
-            if ((now - s_teleport.placedAt).abs() > kTeleportDraggedAway && teleport_target_here()) {
+            if ((now - s_teleport.placedAt).abs() > kTeleportDraggedAway && teleport_target_here() &&
+                in_our_room(s_teleport.playerId)) {
                 coop_log::info("coop_mod: a cutscene took us away on arrival - placing again");
                 place_at_player(alink, s_teleport.playerId);
             }
@@ -1192,6 +1237,22 @@ void update_pending_teleport() {
         return;
     }
 
+    if (teleport_target_here() && !in_our_room(s_teleport.playerId)) {
+
+        const uint8_t id = s_teleport.playerId;
+        const int reloads = s_teleport.reloads;
+        if (reloads < 2) {
+            coop_log::info("coop_mod: {} moved on to room {} while we loaded - going there instead",
+                features_peer_of(id).name, static_cast<int>(features_peer_of(id).curRoom));
+            features_teleport_to_player(id);
+            s_teleport.reloads = reloads + 1;
+        } else {
+            s_teleport.active = false;
+            toast_kind(kNotifyTeleport, "Teleport stopped here",
+                features_peer_of(id).name + " keeps moving - try again when they stop.");
+        }
+        return;
+    }
     if (teleport_target_here()) {
         place_at_player(alink, s_teleport.playerId);
         s_teleport.placed = true;
@@ -1623,6 +1684,13 @@ void features_on_message(uint8_t type, const uint8_t* payload, size_t size, uint
         if (size >= sizeof(MsgPause)) coop_net_set_player_paused(from, payload[0] != 0);
         break;
     case kMsgPresence: on_presence(payload, size, from); break;
+    case kMsgSharedStory:
+        if (size >= sizeof(MsgSharedStory)) {
+            MsgSharedStory story;
+            std::memcpy(&story, payload, sizeof(story));
+            take_shared_story_bits(story.bits);
+        }
+        break;
     case kMsgItem:
         if (size >= sizeof(MsgItem)) apply_remote_item(payload[0], from);
         break;
@@ -1657,6 +1725,9 @@ void features_on_message(uint8_t type, const uint8_t* payload, size_t size, uint
     case kMsgEnemyGone:
     case kMsgEnemyDamage:
     case kMsgEnemyHit:
+    case kMsgEnemySwitch:
+    case kMsgBombCaught:
+    case kMsgCageBars:
     case kMsgEnemyClaim:
     case kMsgObjectHit:
     case kMsgObjectMove:
@@ -1796,6 +1867,28 @@ std::string features_local_name() {
     return sanitize_name(cfg_string(s_vars.name, "Player"));
 }
 
+static void load_into_their_room(const CoopPeer& who, int localRoom) {
+
+    const int room = who.curRoom;
+    if (room >= 0 && room < 64) {
+        const cXyz at(who.x, who.y, who.z);
+        dComIfGs_setRestartRoom(at, who.angleY, static_cast<s8>(room));
+        dComIfGp_setNextStage(who.stage, -1, static_cast<s8>(room), who.layer);
+        dComIfGs_setRestartRoomParam(static_cast<u32>(room & 0x3F));
+        coop_log::info(
+            "coop_mod: teleporting to {} stage={} room={} at ({:.0f}, {:.0f}, {:.0f}) layer={} "
+            "(local stage={} room={})",
+            who.name, who.stage, room, who.x, who.y, who.z, who.layer,
+            dComIfGp_getStartStageName(), localRoom);
+    } else {
+        dComIfGp_setNextStage(who.stage, who.point, who.startRoom, who.layer);
+        coop_log::info(
+            "coop_mod: teleporting to {} stage={} point={} room={} layer={} (local stage={} room={})",
+            who.name, who.stage, who.point, who.startRoom, who.layer,
+            dComIfGp_getStartStageName(), localRoom);
+    }
+}
+
 void features_teleport_to_player(uint8_t playerId) {
     const CoopPeer& who = features_peer_of(playerId);
     if (!coop_net_connected() || !who.present) {
@@ -1816,7 +1909,7 @@ void features_teleport_to_player(uint8_t playerId) {
         return;
     }
 
-    if (local_on_stage(who.stage) && fopAcM_GetRoomNo(alink) == who.curRoom) {
+    if (local_on_stage(who.stage) && in_our_room(playerId)) {
         place_at_player(alink, playerId);
         return;
     }
@@ -1825,12 +1918,7 @@ void features_teleport_to_player(uint8_t playerId) {
     s_teleport.active = true;
     s_teleport.playerId = playerId;
     std::memcpy(s_teleport.stage, who.stage, 9);
-
-    dComIfGp_setNextStage(who.stage, who.point, who.startRoom, who.layer);
-    coop_log::info(
-        "coop_mod: teleporting to {} stage={} point={} room={} layer={} (local stage={} room={})",
-        who.name, who.stage, who.point, who.startRoom, who.layer,
-        dComIfGp_getStartStageName(), fopAcM_GetRoomNo(alink));
+    load_into_their_room(who, fopAcM_GetRoomNo(alink));
     toast_kind(kNotifyTeleport, "Teleporting", "Heading to " + who.name + ".", 2500);
 }
 
@@ -1870,9 +1958,9 @@ bool features_reload_at_player(uint8_t playerId) {
     s_teleport.active = true;
     s_teleport.playerId = playerId;
     std::memcpy(s_teleport.stage, who.stage, 9);
-    dComIfGp_setNextStage(who.stage, who.point, who.startRoom, who.layer);
     coop_log::info("coop_mod: [JOIN] loading into {} room {} where {} is", who.stage, who.curRoom,
         who.name);
+    load_into_their_room(who, fopAcM_GetRoomNo(daAlink_getAlinkActorClass()));
     return true;
 }
 

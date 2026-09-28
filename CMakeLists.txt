@@ -40,6 +40,7 @@ add_mod(coop_mod
              src/projectiles.cpp
              src/effects.cpp
              src/pvp.cpp
+             src/spinner.cpp
              src/rival.cpp
              src/world.cpp
              src/enemies.cpp

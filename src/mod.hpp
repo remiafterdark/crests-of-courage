@@ -30,6 +30,21 @@ uint32_t coop_local_world_frames();
 
 uint32_t coop_net_rtt_ticks(uint8_t playerId);
 
+struct CoopNetTraffic {
+    uint64_t txBytes = 0;
+    uint64_t rxBytes = 0;
+    uint64_t txPackets = 0;
+    uint64_t rxPackets = 0;
+};
+CoopNetTraffic coop_net_traffic();
+
+struct CoopLinkInfo {
+    bool udp = false;
+    uint32_t rttMs = 0;
+    uint64_t resends = 0;
+    size_t queuedBytes = 0;
+};
+bool coop_net_link_info(uint8_t playerId, CoopLinkInfo* out);
 int32_t coop_net_ping_ms(uint8_t playerId);
 const char* coop_net_status();
 void coop_net_host();
@@ -479,6 +494,8 @@ struct CoopActorLayer {
     CoopActorLayer& operator=(const CoopActorLayer&) = delete;
 };
 bool puppet_hook_torso_of(uint8_t playerId, cXyz* out);
+
+bool puppet_hook_joint_pos(uint8_t playerId, int joint, cXyz* out);
 bool projectiles_blast_is_ours(fopAc_ac_c* blast);
 
 void fx_init();
@@ -498,6 +515,8 @@ void pvp_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t f
 bool pvp_active();
 bool pvp_lock_on();
 void pvp_after_player(daAlink_c* alink);
+
+void spinner_after_player(daAlink_c* alink);
 ConfigVarHandle pvp_enabled_var();
 ConfigVarHandle pvp_damage_var();
 ConfigVarHandle pvp_lock_on_var();
@@ -559,6 +578,12 @@ void spawns_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_
 bool spawns_replicates_procname(int16_t procName);
 bool spawns_is_replica(fopAc_ac_c* actor);
 bool enemies_carried_by_other(fopAc_ac_c* actor);
+
+void enemies_note_boomerang_bomb();
+
+void enemies_note_enemy_bomb();
+
+bool spawns_ride_bomb_on_boomerang_of(uint8_t owner, fopAc_ac_c* bomb);
 
 void boss_register_vars();
 void boss_init();
@@ -635,6 +660,7 @@ void skipvote_on_message(const uint8_t* payload, size_t size, uint8_t from);
 void world_register_vars();
 void world_update();
 void world_on_connected();
+bool world_hold_story_flag(uint16_t flag);
 void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t from);
 ConfigVarHandle world_dungeon_var();
 ConfigVarHandle world_story_var();
@@ -663,6 +689,8 @@ bool puppet_hook_sword_mtx(uint8_t playerId, float out[3][4], bool* master);
 bool puppet_hook_get_pose_of(uint8_t playerId, float* x, float* y, float* z, short* angleY,
     float* speedX, float* speedZ);
 bool puppet_hook_is_wolf_of(uint8_t playerId);
+
+bool puppet_hook_rides_spinner(uint8_t playerId);
 
 uint8_t puppet_hook_nearest_player(float x, float y, float z);
 
