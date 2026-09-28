@@ -11,6 +11,8 @@
 #include "JSystem/JKernel/JKRArchive.h"
 #include "JSystem/JKernel/JKRExpHeap.h"
 #include "JSystem/JKernel/JKRMemArchive.h"
+
+#include <chrono>
 #include "JSystem/JKernel/JKRSolidHeap.h"
 #include "JSystem/J3DGraphAnimator/J3DModelData.h"
 #include "JSystem/J3DGraphLoader/J3DAnmLoader.h"
@@ -27,7 +29,15 @@ struct PrivateArc {
     JKRArchive* archive = nullptr;
     int users = 0;
     bool failed = false;
+    std::chrono::steady_clock::time_point failedAt{};
 };
+
+const auto kArcRetryAfter = std::chrono::seconds(3);
+
+void mark_failed(PrivateArc& a) {
+    a.failed = true;
+    a.failedAt = std::chrono::steady_clock::now();
+}
 
 PrivateArc s_arcs[kMaxPrivateArcs];
 
@@ -129,26 +139,41 @@ JKRHeap* private_arc_heap() {
 
 bool private_arc_request(const char* name) {
     if (name == nullptr || name[0] == '\0') return false;
-    if (PrivateArc* have = find_arc(name)) {
-        ++have->users;
-        return !have->failed;
+    int keepUsers = 0;
+    PrivateArc* slot = find_arc(name);
+    if (slot != nullptr) {
+        if (!slot->failed) {
+            ++slot->users;
+            return true;
+        }
+
+        if (slot->job != nullptr ||
+            std::chrono::steady_clock::now() - slot->failedAt < kArcRetryAfter) {
+            return false;
+        }
+
+        keepUsers = slot->users;
+        make_room();
+    } else {
+        make_room();
+        slot = free_slot();
     }
-    make_room();
-    PrivateArc* slot = free_slot();
     if (slot == nullptr) {
         coop_log::warn("coop_mod: [ARC] no free slot for a private mount of '{}'", name);
         return false;
     }
     PrivateArc& a = *slot;
+    a = PrivateArc{};
     std::strncpy(a.name, name, sizeof(a.name) - 1);
     a.name[sizeof(a.name) - 1] = '\0';
-    a.users = 1;
+    a.users = keepUsers + 1;
     char path[64];
     std::snprintf(path, sizeof(path), "/res/Object/%s.arc", a.name);
 
     a.job = mDoDvdThd_mountArchive_c::create(path, mDoDvd_MOUNT_DIRECTION_HEAD, arc_heap());
     if (a.job == nullptr) {
-        a.failed = true;
+        mark_failed(a);
+        a.users = keepUsers;
         coop_log::warn("coop_mod: [ARC] could not start a private mount of '{}'", a.name);
         return false;
     }
@@ -167,7 +192,7 @@ int private_arc_poll(const char* name) {
         a->job->destroy();
         a->job = nullptr;
         if (a->archive == nullptr) {
-            a->failed = true;
+            mark_failed(*a);
             coop_log::warn("coop_mod: [ARC] private mount of '{}' produced no archive", a->name);
             return -1;
         }
@@ -183,7 +208,6 @@ void private_arc_release(const char* name) {
     if (a->users > 0) --a->users;
     if (a->users > 0) return;
 
-    if (a->failed && a->job == nullptr) *a = PrivateArc{};
 }
 
 J3DModelData* private_arc_load_idx(const char* name, u32 index) {

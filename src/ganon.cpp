@@ -113,19 +113,21 @@ int body_index(const Body* b) {
 
 bool arc_ready(Body& b) {
     if (b.arc == kArcReady) return true;
-    if (b.arc == kArcFailed) return false;
-    if (b.arc == kArcNone) {
-        b.arc = private_arc_request(b.d.arc) ? kArcMounting : kArcFailed;
-        if (b.arc == kArcFailed) {
-            coop_log::warn("coop_mod: [{}] could not start loading {}", b.d.tag, b.d.arc);
-            return false;
-        }
+
+    if (b.arc == kArcNone || b.arc == kArcFailed) {
+        if (!private_arc_request(b.d.arc)) return false;
+        b.arc = kArcMounting;
     }
     const int ready = private_arc_poll(b.d.arc);
     if (ready == 0) return false;
-    b.arc = ready > 0 ? kArcReady : kArcFailed;
-    if (b.arc == kArcFailed) coop_log::warn("coop_mod: [{}] {} did not load", b.d.tag, b.d.arc);
-    return b.arc == kArcReady;
+    if (ready < 0) {
+        private_arc_release(b.d.arc);
+        b.arc = kArcFailed;
+        coop_log::warn("coop_mod: [{}] {} did not load - trying again shortly", b.d.tag, b.d.arc);
+        return false;
+    }
+    b.arc = kArcReady;
+    return true;
 }
 
 void rotation_only(const Mtx in, Mtx out) {

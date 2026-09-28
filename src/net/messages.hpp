@@ -110,6 +110,7 @@ enum CoopMsgType : uint8_t {
     kMsgSharedStory = 65,
     kMsgBombCaught = 66,
     kMsgCageBars = 67,
+    kMsgRotBridge = 68,
 };
 
 struct MsgCageBars {
@@ -118,6 +119,19 @@ struct MsgCageBars {
     uint8_t pad[2];
     float home[3];
 };
+
+struct MsgRotBridge {
+    int8_t room;
+    uint8_t kind;
+    uint8_t facing;
+    uint8_t pad;
+    int16_t angle;
+    uint16_t quiet;
+    uint32_t age;
+    float home[3];
+};
+const uint8_t kRotBridgeTurn = 0;
+const uint8_t kRotBridgeRest = 1;
 
 struct MsgBombCaught {
     int8_t room;
@@ -613,6 +627,9 @@ struct MsgObjectPush {
 struct MsgObjectMove {
     uint32_t key;
     int8_t room;
+
+    uint8_t catchUp;
+    uint8_t pad[2];
     float pos[3];
     int16_t angle[3];
 

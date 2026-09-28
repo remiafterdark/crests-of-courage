@@ -1001,6 +1001,8 @@ const u16 kSharedStoryFlags[] = {
     dSv_event_flag_c::M_023,
     dSv_event_flag_c::M_015,
 
+    dSv_event_flag_c::M_014,
+
     dSv_event_flag_c::M_050,
     dSv_event_flag_c::M_092,
     dSv_event_flag_c::M_018,
@@ -1763,6 +1765,7 @@ void features_on_message(uint8_t type, const uint8_t* payload, size_t size, uint
     case kMsgEnemySwitch:
     case kMsgBombCaught:
     case kMsgCageBars:
+    case kMsgRotBridge:
     case kMsgEnemyClaim:
     case kMsgObjectHit:
     case kMsgObjectMove:
@@ -1909,7 +1912,8 @@ static void load_into_their_room(const CoopPeer& who, int localRoom) {
         const cXyz at(who.x, who.y, who.z);
         dComIfGs_setRestartRoom(at, who.angleY, static_cast<s8>(room));
         dComIfGp_setNextStage(who.stage, -1, static_cast<s8>(room), who.layer);
-        dComIfGs_setRestartRoomParam(static_cast<u32>(room & 0x3F));
+
+        dComIfGs_setRestartRoomParam(static_cast<u32>(room & 0x3F) | (0xFFu << 24));
         coop_log::info(
             "coop_mod: teleporting to {} stage={} room={} at ({:.0f}, {:.0f}, {:.0f}) layer={} "
             "(local stage={} room={})",

@@ -9,6 +9,9 @@
 #include "mods/svc/save.h"
 
 #include "d/actor/d_a_alink.h"
+#include "d/actor/d_a_obj_life_container.h"
+#include "d/actor/d_a_obj_smallkey.h"
+#include "d/d_a_item_static.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_item_data.h"
 #include "f_op/f_op_actor_iter.h"
@@ -188,6 +191,22 @@ void* find_taken(void* proc, void* data) {
 
     const int bit = static_cast<int>((fopAcM_GetParam(actor) >> 8) & 0xFF);
     if (bit == 0xFF) return nullptr;
+
+    if (name == fpcNm_ITEM_e) {
+        if (static_cast<daItem_c*>(actor)->checkFlag(daItem_c::FLAG_INIT_GET_ITEM_e)) return nullptr;
+    } else if (name == fpcNm_Obj_LifeContainer_e) {
+        auto* life = static_cast<daObjLife_c*>(actor);
+        if (life->chkStatus(daObjLife_c::STATUS_ORDER_GET_DEMO_e) ||
+            life->chkStatus(daObjLife_c::STATUS_GET_DEMO_e)) {
+            return nullptr;
+        }
+    } else {
+        auto* key = static_cast<daKey_c*>(actor);
+        if (key->chkStatus(daKey_c::STATUS_ORDER_GET_DEMO_e) ||
+            key->chkStatus(daKey_c::STATUS_GET_DEMO_e)) {
+            return nullptr;
+        }
+    }
 
     const bool taken = name == fpcNm_Obj_SmallKey_e ? dComIfGs_isTbox(bit) != 0
                                                     : fopAcM_isItem(actor, bit);

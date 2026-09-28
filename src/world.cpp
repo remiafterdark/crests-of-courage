@@ -96,6 +96,12 @@ struct LightDropBaseline {
     uint8_t bytes[kLightDropSize] = {};
 };
 LightDropBaseline s_lightDrop;
+
+void lift_light_drop_baseline(int i, int by) {
+    if (!s_lightDrop.have || by <= 0) return;
+    const int v = s_lightDrop.bytes[i] + by;
+    s_lightDrop.bytes[i] = static_cast<uint8_t>(v > 255 ? 255 : v);
+}
 struct CollectBaseline {
     bool have = false;
     uint8_t bytes[kCollectSize] = {};
@@ -194,6 +200,9 @@ void* collect_local_switch(void* proc, void*) {
         const int count = (param >> 16) & 0xFF;
         for (int i = 0; i < count && top + i < 0xFF; ++i) add_local_switch(room, top + i);
     } else if (name == fpcNm_Tag_Spinner_e) {
+        if ((param & 0xFF) != 0xFF) add_local_switch(room, param & 0xFF);
+    } else if (name == fpcNm_Obj_Swpropeller_e) {
+
         if ((param & 0xFF) != 0xFF) add_local_switch(room, param & 0xFF);
     }
     return nullptr;
@@ -1107,7 +1116,7 @@ uint32_t visited_hash(dSv_info_c* info) {
 
 uint32_t collect_hash(dSv_info_c* info) {
     auto* cur = reinterpret_cast<uint8_t*>(&info->getSavedata().getPlayer().getCollect());
-    return hash_bytes(cur, kCollectSize);
+    return hash_bytes(cur, kCollectPohIndex);
 }
 
 uint32_t status_b_hash(dSv_info_c* info) {
@@ -1119,7 +1128,7 @@ uint32_t status_b_hash(dSv_info_c* info) {
 
 uint32_t light_drop_hash(dSv_info_c* info) {
     auto* cur = reinterpret_cast<uint8_t*>(&info->getSavedata().getPlayer().getLightDrop());
-    return hash_bytes(cur, kLightDropSize);
+    return hash_bytes(cur, kLightDropCounts + 1);
 }
 
 void republish_globals(dSv_info_c* info) {
@@ -1138,6 +1147,14 @@ void republish_globals(dSv_info_c* info) {
     send_delta(s_base, kRegionLightDrop, -1, 0, kLightDropSize, set, clr);
     std::memcpy(s_lightDrop.bytes, cur, kLightDropSize);
     s_lightDrop.have = true;
+
+    {
+        char stage[8];
+        int saveNo = -1;
+        if (current_stage(stage, saveNo)) {
+            send_full(stage, saveNo, kRegionLightDrop, -1, cur, kLightDropSize);
+        }
+    }
 
     auto* col = reinterpret_cast<uint8_t*>(&info->getSavedata().getPlayer().getCollect());
     uint8_t colSet[32] = {};
@@ -1359,7 +1376,9 @@ void handle_full(const MsgWorldFull& msg) {
     int saveNo = -1;
     if (!current_stage(stage, saveNo)) return;
 
-    if (std::memcmp(stage, msg.stage, 8) != 0 || saveNo != msg.saveNo) return;
+    const bool global = msg.region == kRegionLightDrop || msg.region == kRegionCollect ||
+                        msg.region == kRegionStatusB;
+    if (!global && (std::memcmp(stage, msg.stage, 8) != 0 || saveNo != msg.saveNo)) return;
     const bool baselineValid = s_base.have && std::memcmp(s_base.stage, stage, 8) == 0 &&
                                s_base.saveNo == saveNo;
 
@@ -1414,18 +1433,21 @@ void handle_full(const MsgWorldFull& msg) {
         for (int i = 0; i < kCollectSize; ++i) {
             if (i == kCollectPohIndex) continue;
             cur[i] = static_cast<uint8_t>(cur[i] | msg.data[i]);
+
+            if (s_collect.have) s_collect.bytes[i] = static_cast<uint8_t>(s_collect.bytes[i] | msg.data[i]);
         }
-        if (s_collect.have) std::memcpy(s_collect.bytes, cur, kCollectSize);
         break;
     }
     case kRegionLightDrop: {
         if (msg.size != kLightDropSize) return;
         auto* cur = reinterpret_cast<uint8_t*>(&info->getSavedata().getPlayer().getLightDrop());
         for (int i = 0; i < kLightDropCounts; ++i) {
-            if (msg.data[i] > cur[i]) cur[i] = msg.data[i];
+            if (msg.data[i] <= cur[i]) continue;
+            lift_light_drop_baseline(i, msg.data[i] - cur[i]);
+            cur[i] = msg.data[i];
         }
         cur[4] = static_cast<uint8_t>(cur[4] | msg.data[4]);
-        if (s_lightDrop.have) std::memcpy(s_lightDrop.bytes, cur, kLightDropSize);
+        if (s_lightDrop.have) s_lightDrop.bytes[4] = static_cast<uint8_t>(s_lightDrop.bytes[4] | msg.data[4]);
         break;
     }
     case kRegionEvent: {
@@ -1953,11 +1975,12 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
 
         for (int i = 0; i < kLightDropCounts; ++i) {
             const int sum = cur[i] + msg.set[i];
-            cur[i] = static_cast<uint8_t>(sum > 255 ? 255 : sum);
+            const uint8_t now = static_cast<uint8_t>(sum > 255 ? 255 : sum);
+            lift_light_drop_baseline(i, now - cur[i]);
+            cur[i] = now;
         }
         cur[4] = static_cast<uint8_t>(cur[4] | msg.set[4]);
-
-        if (s_lightDrop.have) std::memcpy(s_lightDrop.bytes, cur, kLightDropSize);
+        if (s_lightDrop.have) s_lightDrop.bytes[4] = static_cast<uint8_t>(s_lightDrop.bytes[4] | msg.set[4]);
         break;
     }
     case kRegionStatusB: {
@@ -1973,8 +1996,9 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
         for (int i = 0; i < kCollectSize; ++i) {
             if (i == kCollectPohIndex) continue;
             cur[i] = static_cast<uint8_t>(cur[i] | msg.set[i]);
+
+            if (s_collect.have) s_collect.bytes[i] = static_cast<uint8_t>(s_collect.bytes[i] | msg.set[i]);
         }
-        if (s_collect.have) std::memcpy(s_collect.bytes, cur, kCollectSize);
         break;
     }
     case kRegionVisited: {

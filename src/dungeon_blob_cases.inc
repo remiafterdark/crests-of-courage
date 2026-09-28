@@ -96,11 +96,6 @@
         out[3] = {offsetof(daObjMarm_c, mPlayerRide), offsetof(daObjMarm_c, mpRope1)};
         out[4] = {offsetof(daObjMarm_c, field_0xA28), offsetof(daObjMarm_c, mShadowKey)};
         return 5;
-    case fpcNm_Obj_RotBridge_e:
-        out[0] = {offsetof(daRotBridge_c, mType), offsetof(daRotBridge_c, mBck)};
-        out[1] = {offsetof(daRotBridge_c, mBckSpeed), offsetof(daRotBridge_c, mpBgW2)};
-        out[2] = {offsetof(daRotBridge_c, mMtx), offsetof(daRotBridge_c, mMtx) + sizeof(daRotBridge_c::mMtx)};
-        return 3;
     case fpcNm_Obj_Lv7Bridge_e:
         out[0] = {offsetof(daObjLv7Brg_c, field_0xa78), offsetof(daObjLv7Brg_c, mpBrokenModel)};
         out[1] = {offsetof(daObjLv7Brg_c, field_0xa94), offsetof(daObjLv7Brg_c, field_0xa98) + sizeof(daObjLv7Brg_c::field_0xa98)};

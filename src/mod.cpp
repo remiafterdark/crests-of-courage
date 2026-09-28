@@ -147,10 +147,26 @@ struct PeerLink {
 };
 PeerLink g_links[kCoopMaxPlayers];
 
+const int32_t kSeqRestartGap = 240;
+
+bool fresh_seq(bool& have, uint32_t& last, uint32_t seq) {
+    if (have) {
+        const int32_t ahead = static_cast<int32_t>(seq - last);
+        if (ahead <= 0 && ahead > -kSeqRestartGap) return false;
+    }
+    have = true;
+    last = seq;
+    return true;
+}
+
 uint8_t g_localId = kCoopHostId;
 CoopRoster g_roster = 1u << kCoopHostId;
 
 uint32_t g_playerQuiet[kCoopMaxPlayers] = {};
+
+uint32_t g_snapIn[kCoopMaxPlayers] = {};
+uint32_t g_snapStale[kCoopMaxPlayers] = {};
+uint32_t g_snapUnknown = 0;
 
 uint32_t g_playerWorldTick[kCoopMaxPlayers] = {};
 bool g_playerWorldSeen[kCoopMaxPlayers] = {};
@@ -695,9 +711,7 @@ void handle_midna_datagram(const mods::net::Event& event) {
         if (id < 0 || id >= kCoopMaxPlayers || id == g_localId) return;
     }
 
-    if (g_haveMidnaSeq[id] && static_cast<int32_t>(snap.seq - g_lastMidnaSeq[id]) <= 0) return;
-    g_lastMidnaSeq[id] = snap.seq;
-    g_haveMidnaSeq[id] = true;
+    if (!fresh_seq(g_haveMidnaSeq[id], g_lastMidnaSeq[id], snap.seq)) return;
 
     if (g_isHost) {
         for (int i = 0; i < kCoopMaxPlayers; ++i) {
@@ -851,9 +865,7 @@ void handle_horse_datagram(const mods::net::Event& event) {
         id = snap.playerId;
         if (id < 0 || id >= kCoopMaxPlayers || id == g_localId) return;
     }
-    if (g_haveHorseSeq[id] && static_cast<int32_t>(snap.seq - g_lastHorseSeq[id]) <= 0) return;
-    g_lastHorseSeq[id] = snap.seq;
-    g_haveHorseSeq[id] = true;
+    if (!fresh_seq(g_haveHorseSeq[id], g_lastHorseSeq[id], snap.seq)) return;
     if (g_isHost) {
         for (int i = 0; i < kCoopMaxPlayers; ++i) {
             if (i == id || !g_links[i].used || !g_links[i].haveUdp) continue;
@@ -944,7 +956,14 @@ void handle_udp_event(const mods::net::Event& event) {
                 coop_log::info("coop_mod: learned player {} udp endpoint {}", id, event.endpoint);
             }
         }
-        if (id < 0) return;
+        if (id < 0) {
+            if (g_snapUnknown++ % 600 == 0) {
+                coop_log::warn("coop_mod: [NET] a player's position from {} matches nobody we know "
+                               "(claims player {}) - dropped ({} so far)", event.endpoint,
+                    static_cast<int>(snapshot.playerId), g_snapUnknown);
+            }
+            return;
+        }
 
         snapshot.playerId = static_cast<uint8_t>(id);
     } else {
@@ -961,11 +980,11 @@ void handle_udp_event(const mods::net::Event& event) {
         g_playerWorldStill[id] = 0;
     }
     PeerLink& from = g_links[id];
-    if (from.haveRecvSeq && static_cast<int32_t>(snapshot.seq - from.lastRecvSeq) <= 0) {
+    ++g_snapIn[id];
+    if (!fresh_seq(from.haveRecvSeq, from.lastRecvSeq, snapshot.seq)) {
+        ++g_snapStale[id];
         return;
     }
-    from.lastRecvSeq = snapshot.seq;
-    from.haveRecvSeq = true;
 
     if (g_isHost) {
         for (int i = 0; i < kCoopMaxPlayers; ++i) {
@@ -1276,10 +1295,15 @@ void send_local_snapshot() {
         fopAc_ac_c* hungFrom = alink->mCargoCarryAcKeep.getActor();
         const bool onPeahat = alink->mProcID == daAlink_c::PROC_HOOKSHOT_ROOF_WAIT && hungFrom != nullptr &&
                               fopAcM_GetName(hungFrom) == fpcNm_E_PH_e;
+
+        const bool hiddenByScene =
+            alink->checkNoResetFlg0(daPy_py_c::FLG0_PLAYER_NO_DRAW) != 0 ||
+            (alink->actor_status & fopAcStts_NODRAW_e) != 0;
         snapshot.combat = static_cast<uint8_t>((alink->checkUpperGuardAnime() ? 1 : 0) |
                                                (alink->checkCameraLargeDamage() ? 2 : 0) |
                                                (alink->mDamageTimer != 0 ? 4 : 0) |
-                                               (onPeahat ? 8 : 0));
+                                               (onPeahat ? 8 : 0) |
+                                               (hiddenByScene ? kSnapHidden : 0));
         for (int i = 0; i < 3; ++i) {
             snapshot.hat[i] = alink->field_0x302c[7 + i];
             snapshot.hat[3 + i] = alink->field_0x3040[7 + i];
@@ -2288,6 +2312,13 @@ uint32_t coop_net_ticks_since_player(uint8_t playerId) {
 
 CoopNetTraffic coop_net_traffic() {
     return g_traffic;
+}
+
+void coop_net_snapshot_counts(uint8_t playerId, uint32_t* in, uint32_t* stale, uint32_t* unknown) {
+    const bool ok = playerId < kCoopMaxPlayers;
+    if (in != nullptr) *in = ok ? g_snapIn[playerId] : 0;
+    if (stale != nullptr) *stale = ok ? g_snapStale[playerId] : 0;
+    if (unknown != nullptr) *unknown = g_snapUnknown;
 }
 
 bool coop_net_link_info(uint8_t playerId, CoopLinkInfo* out) {

@@ -134,6 +134,8 @@ struct AnmSlotSnapshot {
     float rate;
 };
 
+const uint8_t kSnapHidden = 0x80;
+
 struct PlayerSnapshot {
     uint32_t seq;
 

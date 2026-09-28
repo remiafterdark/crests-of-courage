@@ -30,6 +30,8 @@ uint32_t coop_local_world_frames();
 
 uint32_t coop_net_rtt_ticks(uint8_t playerId);
 
+void coop_net_snapshot_counts(uint8_t playerId, uint32_t* in, uint32_t* stale, uint32_t* unknown);
+
 struct CoopNetTraffic {
     uint64_t txBytes = 0;
     uint64_t rxBytes = 0;

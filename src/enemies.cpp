@@ -41,6 +41,7 @@
 #include "d/actor/d_a_ni.h"
 #include "d/actor/d_a_obj_lv6swturn.h"
 #include "d/actor/d_a_obj_swturn.h"
+#include "d/actor/d_a_obj_rotBridge.h"
 #include "d/actor/d_a_player.h"
 #include "m_Do/m_Do_ext.h"
 #include "d/d_particle.h"
@@ -159,6 +160,8 @@ DEFINE_HOOK_SYMBOL("daCstatue_c::setCollision", void(daCstatue_c*), CoopStatueCo
 DEFINE_HOOK_SYMBOL("daCstatue_c::execute", int(daCstatue_c*), CoopStatueExecuteHook);
 
 DEFINE_HOOK(&dCcS::Move, EnemyCollisionHook);
+
+DEFINE_HOOK_SYMBOL("daRotBridge_c::Execute", int(daRotBridge_c*, Mtx**), CoopRotBridgeExecuteHook);
 
 namespace {
 
@@ -313,6 +316,8 @@ struct BirthRecord {
     uint32_t param = 0;
     f32 homeX = 0.0f, homeY = 0.0f, homeZ = 0.0f;
     int16_t homeAngleY = 0;
+
+    bool inSettle = false;
 };
 const int kBirthMax = 256;
 BirthRecord s_birth[kBirthMax];
@@ -325,17 +330,56 @@ const BirthRecord* find_birth(fpc_ProcID id) {
     return nullptr;
 }
 
-void record_birth(fopAc_ac_c* actor) {
+void record_birth(fopAc_ac_c* actor, bool inSettle) {
     const fpc_ProcID id = fopAcM_GetID(actor);
     if (find_birth(id) != nullptr) return;
     BirthRecord& b = s_birth[s_birthNext];
     s_birthNext = (s_birthNext + 1) % kBirthMax;
     b.id = id;
+    b.inSettle = inSettle;
     b.param = fopAcM_GetParam(actor);
     b.homeX = actor->home.pos.x;
     b.homeY = actor->home.pos.y;
     b.homeZ = actor->home.pos.z;
     b.homeAngleY = actor->home.angle.y;
+}
+
+struct PlacedEnemy {
+    fpc_ProcID id = fpcM_ERROR_PROCESS_ID_e;
+    int8_t room = -1;
+    uint32_t key = 0;
+    bool gone = false;
+};
+uint32_t compute_placement_key(fopAc_ac_c* actor);
+
+const int kMaxPlacedEnemies = 160;
+PlacedEnemy s_placedEnemies[kMaxPlacedEnemies];
+int s_placedNext = 0;
+
+void note_placed_enemy(fopAc_ac_c* actor) {
+    const int room = fopAcM_GetRoomNo(actor);
+    if (room < 0 || room >= kRooms) return;
+    const uint32_t key = compute_placement_key(actor);
+    if (key == 0) return;
+    PlacedEnemy* slot = nullptr;
+    for (PlacedEnemy& e : s_placedEnemies) {
+        if (e.key == key && e.room == room) { slot = &e; break; }
+        if (slot == nullptr && e.key == 0) slot = &e;
+    }
+    if (slot == nullptr) {
+        slot = &s_placedEnemies[s_placedNext];
+        s_placedNext = (s_placedNext + 1) % kMaxPlacedEnemies;
+    }
+    slot->id = fopAcM_GetID(actor);
+    slot->room = static_cast<int8_t>(room);
+    slot->key = key;
+    slot->gone = false;
+}
+
+void forget_placed_enemies_in(int room) {
+    for (PlacedEnemy& e : s_placedEnemies) {
+        if (e.room == room) e = PlacedEnemy{};
+    }
 }
 
 const int kSeenSlots = 4096;
@@ -414,7 +458,10 @@ void note_loaded_rooms(dSv_info_c* info) {
     }
 
     for (int i = 0; i < kRooms; ++i) {
-        if (wasLoaded[i] && !s_roomLoaded[i]) s_settledRoom[i] = false;
+        if (wasLoaded[i] && !s_roomLoaded[i]) {
+            s_settledRoom[i] = false;
+            forget_placed_enemies_in(i);
+        }
     }
     for (int i = 0; i < 32; ++i) {
         const int room = info->getZone(i).getRoomNo();
@@ -520,7 +567,8 @@ uint32_t placement_key(fopAc_ac_c* actor) {
         }
     }
 
-    const bool runtime = s_settleTicks <= 0;
+    const BirthRecord* bornAs = find_birth(id);
+    const bool runtime = bornAs != nullptr ? !bornAs->inSettle : s_settleTicks <= 0;
     const uint32_t key = runtime ? compute_sequence_key(actor) : compute_placement_key(actor);
 
     s_keyCache[slot].id = id;
@@ -888,6 +936,7 @@ void reset_tables() {
     for (int i = 0; i < kMaxPendingObjectHits; ++i) s_pendingObjectHits[i] = PendingHit{};
     reset_movers();
     reset_cages();
+
     s_selfTestTicks = 0;
     s_selfTestDone = false;
 }
@@ -1071,9 +1120,10 @@ bool we_own(int8_t room, uint32_t key) {
 
     if (room >= 0 && room < kRooms && room_ownership_enabled() &&
         s_rooms.owner[room] == owner_of(me)) {
+
         const Tracked* t = find_tracked(room, key);
         const bool undescribed =
-            t == nullptr || !t->describedEver || s_tick - t->describedStamp > kOwnerlessTicks;
+            t != nullptr && (!t->describedEver || s_tick - t->describedStamp > kOwnerlessTicks);
         if (undescribed) {
             static uint32_t s_saidTick = 0;
             if (s_tick - s_saidTick > 300) {
@@ -2492,7 +2542,10 @@ HookAction on_proc_execute_pre(ModContext*, void* args, void*, void*) {
         if (proc != nullptr && s_seenProc[static_cast<uint32_t>(proc->id) % kSeenSlots] != proc->id) {
             s_seenProc[static_cast<uint32_t>(proc->id) % kSeenSlots] = proc->id;
             fopAc_ac_c* actor = fopAcM_SearchByID(proc->id);
-            if (actor != nullptr && fopAcM_GetGroup(actor) == fopAc_ENEMY_e) record_birth(actor);
+            if (actor != nullptr && fopAcM_GetGroup(actor) == fopAc_ENEMY_e) {
+                record_birth(actor, s_settleTicks > 0);
+                if (s_settleTicks > 0) note_placed_enemy(actor);
+            }
         }
     }
 
@@ -3279,10 +3332,13 @@ bool nearest_to(const cXyz& pos) {
     if (coop_player_paused(coop_net_local_id())) return false;
     const f32 ours = (pos - alink->current.pos).abs();
     const uint8_t us = coop_net_local_id();
+    const char* stage = dComIfGp_getStartStageName();
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         if (static_cast<uint8_t>(i) == us) continue;
         const CoopPeer& peer = features_peer_of(static_cast<uint8_t>(i));
         if (!peer.present || !peer.inGame || coop_player_paused(static_cast<uint8_t>(i))) continue;
+
+        if (stage == nullptr || std::strncmp(peer.stage, stage, sizeof(peer.stage)) != 0) continue;
         const cXyz theirs(peer.x, peer.y, peer.z);
         const f32 d = (pos - theirs).abs();
         if (d < ours) return false;
@@ -3416,6 +3472,126 @@ void capture_block_pushes(BreakableList& list) {
     }
 }
 
+const uint32_t kCatchUpAfterTicks[2] = {150, 420};
+const uint32_t kCatchUpSettledTicks = 300;
+const int kCatchUpFrames = 8;
+const int kCatchUpPerFrame = 10;
+const int kCatchUpMaxKeys = 96;
+const f32 kCatchUpDisplaced = 5.0f;
+
+struct PeerWhere {
+    bool here = false;
+};
+PeerWhere s_peerWhere[kCoopMaxPlayers];
+char s_ourStage[8] = {};
+int8_t s_ourRoom = -1;
+uint32_t s_ourRoomSince = 0;
+uint32_t s_catchUpAt[2] = {0, 0};
+int8_t s_catchUpRoom = -1;
+bool s_catchUpDue = false;
+int s_catchUpFramesLeft = 0;
+bool s_catchUpFirstFrame = false;
+int s_catchUpBudget = 0;
+uint32_t s_catchUpSent[kCatchUpMaxKeys];
+int s_catchUpSentCount = 0;
+
+bool catching_up(int8_t room) {
+    return s_catchUpFramesLeft > 0 && room == s_catchUpRoom;
+}
+
+bool catch_up_take(uint32_t key) {
+    if (s_catchUpBudget <= 0) return false;
+    for (int i = 0; i < s_catchUpSentCount; ++i) {
+        if (s_catchUpSent[i] == key) return false;
+    }
+    if (s_catchUpSentCount >= kCatchUpMaxKeys) return false;
+    s_catchUpSent[s_catchUpSentCount++] = key;
+    --s_catchUpBudget;
+    return true;
+}
+
+void watch_arrivals() {
+    const char* stage = dComIfGp_getStartStageName();
+    daAlink_c* me = daAlink_getAlinkActorClass();
+    const int8_t room = me != nullptr ? static_cast<int8_t>(fopAcM_GetRoomNo(me)) : -1;
+    char st[8] = {};
+    if (stage != nullptr) std::strncpy(st, stage, 8);
+    if (room != s_ourRoom || std::memcmp(st, s_ourStage, 8) != 0) {
+        s_ourRoom = room;
+        std::memcpy(s_ourStage, st, 8);
+        s_ourRoomSince = s_tick;
+        s_catchUpAt[0] = s_catchUpAt[1] = 0;
+        s_catchUpFramesLeft = 0;
+    }
+    const uint8_t us = coop_net_local_id();
+    const bool settled = room >= 0 && s_tick - s_ourRoomSince >= kCatchUpSettledTicks &&
+                         !coop_player_paused(us);
+    for (int i = 0; i < kCoopMaxPlayers; ++i) {
+        if (static_cast<uint8_t>(i) == us) continue;
+        const CoopPeer& peer = features_peer_of(static_cast<uint8_t>(i));
+        const bool here = peer.present && peer.inGame && room >= 0 && stage != nullptr &&
+                          std::strncmp(peer.stage, stage, 8) == 0 && peer.curRoom == room;
+        if (here && !s_peerWhere[i].here && settled && objects_live()) {
+            s_catchUpAt[0] = s_tick + kCatchUpAfterTicks[0];
+            s_catchUpAt[1] = s_tick + kCatchUpAfterTicks[1];
+            s_catchUpRoom = room;
+            coop_log::info("coop_mod: [OBJ] player {} came into room {} - bringing them up to date",
+                i, static_cast<int>(room));
+        }
+        s_peerWhere[i].here = here;
+    }
+    for (uint32_t& at : s_catchUpAt) {
+        if (at != 0 && static_cast<int32_t>(s_tick - at) >= 0) {
+            at = 0;
+            s_catchUpDue = true;
+        }
+    }
+}
+
+void watch_placed_enemies() {
+    if (s_tick % 30 != 0) return;
+    for (PlacedEnemy& e : s_placedEnemies) {
+        if (e.key == 0 || e.gone) continue;
+        if (fopAcM_SearchByID(e.id) != nullptr) continue;
+        if (room_is_loaded(e.room)) {
+            e.gone = true;
+        } else {
+            e = PlacedEnemy{};
+        }
+    }
+}
+
+void catch_up_enemies(int8_t room) {
+    if (!enemies_enabled_now() || s_bossRoom[room]) return;
+    int sent = 0;
+    for (const PlacedEnemy& e : s_placedEnemies) {
+        if (!e.gone || e.room != room) continue;
+        MsgEnemyGone msg{};
+        msg.key = e.key;
+        msg.room = e.room;
+        coop_net_send(kMsgEnemyGone, &msg, sizeof(msg));
+        ++sent;
+    }
+    if (sent > 0) {
+        coop_log::info("coop_mod: [ENEMY] room {}: told them about {} enemies already dead here",
+            static_cast<int>(room), sent);
+    }
+}
+
+void catch_up_frame() {
+    s_catchUpFirstFrame = false;
+    if (s_catchUpDue) {
+        s_catchUpDue = false;
+        s_catchUpFramesLeft = kCatchUpFrames;
+        s_catchUpFirstFrame = true;
+        s_catchUpSentCount = 0;
+        if (s_catchUpRoom >= 0 && s_catchUpRoom < kRooms) catch_up_enemies(s_catchUpRoom);
+    } else if (s_catchUpFramesLeft > 0) {
+        --s_catchUpFramesLeft;
+    }
+    s_catchUpBudget = s_catchUpFramesLeft > 0 ? kCatchUpPerFrame : 0;
+}
+
 bool carry_driven_elsewhere(int8_t room, uint32_t key);
 bool carry_driven_here(int8_t room, uint32_t key);
 
@@ -3435,6 +3611,8 @@ void capture_moved_objects(BreakableList& list) {
         if (is_pushable_block(actor)) continue;
         if (is_door(actor)) continue;
 
+        if (fopAcM_GetName(actor) == fpcNm_Obj_RotBridge_e) continue;
+
         if (carry_driven_elsewhere(room, key)) continue;
         ObjPos* last = remember_position(room, key, actor->current.pos, actor->shape_angle);
         if (last == nullptr) continue;
@@ -3451,9 +3629,18 @@ void capture_moved_objects(BreakableList& list) {
                 stateChanged = true;
             }
         }
-        if (step.abs() < kMoverEpsilon && turn < kMoverAngleEpsilon && !stateChanged) continue;
+        const bool mechanism = has_blob(actor);
 
-        if (is_timed_hazard(actor) && s_tick % 30 != 0) continue;
+        const bool forced =
+            catching_up(room) &&
+            (mechanism || (actor->current.pos - actor->home.pos).abs() > kCatchUpDisplaced ||
+                angle_step(actor->shape_angle, actor->home.angle) >= kMoverAngleEpsilon) &&
+            catch_up_take(key);
+        if (!forced && step.abs() < kMoverEpsilon && turn < kMoverAngleEpsilon && !stateChanged) {
+            continue;
+        }
+
+        if (!forced && is_timed_hazard(actor) && s_tick % 30 != 0) continue;
 
         Mover* m = find_mover(room, key);
         if (m == nullptr) {
@@ -3463,17 +3650,20 @@ void capture_moved_objects(BreakableList& list) {
         }
         m->lastPos = actor->current.pos;
         m->tail = kMoverTailTicks;
-        const bool mechanism = has_blob(actor);
-        if (mechanism ? !mechanism_is_ours(actor, room) : !nearest_to(actor->current.pos)) continue;
+        if (!forced &&
+            (mechanism ? !mechanism_is_ours(actor, room) : !nearest_to(actor->current.pos))) {
+            continue;
+        }
         daAlink_c* alink = daAlink_getAlinkActorClass();
 
         if (alink == nullptr ||
-            (!mechanism && (actor->current.pos - alink->current.pos).abs() > kMoverRelayRange))
+            (!mechanism && !forced &&
+                (actor->current.pos - alink->current.pos).abs() > kMoverRelayRange))
         {
             continue;
         }
 
-        if (!stateChanged && m->everSent &&
+        if (!forced && !stateChanged && m->everSent &&
             (actor->current.pos - m->sentPos).abs() < kMoverEpsilon &&
             angle_step(actor->shape_angle, m->sentAngle) < kMoverAngleEpsilon)
         {
@@ -3486,6 +3676,7 @@ void capture_moved_objects(BreakableList& list) {
         MsgObjectMove msg{};
         msg.key = key;
         msg.room = room;
+        msg.catchUp = forced ? 1 : 0;
         msg.pos[0] = actor->current.pos.x;
         msg.pos[1] = actor->current.pos.y;
         msg.pos[2] = actor->current.pos.z;
@@ -3581,12 +3772,14 @@ void apply_pending_moves() {
         if (actor == nullptr) continue;
 
         if (is_door(actor)) continue;
+        if (fopAcM_GetName(actor) == fpcNm_Obj_RotBridge_e) continue;
 
         if (fpcM_IsCreating(fopAcM_GetID(actor))) continue;
 
         if (carry_driven_here(msg.room, msg.key)) continue;
 
-        if (has_blob(actor) ? mechanism_is_ours(actor, msg.room) : nearest_to(actor->current.pos)) {
+        if (msg.catchUp == 0 &&
+            (has_blob(actor) ? mechanism_is_ours(actor, msg.room) : nearest_to(actor->current.pos))) {
             continue;
         }
 
@@ -4259,13 +4452,16 @@ void capture_torches() {
         if (flag == nullptr) continue;
         const bool lit = *flag != 0;
         TorchSeen* seen = torch_slot(fopAcM_GetID(torch), false);
+
+        const bool forced = s_catchUpFirstFrame && lit &&
+                            catching_up(static_cast<int8_t>(fopAcM_GetRoomNo(torch)));
         if (seen == nullptr) {
             seen = torch_slot(fopAcM_GetID(torch), true);
             if (seen != nullptr) seen->lit = lit;
-            continue;
+            if (!forced) continue;
         }
-        if (seen->lit == lit) continue;
-        seen->lit = lit;
+        if (seen != nullptr && seen->lit == lit && !forced) continue;
+        if (seen != nullptr) seen->lit = lit;
         const uint32_t key = compute_placement_key(torch);
         if (key == 0) continue;
         MsgTorch msg{};
@@ -4293,6 +4489,7 @@ void torch_on_message(const MsgTorch& msg) {
         }
         uint8_t* flag = torch_lit_flag(torch);
         if (flag == nullptr) return;
+        if ((*flag != 0) == (msg.lit != 0)) return;
         *flag = msg.lit;
 
         TorchSeen* seen = torch_slot(fopAcM_GetID(torch), true);
@@ -4779,6 +4976,7 @@ void on_collision_move_post(ModContext*, void*, void*, void*) {
     rearm_disarmed_attacks();
     const bool enemiesOn = enemies_enabled_now();
     const bool objectsOn = objects_live();
+    catch_up_frame();
     if (carry_live()) {
         capture_carried();
         capture_torches();
@@ -4921,6 +5119,200 @@ void log_status(const EnemyList* list) {
     coop_log::trace("coop_mod: [ENEMY-WORLD] ourFrames={} {}", coop_local_world_frames(), worlds);
 }
 
+const int kMaxBridges = 8;
+const uint32_t kBridgeBeatTicks = 60;
+
+const uint32_t kBridgeFreshTicks = 120;
+
+const uint32_t kBridgeAgeSlack = 60;
+
+const uint32_t kBridgeEdgeGraceTicks = 75;
+
+const uint32_t kBridgeSettleTicks = 120;
+const uint32_t kBridgeMsgLifeTicks = 120;
+
+struct BridgeSeen {
+    fpc_ProcID id = fpcM_ERROR_PROCESS_ID_e;
+    uint32_t firstTick = 0;
+    uint32_t lastTurnTick = 0;
+    uint32_t ignoreEdgeUntil = 0;
+    uint32_t lastBeatTick = 0;
+    bool beatSent = false;
+    int16_t beatAngle = 0;
+    uint8_t beatFacing = 0;
+};
+BridgeSeen s_bridges[kMaxBridges];
+
+struct PendingBridge {
+    bool used = false;
+    uint8_t from = 0;
+    uint32_t tick = 0;
+    MsgRotBridge msg{};
+};
+PendingBridge s_pendingBridges[kMaxBridges * 2];
+
+bool bridges_live() {
+    return objects_live() && movers_enabled();
+}
+
+bool bridge_angle_near(int16_t a, int16_t b) {
+    const int d = static_cast<int16_t>(a - b);
+    return d > -0x800 && d < 0x800;
+}
+
+BridgeSeen* bridge_seen(daRotBridge_c* b) {
+    const fpc_ProcID id = fopAcM_GetID(b);
+    BridgeSeen* free = nullptr;
+    for (BridgeSeen& s : s_bridges) {
+        if (s.id == id) return &s;
+        if (free == nullptr && s.id == fpcM_ERROR_PROCESS_ID_e) free = &s;
+    }
+    if (free == nullptr) {
+        for (BridgeSeen& s : s_bridges) {
+            if (fopAcM_SearchByID(s.id) == nullptr) s = BridgeSeen{};
+        }
+        for (BridgeSeen& s : s_bridges) {
+            if (s.id == fpcM_ERROR_PROCESS_ID_e) { free = &s; break; }
+        }
+        if (free == nullptr) return nullptr;
+    }
+    *free = BridgeSeen{};
+    free->id = id;
+    free->firstTick = s_tick;
+
+    free->lastTurnTick = s_tick - 10000;
+    return free;
+}
+
+bool bridge_theirs_counts(const BridgeSeen& seen, uint32_t theirAge, uint8_t from) {
+    const uint32_t ours = s_tick - seen.firstTick;
+    if (theirAge > ours + kBridgeAgeSlack) return true;
+    if (ours > theirAge + kBridgeAgeSlack) return false;
+    return from < coop_net_local_id();
+}
+
+void send_bridge(daRotBridge_c* b, uint8_t kind, const BridgeSeen& seen) {
+    MsgRotBridge msg{};
+    msg.room = static_cast<int8_t>(fopAcM_GetRoomNo(b));
+    msg.kind = kind;
+    msg.facing = b->mBridgeAngle;
+    msg.angle = b->shape_angle.y;
+    const uint32_t quiet = s_tick - seen.lastTurnTick;
+    msg.quiet = static_cast<uint16_t>(quiet > 0xFFFF ? 0xFFFF : quiet);
+    msg.age = s_tick - seen.firstTick;
+    msg.home[0] = b->home.pos.x;
+    msg.home[1] = b->home.pos.y;
+    msg.home[2] = b->home.pos.z;
+    coop_net_send(kMsgRotBridge, &msg, sizeof(msg));
+}
+
+void start_bridge_turn(daRotBridge_c* b) {
+    b->mDoMove = TRUE;
+    fopAcM_seStart(b, Z2SE_OBJ_ROLLBRG_MOVESTART, 0);
+    if (b->mpBgW2 != nullptr) {
+        dComIfG_Bgsp().Regist(b->mpBgW2, b);
+        b->mpBgW2->Move();
+    }
+}
+
+void place_bridge(daRotBridge_c* b, int16_t angle, uint8_t facing) {
+    b->shape_angle.y = angle;
+    b->mBridgeAngle = facing;
+    b->setBaseMtx();
+}
+
+void on_rot_bridge(const MsgRotBridge& msg, uint8_t from) {
+    PendingBridge* slot = nullptr;
+    for (PendingBridge& p : s_pendingBridges) {
+        if (p.used && s_tick - p.tick > kBridgeMsgLifeTicks) p = PendingBridge{};
+    }
+    for (PendingBridge& p : s_pendingBridges) {
+        if (p.used && p.from == from && p.msg.room == msg.room && p.msg.kind == msg.kind &&
+            p.msg.home[0] == msg.home[0] && p.msg.home[2] == msg.home[2]) {
+            slot = &p;
+            break;
+        }
+    }
+    for (PendingBridge& p : s_pendingBridges) {
+        if (slot == nullptr && !p.used) slot = &p;
+    }
+    if (slot == nullptr) return;
+    slot->used = true;
+    slot->from = from;
+    slot->tick = s_tick;
+    slot->msg = msg;
+}
+
+HookAction on_rot_bridge_execute(ModContext*, void* args, void*, void*) {
+    auto* b = mods::arg<daRotBridge_c*>(args, 0);
+    if (b == nullptr) return HOOK_CONTINUE;
+
+    BridgeSeen* seen = bridge_seen(b);
+    if (seen == nullptr || !bridges_live()) return HOOK_CONTINUE;
+    const int8_t room = static_cast<int8_t>(fopAcM_GetRoomNo(b));
+    const u8 isSw = fopAcM_isSwitch(b, fopAcM_GetParam(b) & 0xFF);
+
+    const bool edge = b->bitSw != isSw && isSw != 0;
+    bool moving = b->mDoMove != 0;
+
+    for (PendingBridge& p : s_pendingBridges) {
+        if (!p.used || p.msg.room != room) continue;
+        if (std::fabs(p.msg.home[0] - b->home.pos.x) > 1.0f ||
+            std::fabs(p.msg.home[1] - b->home.pos.y) > 1.0f ||
+            std::fabs(p.msg.home[2] - b->home.pos.z) > 1.0f) {
+            continue;
+        }
+        const MsgRotBridge msg = p.msg;
+        const uint8_t from = p.from;
+        p = PendingBridge{};
+        if (msg.kind == kRotBridgeTurn) {
+            if (!moving && !edge && bridge_angle_near(b->shape_angle.y, msg.angle)) {
+                start_bridge_turn(b);
+                moving = true;
+                seen->ignoreEdgeUntil = s_tick + kBridgeEdgeGraceTicks;
+                coop_log::info("coop_mod: [OBJ] rotating bridge room={} turning with theirs",
+                    static_cast<int>(room));
+            }
+            seen->lastTurnTick = s_tick;
+        } else if (msg.kind == kRotBridgeRest) {
+            if (moving || !bridge_theirs_counts(*seen, msg.age, from)) continue;
+            if (msg.quiet < kBridgeSettleTicks || s_tick - seen->lastTurnTick < kBridgeSettleTicks) {
+                continue;
+            }
+            if (bridge_angle_near(b->shape_angle.y, msg.angle) && b->mBridgeAngle == msg.facing) {
+                continue;
+            }
+            coop_log::info("coop_mod: [OBJ] rotating bridge room={} put where theirs rests "
+                           "({:#06x} -> {:#06x})", static_cast<int>(room),
+                static_cast<uint16_t>(b->shape_angle.y), static_cast<uint16_t>(msg.angle));
+            place_bridge(b, msg.angle, msg.facing);
+        }
+    }
+
+    if (edge) {
+        if (static_cast<int32_t>(seen->ignoreEdgeUntil - s_tick) > 0) {
+            b->bitSw = isSw;
+        } else if (!moving) {
+            send_bridge(b, kRotBridgeTurn, *seen);
+            seen->lastTurnTick = s_tick;
+        }
+    }
+
+    if (!moving && !edge && s_tick - seen->firstTick >= kBridgeFreshTicks &&
+        !coop_player_paused(coop_net_local_id())) {
+        const bool changed = !seen->beatSent || seen->beatFacing != b->mBridgeAngle ||
+                             !bridge_angle_near(seen->beatAngle, b->shape_angle.y);
+        if (changed || s_tick - seen->lastBeatTick >= kBridgeBeatTicks) {
+            send_bridge(b, kRotBridgeRest, *seen);
+            seen->beatSent = true;
+            seen->beatAngle = b->shape_angle.y;
+            seen->beatFacing = b->mBridgeAngle;
+            seen->lastBeatTick = s_tick;
+        }
+    }
+    return HOOK_CONTINUE;
+}
+
 }
 
 void enemies_register_vars() {
@@ -5039,6 +5431,9 @@ void enemies_init() {
     const ModResult statue = mods::hook::add_pre<CoopStatueSetAnimeHook>(on_statue_set_anime);
     const ModResult small =
         mods::hook::add_pre<CoopSmallStatueSetAnimeHook>(on_small_statue_set_anime);
+    const ModResult bridge =
+        mods::hook::add_pre<CoopRotBridgeExecuteHook>(on_rot_bridge_execute);
+    coop_log::info("coop_mod: [OBJ] rotating bridge hook: {}", static_cast<int>(bridge));
     coop_log::info("coop_mod: [CARRY] statue look hooks: big={} small={}", static_cast<int>(statue),
         static_cast<int>(small));
     const ModResult statueMove = mods::hook::add_pre<CoopStatuePosMoveHook>(on_statue_pos_move_pre);
@@ -5144,7 +5539,9 @@ void capture_cage_bars() {
         CageSeen* seen = cage_seen(fopAcM_GetID(actor));
         if (seen == nullptr) continue;
         const uint8_t now = cage_mask(actor);
-        if ((now & ~seen->mask) == 0) continue;
+        const bool forced = s_catchUpFirstFrame && now != 0 &&
+                            catching_up(static_cast<int8_t>(fopAcM_GetRoomNo(actor)));
+        if ((now & ~seen->mask) == 0 && !forced) continue;
         seen->mask |= now;
         MsgCageBars msg{};
         msg.room = static_cast<int8_t>(fopAcM_GetRoomNo(actor));
@@ -5329,6 +5726,8 @@ void enemies_note_boomerang_bomb() {
 void enemies_update() {
     process_pending_catches();
     ++s_tick;
+    watch_arrivals();
+    watch_placed_enemies();
     if (s_unpauseSnapTicks > 0) --s_unpauseSnapTicks;
     note_loaded_rooms(dComIfGs_getSaveInfo());
     if (s_settleTicks > 0) --s_settleTicks;
@@ -5402,7 +5801,7 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
     if (type == kMsgRoomClaim || type == kMsgRoomOwner) {
         if (!enemies_setting_on() && !bosses_setting_on()) return;
     } else if (type == kMsgObjectHit || type == kMsgObjectMove || type == kMsgCarry ||
-               type == kMsgCageBars ||
+               type == kMsgCageBars || type == kMsgRotBridge ||
                type == kMsgTorch || type == kMsgAnimal) {
         if (!breakables_enabled() && !movers_enabled()) return;
     } else if (!enemies_setting_on()) {
@@ -5423,7 +5822,8 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
                     dt->describedEver = true;
                 }
             }
-            if (we_own(entry.room, entry.key)) {
+
+            if (find_tracked(entry.room, entry.key) != nullptr && we_own(entry.room, entry.key)) {
                 ++s_diagConflicts;
 
                 if (s_diagConflicts <= 12 || s_diagConflicts % 400 == 0) {
@@ -5571,6 +5971,13 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
         on_cage_bars(msg);
         break;
     }
+    case kMsgRotBridge: {
+        if (size < sizeof(MsgRotBridge) || !movers_enabled()) return;
+        MsgRotBridge msg;
+        std::memcpy(&msg, payload, sizeof(msg));
+        on_rot_bridge(msg, from);
+        break;
+    }
     case kMsgBombCaught: {
         if (size < sizeof(MsgBombCaught)) return;
         MsgBombCaught msg;
@@ -5659,7 +6066,9 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
             if (s_pendingMoves[i].used && s_pendingMoves[i].msg.key == msg.key &&
                 s_pendingMoves[i].msg.room == msg.room)
             {
+                const uint8_t catchUp = s_pendingMoves[i].msg.catchUp;
                 s_pendingMoves[i].msg = msg;
+                s_pendingMoves[i].msg.catchUp |= catchUp;
                 return;
             }
         }

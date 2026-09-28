@@ -262,19 +262,21 @@ bool arc_ready(int look) {
     ArcState& state = s_arcs[look];
     const char* arc = look == kLookGold ? kGoldArc : kArc;
     if (state == kArcReady) return true;
-    if (state == kArcFailed) return false;
-    if (state == kArcNone) {
-        state = private_arc_request(arc) ? kArcMounting : kArcFailed;
-        if (state == kArcFailed) {
-            coop_log::warn("coop_mod: [BEAST] could not start loading {}", arc);
-            return false;
-        }
+
+    if (state == kArcNone || state == kArcFailed) {
+        if (!private_arc_request(arc)) return false;
+        state = kArcMounting;
     }
     const int ready = private_arc_poll(arc);
     if (ready == 0) return false;
-    state = ready > 0 ? kArcReady : kArcFailed;
-    if (state == kArcFailed) coop_log::warn("coop_mod: [BEAST] {} did not load", arc);
-    return state == kArcReady;
+    if (ready < 0) {
+        private_arc_release(arc);
+        state = kArcFailed;
+        coop_log::warn("coop_mod: [BEAST] {} did not load - trying again shortly", arc);
+        return false;
+    }
+    state = kArcReady;
+    return true;
 }
 
 bool gold_build(Rig& rig) {
