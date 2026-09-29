@@ -1025,10 +1025,16 @@ uint32_t shared_story_bits() {
     return bits;
 }
 
+bool story_flag_takes_now(u16 flag) {
+    if (flag == dSv_event_flag_c::M_023 && !dComIfGs_isDarkClearLV(0)) return false;
+    return true;
+}
+
 void take_shared_story_bits(uint32_t bits) {
     if (bits == 0 || daAlink_getAlinkActorClass() == nullptr || dComIfGp_event_runCheck()) return;
     for (int i = 0; i < static_cast<int>(sizeof(kSharedStoryFlags) / sizeof(kSharedStoryFlags[0])); ++i) {
         if ((bits & (1u << i)) == 0 || dComIfGs_isEventBit(kSharedStoryFlags[i])) continue;
+        if (!story_flag_takes_now(kSharedStoryFlags[i])) continue;
         if (i == 0) {
 
             dComIfGs_onEventBit(kSharedStoryFlags[i]);
@@ -1040,6 +1046,17 @@ void take_shared_story_bits(uint32_t bits) {
                            "next stage load", kSharedStoryFlags[i]);
         }
     }
+}
+
+void repair_early_epona() {
+    if (rando_active() || daAlink_getAlinkActorClass() == nullptr) return;
+    if (!dComIfGs_isEventBit(dSv_event_flag_c::M_023) || dComIfGs_isDarkClearLV(0) ||
+        !dComIfGs_isEventBit(dSv_event_flag_c::M_014)) {
+        return;
+    }
+    dComIfGs_offEventBit(dSv_event_flag_c::M_023);
+    coop_log::info("coop_mod: [STORY] M_023 (tamed Epona) was on before Faron's twilight was cleared "
+                   "- taken back off, so Ordon comes up as the wolf's night village");
 }
 
 void send_presence() {
@@ -1064,12 +1081,15 @@ void send_presence() {
         msg.life = dComIfGs_getLife();
         msg.maxLife = dComIfGs_getMaxLife();
     }
-    const uint32_t storyBits = shared_story_bits();
+
+    const uint32_t storyBits = joinsync_ready_to_share() ? shared_story_bits() : 0;
     msg.storyBits = static_cast<uint8_t>(storyBits & 0xFF);
     coop_net_send(kMsgPresence, &msg, sizeof(msg));
-    MsgSharedStory story{};
-    story.bits = storyBits;
-    coop_net_send(kMsgSharedStory, &story, sizeof(story));
+    if (storyBits != 0) {
+        MsgSharedStory story{};
+        story.bits = storyBits;
+        coop_net_send(kMsgSharedStory, &story, sizeof(story));
+    }
 }
 
 struct LifeGuess {
@@ -1496,6 +1516,10 @@ void features_update() {
         if (++s_memTick % 1200 == 0) coop_log::info("coop_mod: [MEM] {}", coop_mem_status());
     }
     s_devLogging = features_debug_menu();
+    {
+        static uint32_t s_eponaTick = 0;
+        if (++s_eponaTick % 60 == 0) repair_early_epona();
+    }
     found_update();
     voices_update();
     local_skin_colors_update();

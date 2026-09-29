@@ -6,13 +6,9 @@ one player presses host and reads out the room, everyone else types it and press
 only windows has been played. mac, linux, android and ios are built here but untested.
 enemy sync, boss sync and story progress are off by default under unfinished.
 
-this version needs dusklight 2.0.2, and everyone has to update: it only connects to 1.7.6.
+this version needs dusklight 2.0.2, and everyone has to update: it only connects to 1.7.7.
 
 this build:
-- fixed android players not seeing each other: an android host couldn't see the other player (or saw them very laggy), and the other player couldn't see the android host
-- players whose position gets lost on the way now still show up
-- new: co-op > report bug. describe what happened and it sends your log (and everyone you're playing with's log) straight to us, with a code to paste in the discord thread
-- notifications now show in the pause menu, on the title screen and on file select
-- co-op + randomizer: the host/join question comes on the title screen, and joiners get the host's seed picked and started for them
-- co-op + randomizer now works on linux (the seed was never picked up there)
-- fixed coop-crash-trail.txt growing forever next to the game
+- a player joining on a save further along than the host's no longer shares that progress with everyone before they've taken the host's world. this looks like what was emptying ordon village on the wolf's night visit (no rusl, no hawk guy). if your village is already empty, going through a door should bring it back
+- other players should no longer stay invisible when your game is short on memory (their model used to never get built). this may also be behind some of the "can't see the other player" reports
+- report bug now also sends the log from your last run, so reporting after a restart still helps. if someone can't see you, please report while you're still connected so both logs get sent

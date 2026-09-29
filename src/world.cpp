@@ -1769,7 +1769,7 @@ void world_update() {
         return;
     }
 
-    if (coop_on_title_screen()) {
+    if (coop_on_title_screen() || !joinsync_ready_to_share()) {
         s_base.have = false;
         s_heldWorldCount = 0;
         return;
@@ -1829,7 +1829,8 @@ void world_on_connected() {
 
 void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t from) {
     if (!rando_join_sync_allowed()) return;
-    if (coop_on_title_screen()) return;
+
+    if (coop_on_title_screen() || !joinsync_ready_to_share()) return;
     if (type == kMsgWorldSyncRequest) {
         if (size < sizeof(MsgWorldSyncRequest) || !coop_session(kSessDungeon, cfg_bool(s_dungeonVar, true))) return;
         MsgWorldSyncRequest req;

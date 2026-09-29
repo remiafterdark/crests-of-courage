@@ -3657,6 +3657,15 @@ void update_one_puppet(daAlink_c* alink) {
             static_cast<int>(s_pupId));
     }
 
+    if (pup().state == 2 && pup().model == nullptr && !pup().skinDirty && s_puppetFrame % 120 == 0) {
+        static uint32_t s_noBodySaid = 0;
+        if (s_noBodySaid++ % 15 == 0) {
+            coop_log::warn("coop_mod: [PUPPET] player {} has no body - building it again | [MEM] {}",
+                static_cast<int>(s_pupId), coop_mem_status());
+        }
+        pup().skinDirty = true;
+    }
+
     if (pup().skinDirty && pup().state == 2) {
 
         pup().skinDirty = false;

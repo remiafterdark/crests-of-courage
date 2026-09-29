@@ -28,6 +28,8 @@ bool coop_player_unheard(uint8_t playerId);
 
 bool coop_on_title_screen();
 
+bool joinsync_ready_to_share();
+
 void report_register_vars();
 void report_init();
 void report_update();

@@ -227,7 +227,7 @@ void skills_update() {
     if (!in_game()) return;
 
     if (!s_haveEarned) load_earned();
-    if (!coop_net_connected()) return;
+    if (!coop_net_connected() || !joinsync_ready_to_share()) return;
     const uint16_t have = have_mask();
     if (have == 0) return;
     if (have == s_sent && s_tick % kResendTicks != 0) return;

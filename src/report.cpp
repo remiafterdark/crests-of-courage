@@ -320,7 +320,12 @@ void send_report() {
     if (s_sending || s_text.empty()) return;
     flush_to_disk();
     const bool lastRun = s_when == 2;
-    const std::string log = lastRun ? previous_log() : current_log();
+
+    const std::string thisRun = current_log();
+    const std::string lastRunLog = previous_log();
+    const std::string before = "=== the run before this one ===\n" + lastRunLog;
+    const std::string now = "=== this run ===\n" + thisRun;
+    const std::string log = lastRun ? before + "\n" + now : now + "\n" + before;
     const std::string body = build_body("report", "", s_text, kWhen[s_when], log);
     if (!post(body, on_report_sent)) {
         s_status = "Couldn't send it - this build has no network access.";

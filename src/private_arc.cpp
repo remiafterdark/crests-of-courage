@@ -12,6 +12,7 @@
 #include "JSystem/JKernel/JKRExpHeap.h"
 #include "JSystem/JKernel/JKRMemArchive.h"
 
+#include <algorithm>
 #include <chrono>
 #include "JSystem/JKernel/JKRSolidHeap.h"
 #include "JSystem/J3DGraphAnimator/J3DModelData.h"
@@ -42,29 +43,41 @@ void mark_failed(PrivateArc& a) {
 PrivateArc s_arcs[kMaxPrivateArcs];
 
 JKRExpHeap* s_arcHeap = nullptr;
-bool s_arcHeapTried = false;
 const u32 kArcHeapWanted = 40u * 1024u * 1024u;
+const u32 kArcHeapMin = 8u * 1024u * 1024u;
+
+std::chrono::steady_clock::time_point s_arcHeapNextTry{};
+bool s_arcHeapSaidLow = false;
 
 JKRHeap* arc_heap() {
-    if (s_arcHeap != nullptr || s_arcHeapTried) return s_arcHeap;
-    s_arcHeapTried = true;
+    if (s_arcHeap != nullptr) return s_arcHeap;
+    const auto now = std::chrono::steady_clock::now();
+    if (now < s_arcHeapNextTry) return nullptr;
+    s_arcHeapNextTry = now + std::chrono::seconds(5);
     JKRHeap* root = JKRHeap::getRootHeap();
     if (root == nullptr) return nullptr;
     const u32 rootFree = root->getFreeSize();
 
-    u32 size = kArcHeapWanted;
-    if (rootFree < size + 32u * 1024u * 1024u) {
-        size = rootFree > 40u * 1024u * 1024u ? rootFree - 32u * 1024u * 1024u : 0;
+    u32 size = 0;
+    for (u32 reserve : {32u * 1024u * 1024u, 16u * 1024u * 1024u}) {
+        if (rootFree <= reserve) continue;
+        size = std::min(kArcHeapWanted, rootFree - reserve);
+        if (size >= kArcHeapMin) break;
+        size = 0;
     }
-    if (size < 8u * 1024u * 1024u) {
-        coop_log::warn("coop_mod: [ARC] only {} KB free in the root heap - using the game's archive "
-                       "heap as before", rootFree / 1024);
+    if (size < kArcHeapMin) {
+        if (!s_arcHeapSaidLow) {
+            s_arcHeapSaidLow = true;
+            coop_log::warn("coop_mod: [ARC] only {} KB free in the root heap - using the game's "
+                           "archive heap until there is room", rootFree / 1024);
+        }
         return nullptr;
     }
     s_arcHeap = JKRExpHeap::create(size, root, false);
     if (s_arcHeap != nullptr) {
         s_arcHeap->setName("CoopArcHeap");
-        coop_log::info("coop_mod: [ARC] {} MB of our own for other players' archives", size >> 20);
+        coop_log::info("coop_mod: [ARC] {} MB of our own for other players' archives ({} KB free "
+                       "in the root heap)", size >> 20, rootFree / 1024);
     }
     return s_arcHeap;
 }

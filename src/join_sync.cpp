@@ -467,6 +467,10 @@ std::string joinsync_backup_summary() {
            ". " + std::to_string(all.size()) + " kept. The oldest is your first one.";
 }
 
+bool joinsync_ready_to_share() {
+    return coop_net_is_host() || s_joinerApplied;
+}
+
 void joinsync_on_connected() {
     s_session = PendingSession{};
     for (int i = 0; i < kCoopMaxPlayers; ++i) s_hostSentTo[i] = false;

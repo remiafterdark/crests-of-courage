@@ -523,10 +523,12 @@ void ensure_system_heap_capacity() {
     }
 
     if (sysHeap->getFreeSize() < 4 * 1024 * 1024) {
+
+        const u32 kRootMargin = 8 * 1024 * 1024;
         u32 targetSize = 32 * 1024 * 1024;
         u32 rootFree = rootHeap->getFreeSize();
-        if (rootFree < targetSize + 2 * 1024 * 1024) {
-            targetSize = (rootFree > 4 * 1024 * 1024) ? (rootFree - 2 * 1024 * 1024) : 0;
+        if (rootFree < targetSize + kRootMargin) {
+            targetSize = (rootFree > kRootMargin) ? (rootFree - kRootMargin) : 0;
         }
 
         if (targetSize >= 4 * 1024 * 1024) {
