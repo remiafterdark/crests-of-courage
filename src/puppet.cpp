@@ -51,6 +51,7 @@
 #include <cstdlib>
 #include <string>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 
 extern const LogService* svc_log;
@@ -591,13 +592,21 @@ int s_blendTrace = 0;
 void breadcrumb(const char* step) {
 
     static std::ofstream file;
+    static size_t written = 0;
+    const size_t kCap = 2u * 1024u * 1024u;
+    if (file.is_open() && written > kCap) file.close();
     if (!file.is_open()) {
 
-        file.open("coop-crash-trail.txt", std::ios::app);
+        std::error_code ec;
+        const auto size = std::filesystem::file_size("coop-crash-trail.txt", ec);
+        const bool fresh = written > kCap || (!ec && size > kCap);
+        file.open("coop-crash-trail.txt", fresh ? std::ios::trunc : std::ios::app);
         if (!file.is_open()) return;
+        written = 0;
         file << "--- session start ---" << std::endl;
     }
     file << step << std::endl;
+    written += std::strlen(step) + 1;
 }
 
 void breadcrumb2(const char* step, const char* detail) {
@@ -3574,6 +3583,10 @@ void report_unseen() {
         const char* stage = dComIfGp_getStartStageName();
         const bool sameStage = stage != nullptr && std::strncmp(peer.stage, stage, 8) == 0;
         if (!sameStage && peer.inGame) continue;
+
+        if (!peer.inGame || coop_on_title_screen() || std::strncmp(peer.stage, "F_SP102", 8) == 0) {
+            continue;
+        }
         uint32_t in = 0, stale = 0, unknown = 0;
         coop_net_snapshot_counts(static_cast<uint8_t>(i), &in, &stale, &unknown);
         coop_log::warn("coop_mod: [UNSEEN] player {} '{}' not drawn for {}s: inGame={} stage='{:.8}' "

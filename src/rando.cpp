@@ -8,9 +8,11 @@
 #include "mods/svc/hook.hpp"
 #include "mods/svc/host.h"
 #include "mods/svc/save.h"
+#include "mods/svc/ui.h"
 
 #include "d/actor/d_a_alink.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -23,7 +25,15 @@ extern const HookService* svc_hook;
 extern const HostService* svc_host;
 extern const GameModeService* svc_game_mode;
 extern const SaveService* svc_save;
+extern const UiService* svc_ui;
 
+#if defined(_WIN32)
+DEFINE_HOOK_SYMBOL("dusk::mods::svc::`anonymous namespace'::ui_pane_add_control",
+    ModResult(ModContext*, UiElementHandle, const UiControlDesc*, UiElementHandle*), RandoUiControl);
+#else
+DEFINE_HOOK_SYMBOL("dusk::mods::svc::(anonymous namespace)::ui_pane_add_control",
+    ModResult(ModContext*, UiElementHandle, const UiControlDesc*, UiElementHandle*), RandoUiControl);
+#endif
 #if defined(_WIN32)
 DEFINE_HOOK_SYMBOL("dusk::mods::svc::`anonymous namespace'::save_set_blob",
     ModResult(ModContext*, const char*, const void*, size_t), RandoSetBlob);
@@ -61,6 +71,10 @@ bool s_intent = false;
 
 bool s_prompted = false;
 int s_loadedTicks = 0;
+
+bool s_titlePrompted = false;
+int s_titleTicks = 0;
+const int kPromptOnTitleTicks = 60;
 const int kPromptAfterLoadTicks = 45;
 uint32_t s_tick = 0;
 
@@ -187,7 +201,7 @@ void write_seed(const std::string& hash, const std::vector<uint8_t>& data) {
     }
     coop_log::info("coop_mod: [RANDO] saved the host's seed '{}' ({} bytes)", hash, data.size());
     coop_notify_c(kNotifyRando, "Got the host's randomizer seed",
-        ("Make a new Randomizer file and pick \"" + hash + "\".").c_str());
+        "Start a new Randomizer file - it will use their seed.");
 }
 
 void capture_seed(const char* name, const void* data, size_t size) {
@@ -247,6 +261,7 @@ void on_set_mode_post(ModContext*, void* args, void*, void*) {
 
 ModResult on_our_mode_activated(void*, ModError*) {
     version_remind();
+    report_hint_arm();
     return MOD_OK;
 }
 
@@ -256,6 +271,8 @@ ModResult on_our_mode_play(void*, ModError*) {
     s_intent = true;
     s_prompted = false;
     s_loadedTicks = 0;
+    s_titlePrompted = false;
+    s_titleTicks = 0;
     forward_to_rando();
     return MOD_OK;
 }
@@ -405,8 +422,8 @@ void on_seed_announced(const MsgRandoSeed& msg) {
         s_forceTries >= 3) {
         s_warnedMismatch = true;
         coop_notify_c(kNotifyRando, "Different randomizer seed",
-            ("The host is on \"" + seed.hash + "\". Make a new Randomizer file with that seed "
-             "to play together.").c_str());
+            ("The host is on \"" + seed.hash + "\". Start a new Randomizer file to play "
+             "together - it will use their seed.").c_str());
     }
 }
 
@@ -438,17 +455,111 @@ void on_chunk(const uint8_t* payload, size_t size) {
     s_incomingHave.clear();
 }
 
+struct SeedPicker {
+    ModContext* ctx = nullptr;
+    UiControlSetFn set = nullptr;
+    void* setData = nullptr;
+    std::vector<std::string> options;
+    UiPressedFn start = nullptr;
+    UiPredicateFn startDisabled = nullptr;
+    void* startData = nullptr;
+    uint32_t tick = 0;
+    bool done = false;
+};
+SeedPicker s_picker;
+
+const uint32_t kPickAfterTicks = 20;
+const uint32_t kPickWithinTicks = 120;
+
+void on_ui_control_post(ModContext*, void* args, void*, void*) {
+    ModContext* ctx = mods::arg<ModContext*>(args, 0);
+    const UiControlDesc* d = mods::arg<const UiControlDesc*>(args, 2);
+    if (ctx == nullptr || ctx == mod_ctx || d == nullptr || d->label == nullptr) return;
+    if (d->kind == UI_CONTROL_SELECT && d->binding == UI_BINDING_CALLBACKS && d->set != nullptr &&
+        d->options != nullptr && std::strcmp(d->label, "Selected Seed") == 0) {
+        s_picker = SeedPicker{};
+        s_picker.ctx = ctx;
+        s_picker.set = d->set;
+        s_picker.setData = d->user_data;
+        for (size_t i = 0; i < d->option_count; ++i) {
+            s_picker.options.emplace_back(d->options[i] != nullptr ? d->options[i] : "");
+        }
+        s_picker.tick = s_tick;
+    } else if (d->kind == UI_CONTROL_BUTTON && d->on_pressed != nullptr && ctx == s_picker.ctx &&
+               std::strcmp(d->label, "Start Randomizer") == 0) {
+        s_picker.start = d->on_pressed;
+        s_picker.startDisabled = d->is_disabled;
+        s_picker.startData = d->user_data;
+    }
+}
+
+void drive_seed_picker() {
+    if (s_picker.ctx == nullptr || s_picker.done) return;
+    const uint32_t age = s_tick - s_picker.tick;
+    if (age < kPickAfterTicks) return;
+    if (age > kPickWithinTicks) {
+        s_picker.done = true;
+        return;
+    }
+    if (!s_intent || !coop_net_connected() || coop_net_is_host() || !in_rando_mode()) {
+        s_picker.done = true;
+        return;
+    }
+    s_picker.done = true;
+    if (s_hostSeed.hash.empty()) {
+        coop_notify_c(kNotifyRando, "Waiting for the host",
+            "They haven't loaded their randomizer file yet. Back out, and start the new file again "
+            "once they have.");
+        return;
+    }
+    const auto it = std::find(s_picker.options.begin(), s_picker.options.end(), s_hostSeed.hash);
+    if (!s_hostSeedFileOk || it == s_picker.options.end()) {
+        coop_notify_c(kNotifyRando, "The host's seed isn't here yet",
+            "Back out, and start the new file again in a moment.");
+        coop_log::info("coop_mod: [RANDO] seed window opened without the host's '{}' in it",
+            s_hostSeed.hash);
+        return;
+    }
+    UiControlValue value = UI_CONTROL_VALUE_INIT;
+    value.int_value = static_cast<int64_t>(it - s_picker.options.begin());
+    s_picker.set(s_picker.ctx, s_picker.setData, &value);
+    coop_log::info("coop_mod: [RANDO] picked the host's seed '{}' in the randomizer's window",
+        s_hostSeed.hash);
+    if (s_picker.start == nullptr ||
+        (s_picker.startDisabled != nullptr && s_picker.startDisabled(s_picker.ctx, s_picker.startData))) {
+        coop_notify_c(kNotifyRando, "Host's seed selected", "Press Start Randomizer.");
+        return;
+    }
+    s_picker.start(s_picker.ctx, s_picker.startData);
+    coop_log::info("coop_mod: [RANDO] started the new file on it");
+    coop_notify_c(kNotifyRando, "Playing the host's seed", ("\"" + s_hostSeed.hash + "\"").c_str());
+}
+
+}
+
+template <class Entry>
+void target_or(void* fallback) {
+    if (Entry::target == nullptr && Entry::resolved_target() == nullptr && fallback != nullptr) {
+        Entry::target = fallback;
+    }
 }
 
 void rando_init() {
     if (svc_hook == nullptr) return;
+    if (svc_save != nullptr) {
+        target_or<RandoSetBlob>(reinterpret_cast<void*>(svc_save->set_blob));
+        target_or<RandoGetBlob>(reinterpret_cast<void*>(svc_save->get_blob));
+    }
+    if (svc_ui != nullptr) target_or<RandoUiControl>(reinterpret_cast<void*>(svc_ui->pane_add_control));
     bool set = false;
     bool get = false;
     set = mods::hook::add_pre<RandoSetBlob>(on_set_blob_pre) == MOD_OK;
     get = mods::hook::add_post<RandoGetBlob>(on_get_blob_post) == MOD_OK;
     const bool mode = mods::hook::add_post<RandoSetModeHook>(on_set_mode_post) == MOD_OK;
-    coop_log::info("coop_mod: [RANDO] seed watch {}, mode watch {}",
-        set && get ? "attached" : "FAILED", mode ? "attached" : "FAILED");
+    const bool ui = mods::hook::add_post<RandoUiControl>(on_ui_control_post) == MOD_OK;
+    coop_log::info("coop_mod: [RANDO] seed watch {}, mode watch {}, seed picker {}",
+        set && get ? "attached" : "FAILED", mode ? "attached" : "FAILED",
+        ui ? "attached" : "FAILED");
     resolve_once();
 }
 
@@ -456,7 +567,16 @@ void rando_update() {
     ++s_tick;
     resolve_once();
     if (!s_registered && s_tick % 30 == 0 && rando_installed()) register_our_mode();
-    if (s_intent && !s_prompted && in_rando_mode()) {
+    if (s_intent && !s_titlePrompted && in_rando_mode()) {
+        if (!coop_on_title_screen()) {
+            s_titleTicks = 0;
+        } else if (++s_titleTicks >= kPromptOnTitleTicks) {
+            s_titlePrompted = true;
+            if (!coop_net_connected() && !coop_net_connecting()) game_mode_prompt_connect();
+        }
+    }
+    drive_seed_picker();
+    if (s_intent && !s_prompted && in_rando_mode() && !coop_on_title_screen()) {
         if (daAlink_getAlinkActorClass() == nullptr) {
             s_loadedTicks = 0;
         } else if (++s_loadedTicks >= kPromptAfterLoadTicks) {

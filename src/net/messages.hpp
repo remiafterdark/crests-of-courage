@@ -111,6 +111,24 @@ enum CoopMsgType : uint8_t {
     kMsgBombCaught = 66,
     kMsgCageBars = 67,
     kMsgRotBridge = 68,
+    kMsgSnapWant = 69,
+    kMsgSnapStream = 70,
+    kMsgLogRequest = 71,
+};
+
+struct MsgSnapWant {
+    uint8_t target;
+    uint8_t want;
+    uint8_t pad[2];
+};
+
+struct MsgSnapStreamHead {
+    uint8_t to;
+    uint8_t pad[3];
+};
+
+struct MsgLogRequest {
+    char code[12];
 };
 
 struct MsgCageBars {

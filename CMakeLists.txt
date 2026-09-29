@@ -59,8 +59,15 @@ add_mod(coop_mod
              src/game_mode.cpp
              src/horses.cpp
              src/version.cpp
+             src/report.cpp
     MOD_JSON mod.json
 )
+
+if (APPLE)
+    add_custom_command(TARGET coop_mod POST_BUILD
+        COMMAND /usr/bin/codesign --force --sign - "$<TARGET_FILE:coop_mod>"
+        VERBATIM)
+endif ()
 
 if(MSVC)
     target_compile_options(coop_mod PRIVATE /Zc:__cplusplus)

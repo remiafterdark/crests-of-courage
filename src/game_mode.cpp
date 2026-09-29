@@ -72,6 +72,7 @@ ModResult build_new_save_tab(
 
 ModResult open_connect_window(GameModeNewSaveState* state, ModError* outError) {
     version_remind();
+    report_hint_arm();
     if (svc_ui == nullptr) {
 
         if (state != nullptr) *state = GAME_MODE_STATE_PROCEED;
@@ -123,6 +124,7 @@ const uint32_t kBlobVersion = 1;
 ModResult on_activated(void*, ModError*) {
     s_active = true;
     version_remind();
+    report_hint_arm();
     coop_log::info("coop_mod: [MODE] co-op mode active - this file is its own, single-player saves"
                    " are not touched");
     return MOD_OK;

@@ -3,6 +3,7 @@
 #include "util.hpp"
 
 #include "mods/svc/config.h"
+#include "mods/svc/ui.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -24,6 +25,18 @@ bool coop_world_stalled(uint8_t playerId);
 bool coop_player_paused(uint8_t playerId);
 
 bool coop_player_unheard(uint8_t playerId);
+
+bool coop_on_title_screen();
+
+void report_register_vars();
+void report_init();
+void report_update();
+void report_hint_update();
+
+void report_hint_arm();
+void report_on_message(const uint8_t* payload, size_t size, uint8_t from);
+void report_build_tab(UiElementHandle left, UiElementHandle right);
+void report_update_tab();
 
 bool coop_local_paused();
 void coop_net_set_player_paused(uint8_t playerId, bool paused);

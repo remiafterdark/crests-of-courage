@@ -1,5 +1,7 @@
 
 
+import { handleReport } from "./report.js";
+
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const CODE_LENGTH = 6;
 
@@ -106,6 +108,7 @@ function candidates(info, sameNet = false) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (url.pathname === "/report") return handleReport(request, env);
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("Crests of Courage room server. Nothing to see here.\n");
     }

@@ -52,8 +52,10 @@ std::vector<uint8_t> s_pending;
 uint32_t s_settledTicks = 0;
 
 bool in_gameplay_settled() {
+
     if (daAlink_getAlinkActorClass() == nullptr || dComIfGp_event_runCheck() ||
-        dComIfGp_isEnableNextStage() || dComIfGp_getStageStagInfo() == nullptr)
+        dComIfGp_isEnableNextStage() || dComIfGp_getStageStagInfo() == nullptr ||
+        coop_on_title_screen())
     {
         s_settledTicks = 0;
         return false;

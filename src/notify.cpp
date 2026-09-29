@@ -5,6 +5,7 @@
 #include "util.hpp"
 
 #include "mods/svc/config.h"
+#include "mods/svc/hook.hpp"
 #include "mods/svc/ui.h"
 
 #include "JSystem/J2DGraph/J2DOrthoGraph.h"
@@ -25,7 +26,11 @@
 extern const ConfigService* svc_config;
 extern const UiService* svc_ui;
 
+DEFINE_HOOK(&dComIfGd_draw2DXlu, NotifyDraw2DXluHook);
+
 namespace {
+
+bool s_drawHooked = false;
 
 ConfigVarHandle s_onVar = 0;
 ConfigVarHandle s_kindVar[kNotifyKinds] = {};
@@ -281,6 +286,8 @@ ConfigVarHandle register_int(const char* name, int64_t fallback) {
 
 }
 
+static void on_draw2DXlu_post(ModContext*, void*, void*, void*);
+
 void notify_register_vars(ConfigVarHandle itemsVar) {
     if (svc_config == nullptr) return;
     s_onVar = register_bool("notify_on", true);
@@ -328,6 +335,9 @@ void notify_register_vars(ConfigVarHandle itemsVar) {
         nullptr, nullptr);
     s_engineVar = register_bool("notify_use_dusklight", false);
     s_testVar = register_int("debug_notify_test_ticks", 0);
+    s_drawHooked = mods::hook::add_post<NotifyDraw2DXluHook>(on_draw2DXlu_post) == MOD_OK;
+    coop_log::info("coop_mod: [NOTIFY] {}", s_drawHooked ? "drawn on the 2D pass, every scene"
+                                                         : "2D pass hook failed - play only");
 }
 
 void coop_notify(NotifyKind kind, const std::string& title, const std::string& body,
@@ -341,7 +351,8 @@ void coop_notify(NotifyKind kind, const std::string& title, const std::string& b
 
     const uint32_t ms = durationMs != 0 ? durationMs : static_cast<uint32_t>(seconds * 1000);
 
-    if (cfg_bool(s_engineVar, false) || daAlink_getAlinkActorClass() == nullptr) {
+    if (cfg_bool(s_engineVar, false) ||
+        (!s_drawHooked && daAlink_getAlinkActorClass() == nullptr)) {
         static int s_saidEngine = 0;
         if (s_saidEngine++ < 3) {
             coop_log::info("coop_mod: [NOTIFY] '{}' to Dusklight's toast - {}", title,
@@ -394,7 +405,7 @@ void feed_preview() {
     while (s_notes.size() > kNotesKept) s_notes.pop_front();
 }
 
-void notify_queue() {
+static void notify_tick() {
     feed_preview();
 
     if (s_testVar != 0 && cfg_int(s_testVar, 0) > 0 && s_testTicks <= static_cast<uint32_t>(cfg_int(s_testVar, 0))) {
@@ -408,6 +419,16 @@ void notify_queue() {
                                  now - n.shownAt > std::chrono::milliseconds(n.lifeMs);
                       }),
         s_notes.end());
+}
+
+static void on_draw2DXlu_post(ModContext*, void*, void*, void*) {
+    notify_tick();
+    s_dlst.draw();
+}
+
+void notify_queue() {
+    if (s_drawHooked) return;
+    notify_tick();
     dDlst_list_c& lists = g_dComIfG_gameInfo.drawlist;
     for (dDlst_base_c** it = lists.mp2DXluDrawLists; it < lists.mp2DXluStart; ++it) {
         if (*it == &s_dlst) return;

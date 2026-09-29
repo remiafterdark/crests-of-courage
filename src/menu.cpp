@@ -796,7 +796,7 @@ ModResult group_messages(ModContext*, UiElementHandle pane, void*, ModError*) {
         "When the batch has gone, send it again - over and over, until you turn this off.",
         notify_preview_var());
     add_toggle(pane, "Use Dusklight's notifications instead", notify_engine_var(),
-        "Its own pop-ups: one at a time, no stacking. The title screen always uses them.", on);
+        "Its own pop-ups: one at a time, no stacking.", on);
 
     svc_ui->pane_add_section(mod_ctx, pane, "What to show");
     add_toggle(pane, "Items they find", features_vars().notifyItems,
@@ -1184,11 +1184,12 @@ void build_debug(UiElementHandle pane) {
         "wolf-sized. Other players see him too.");
     add_button(pane, "Test notifications", [](ModContext*, void*) { notify_debug_test(); },
         nullptr, "One of every kind at once, to see how they stack, where they sit and how long "
-        "they stay. Load a save first - on the title screen they go to Dusklight's own.");
+        "they stay.");
 }
 
 ModResult build_panel(ModContext*, UiElementHandle pane, void*, ModError*) {
     version_remind();
+    report_hint_arm();
     s_panel = SurfaceHandles{};
     UiControlDesc open = UI_CONTROL_DESC_INIT;
     open.kind = UI_CONTROL_GROUP;
@@ -1458,11 +1459,12 @@ select-button.group-button key {
 
 void open_window() {
     version_remind();
+    report_hint_arm();
     if (s_windowHandle != 0) return;
 
-    const size_t tabCount = features_debug_menu() ? 7 : 6;
-    UiTabDesc tabs[7] = {UI_TAB_DESC_INIT, UI_TAB_DESC_INIT, UI_TAB_DESC_INIT, UI_TAB_DESC_INIT,
-        UI_TAB_DESC_INIT, UI_TAB_DESC_INIT, UI_TAB_DESC_INIT};
+    const size_t tabCount = features_debug_menu() ? 8 : 7;
+    UiTabDesc tabs[8] = {UI_TAB_DESC_INIT, UI_TAB_DESC_INIT, UI_TAB_DESC_INIT, UI_TAB_DESC_INIT,
+        UI_TAB_DESC_INIT, UI_TAB_DESC_INIT, UI_TAB_DESC_INIT, UI_TAB_DESC_INIT};
     tabs[0].title = "Connect";
     tabs[0].build = tab_connect;
     tabs[0].update = update_window;
@@ -1483,9 +1485,20 @@ void open_window() {
     tabs[5].title = "Network";
     tabs[5].build = tab_network;
     tabs[5].update = update_window;
-    tabs[6].title = "Debug";
-    tabs[6].build = tab_debug;
-    tabs[6].update = update_window;
+
+    tabs[6].title = "Report Bug";
+    tabs[6].build = [](ModContext*, UiWindowHandle, UiElementHandle left, UiElementHandle right,
+                         void*, ModError*) -> ModResult {
+        report_build_tab(left, right);
+        return MOD_OK;
+    };
+    tabs[6].update = [](ModContext*, void*, ModError*) -> ModResult {
+        report_update_tab();
+        return MOD_OK;
+    };
+    tabs[7].title = "Debug";
+    tabs[7].build = tab_debug;
+    tabs[7].update = update_window;
 
     UiWindowDesc desc = UI_WINDOW_DESC_INIT;
     desc.tabs = tabs;

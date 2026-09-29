@@ -1666,6 +1666,10 @@ std::string features_peer_name(uint8_t id) {
     return peer_slot(id).name;
 }
 
+bool coop_on_title_screen() {
+    return on_title_screen();
+}
+
 void features_toast(const char* title, const char* body) {
     toast(title != nullptr ? title : "", body != nullptr ? body : "");
 }
@@ -1688,6 +1692,13 @@ bool worth_crumbing(uint8_t type) {
     case kMsgSkipVote:
     case kMsgPause:
     case kMsgCarry:
+
+    case kMsgPresence:
+    case kMsgTime:
+    case kMsgSessionSettings:
+    case kMsgSharedStory:
+    case kMsgWorldDigest:
+    case kMsgRandoSeed:
         return false;
     default:
         return true;
@@ -1719,6 +1730,7 @@ void features_on_message(uint8_t type, const uint8_t* payload, size_t size, uint
     case kMsgHello: on_hello(payload, size, from); break;
     case kMsgSkinChoices: on_skin_choices(payload, size, from); break;
     case kMsgSkinRequest: send_skin_choices(); break;
+    case kMsgLogRequest: report_on_message(payload, size, from); break;
     case kMsgPause:
         if (size >= sizeof(MsgPause)) coop_net_set_player_paused(from, payload[0] != 0);
         break;
