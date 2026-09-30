@@ -65,6 +65,17 @@ JKRHeap* arc_heap() {
         if (size >= kArcHeapMin) break;
         size = 0;
     }
+
+    JKRHeap* parent = root;
+    if (size < kArcHeapMin) {
+        JKRHeap* game = mDoExt_getGameHeap();
+        const u32 gameFree = game != nullptr ? game->getFreeSize() : 0;
+        const u32 kGameReserve = 40u * 1024u * 1024u;
+        if (gameFree > kGameReserve + kArcHeapMin) {
+            size = std::min(24u * 1024u * 1024u, gameFree - kGameReserve);
+            parent = game;
+        }
+    }
     if (size < kArcHeapMin) {
         if (!s_arcHeapSaidLow) {
             s_arcHeapSaidLow = true;
@@ -73,11 +84,12 @@ JKRHeap* arc_heap() {
         }
         return nullptr;
     }
-    s_arcHeap = JKRExpHeap::create(size, root, false);
+    s_arcHeap = JKRExpHeap::create(size, parent, false);
     if (s_arcHeap != nullptr) {
         s_arcHeap->setName("CoopArcHeap");
-        coop_log::info("coop_mod: [ARC] {} MB of our own for other players' archives ({} KB free "
-                       "in the root heap)", size >> 20, rootFree / 1024);
+        coop_log::info("coop_mod: [ARC] {} MB of our own for other players' archives, from the {} "
+                       "heap ({} KB free in the root heap)", size >> 20,
+            parent == root ? "root" : "game", rootFree / 1024);
     }
     return s_arcHeap;
 }
@@ -173,6 +185,16 @@ bool private_arc_request(const char* name) {
     }
     if (slot == nullptr) {
         coop_log::warn("coop_mod: [ARC] no free slot for a private mount of '{}'", name);
+        return false;
+    }
+
+    if (JKRHeap* heap = arc_heap(); heap != nullptr && heap->getFreeSize() < 4u * 1024u * 1024u) {
+        static int s_saidFull = 0;
+        if (s_saidFull++ % 60 == 0) {
+            coop_log::warn("coop_mod: [ARC] not mounting '{}' yet - {} KB left in our heap", name,
+                heap->getFreeSize() / 1024);
+        }
+        if (slot != nullptr && slot->failed) slot->failedAt = std::chrono::steady_clock::now();
         return false;
     }
     PrivateArc& a = *slot;

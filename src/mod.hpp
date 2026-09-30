@@ -697,6 +697,7 @@ std::string joinsync_backup_summary();
 
 void features_reset_sync_baselines();
 void features_toast(const char* title, const char* body);
+void features_leave_after_state_load();
 std::string features_peer_name(uint8_t id);
 
 void ui_init();

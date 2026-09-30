@@ -1853,6 +1853,10 @@ void send_state(EnemyList& list) {
     coop_net_send(kMsgEnemyState, buffer, 1 + count * sizeof(MsgEnemyEntry));
 }
 
+bool down_is_not_dead(fopAc_ac_c* actor) {
+    return actor != nullptr && fopAcM_GetName(actor) == fpcNm_E_S1_e;
+}
+
 void send_gone(int8_t room, uint32_t key) {
     MsgEnemyGone msg{};
     msg.key = key;
@@ -1932,7 +1936,7 @@ void sweep(EnemyList& list, bool host) {
 
         (void)fresh;
 
-        if (t->health > 0 && health <= 0) t->killed = true;
+        if (t->health > 0 && health <= 0 && !down_is_not_dead(actor)) t->killed = true;
         t->health = health;
         if (t->killed) ++t->killedTicks;
     }
@@ -2004,7 +2008,7 @@ void apply_remote(EnemyList& list) {
                 t->goneSent = true;
 
                 if (t->killedTicks > kForceDeleteTicks && !t->deleteAsked && actor->health <= 0 &&
-                    deleteCount < kMaxTracked) {
+                    !down_is_not_dead(actor) && deleteCount < kMaxTracked) {
                     t->deleteAsked = true;
                     toDelete[deleteCount++] = actor;
                 }
@@ -2118,6 +2122,7 @@ void owner_finish_kills(EnemyList& list) {
         if (!we_own(t.room, t.key)) continue;
         fopAc_ac_c* actor = find_local(list, t.room, t.key);
         if (actor != nullptr && actor->health > 0) continue;
+        if (down_is_not_dead(actor)) continue;
         if (actor != nullptr && deleteCount < kMaxTracked) {
             t.deleteAsked = true;
             toDelete[deleteCount++] = actor;
@@ -2630,7 +2635,7 @@ void apply_damage_amount(fopAc_ac_c* actor, int8_t room, uint32_t key, int amoun
     Tracked* t = find_tracked(room, key);
     if (t != nullptr) {
         t->health = actor->health;
-        if (health == 0) t->killed = true;
+        if (health == 0 && !down_is_not_dead(actor)) t->killed = true;
     }
 }
 

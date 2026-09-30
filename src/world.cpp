@@ -430,6 +430,12 @@ int story_hold(dSv_info_c* info, const uint8_t* set, int offset, int size) {
         if (fresh == 0) continue;
         s_storyPending[b] = static_cast<uint8_t>(s_storyPending[b] | fresh);
         added += bit_count(fresh);
+
+        for (int bit = 0; bit < 8; ++bit) {
+            if ((fresh & (1u << bit)) != 0) {
+                coop_log::info("coop_mod: [STORY] waiting to take flag {:#06x}", (b << 8) | (1u << bit));
+            }
+        }
     }
     s_storyPendingBits += added;
     return added;
@@ -596,6 +602,11 @@ void diff_light_drop(dSv_info_c* info) {
     std::memcpy(s_lightDrop.bytes, cur, kLightDropSize);
     coop_log::info("coop_mod: [WORLD] tears of light now {}/{}/{}/{} (flags {:#04x})",
         cur[0], cur[1], cur[2], cur[3], cur[4]);
+}
+
+bool collect_item_only(int i) {
+    if (i == kCollectPohIndex) return true;
+    return rando_active() && (i == 0   || i == 9   || i == 10  );
 }
 
 void diff_collect(dSv_info_c* info) {
@@ -1272,7 +1283,7 @@ void handle_digest(const MsgWorldDigest& msg, uint8_t from) {
 
     const bool eventOk = !storyOn || myEvent == msg.eventHash || msg.storyRules != kStoryRules;
 
-    const bool tmpOk = myTmp == msg.tmpHash || msg.storyRules != kStoryRules;
+    const bool tmpOk = !dungeon_stage(stage) || myTmp == msg.tmpHash || msg.storyRules != kStoryRules;
     if (mine == msg.memoryHash && myDan == msg.danHash && tmpOk &&
         myStatusB == msg.statusBHash && myCollect == msg.collectHash &&
         myLightDrop == msg.lightDropHash && eventOk) {
@@ -1352,7 +1363,14 @@ void answer_sync_request(const MsgWorldSyncRequest& req) {
 
 void merge_full(uint8_t* target, uint8_t* base, const uint8_t* data, int size, bool adopt) {
     for (int i = 0; i < size; ++i) {
-        target[i] = adopt ? data[i] : static_cast<uint8_t>(target[i] | data[i]);
+        if (adopt && base != nullptr) {
+
+            const uint8_t pendingSet = static_cast<uint8_t>(target[i] & ~base[i]);
+            const uint8_t pendingClear = static_cast<uint8_t>(base[i] & ~target[i]);
+            target[i] = static_cast<uint8_t>((data[i] | pendingSet) & ~pendingClear);
+        } else {
+            target[i] = adopt ? data[i] : static_cast<uint8_t>(target[i] | data[i]);
+        }
 
         if (base != nullptr) base[i] = data[i];
     }
@@ -1390,7 +1408,11 @@ void handle_full(const MsgWorldFull& msg) {
         for (int i = 0; i < 8; ++i) newlySet[i] = static_cast<uint8_t>(msg.data[i] & ~mem[i]);
         uint8_t memBefore[kMemSize];
         std::memcpy(memBefore, mem, kMemSize);
+
+        const bool keyPending = baselineValid && mem[kKeyOffset] != s_base.mem[kKeyOffset];
+        const uint8_t ourKeys = mem[kKeyOffset];
         merge_full(mem, baselineValid ? s_base.mem : nullptr, msg.data, kMemSize, true);
+        mem[kKeyOffset] = keyPending ? ourKeys : msg.data[kKeyOffset];
         keep_mem_local(stage, mem, memBefore);
         if (baselineValid) keep_mem_local(stage, s_base.mem, memBefore);
         open_chests_from_bits(newlySet);
@@ -1431,7 +1453,7 @@ void handle_full(const MsgWorldFull& msg) {
         if (msg.size != kCollectSize) return;
         auto* cur = reinterpret_cast<uint8_t*>(&info->getSavedata().getPlayer().getCollect());
         for (int i = 0; i < kCollectSize; ++i) {
-            if (i == kCollectPohIndex) continue;
+            if (collect_item_only(i)) continue;
             cur[i] = static_cast<uint8_t>(cur[i] | msg.data[i]);
 
             if (s_collect.have) s_collect.bytes[i] = static_cast<uint8_t>(s_collect.bytes[i] | msg.data[i]);
@@ -2002,7 +2024,7 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
         if (msg.size != kCollectSize) return;
         auto* cur = reinterpret_cast<uint8_t*>(&info->getSavedata().getPlayer().getCollect());
         for (int i = 0; i < kCollectSize; ++i) {
-            if (i == kCollectPohIndex) continue;
+            if (collect_item_only(i)) continue;
             cur[i] = static_cast<uint8_t>(cur[i] | msg.set[i]);
 
             if (s_collect.have) s_collect.bytes[i] = static_cast<uint8_t>(s_collect.bytes[i] | msg.set[i]);

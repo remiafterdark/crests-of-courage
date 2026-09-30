@@ -16,6 +16,7 @@
 #include "Z2AudioLib/Z2SeMgr.h"
 #include "d/actor/d_a_alink.h"
 #include "d/d_com_inf_game.h"
+#include "d/d_kankyo.h"
 #include "d/d_meter2_info.h"
 #include "d/d_item.h"
 #include "m_Do/m_Do_main.h"
@@ -28,6 +29,14 @@
 #include <string>
 
 bool s_devLogging = false;
+
+DEFINE_HOOK_SYMBOL("dusk::ImGuiStateShare::applyEncodedState", bool(void*, const void*, const void*),
+    StateShareHook);
+static bool s_stateLoaded = false;
+
+static void on_state_share_post(ModContext*, void*, void* retval, void*) {
+    if (retval != nullptr && *static_cast<bool*>(retval)) s_stateLoaded = true;
+}
 
 uint16_t s_hostSession = 0;
 bool s_haveHostSession = false;
@@ -523,6 +532,19 @@ void on_item_given(ModContext*, const ItemGiveInfo* info, void*) {
     coop_log::info("coop_mod: [INV] relayed item {:#x}", info->item);
 }
 
+daAlink_c* s_shieldChangeFor = nullptr;
+
+void finish_shield_change() {
+    if (s_shieldChangeFor == nullptr) return;
+    daAlink_c* alink = daAlink_getAlinkActorClass();
+
+    if (alink != s_shieldChangeFor || alink->mShieldChangeWaitTimer == 0) {
+        s_shieldChangeFor = nullptr;
+        return;
+    }
+    alink->loadShieldModelDVD();
+}
+
 void equip_if_nothing_better(uint8_t item) {
     const uint8_t sword = dComIfGs_getSelectEquipSword();
     const uint8_t shield = dComIfGs_getSelectEquipShield();
@@ -543,7 +565,10 @@ void equip_if_nothing_better(uint8_t item) {
     case dItemNo_HYLIA_SHIELD_e:
         if (shield == dItemNo_NONE_e || (item == dItemNo_SHIELD_e && shield == dItemNo_WOOD_SHIELD_e)) {
             dMeter2Info_setShield(item, false);
-            if (daAlink_c* alink = daAlink_getAlinkActorClass()) alink->setShieldChange();
+            if (daAlink_c* alink = daAlink_getAlinkActorClass()) {
+                alink->setShieldChange();
+                s_shieldChangeFor = alink;
+            }
             coop_log::info("coop_mod: [INV] equipped the {:#x} we were given", item);
         }
         break;
@@ -1009,6 +1034,8 @@ const u16 kSharedStoryFlags[] = {
     dSv_event_flag_c::M_032,
     dSv_event_flag_c::F_0400,
     dSv_event_flag_c::M_035,
+
+    dSv_event_flag_c::M_037,
     dSv_event_flag_c::M_029,
     dSv_event_flag_c::F_0361,
     dSv_event_flag_c::F_0354,
@@ -1057,6 +1084,62 @@ void repair_early_epona() {
     dComIfGs_offEventBit(dSv_event_flag_c::M_023);
     coop_log::info("coop_mod: [STORY] M_023 (tamed Epona) was on before Faron's twilight was cleared "
                    "- taken back off, so Ordon comes up as the wolf's night village");
+}
+
+void repair_rutela_graveyard() {
+    if (daAlink_getAlinkActorClass() == nullptr || dComIfGp_event_runCheck()) return;
+    const char* stage = dComIfGp_getStartStageName();
+    if (stage == nullptr || std::strcmp(stage, "F_SP111") != 0) return;
+    if (dComIfGs_isEventBit(dSv_event_flag_c::M_037) || !dComIfGs_isSwitch(102, 0)) return;
+    dComIfGs_onEventBit(dSv_event_flag_c::M_037);
+    coop_log::info("coop_mod: [STORY] graveyard switch 102 (Rutela done) was on without M_037 - M_037 "
+                   "on; the graveyard comes back as itself at the next stage load");
+    coop_notify_c(kNotifyOther, "Graveyard fixed", "Leave the graveyard and come back in.");
+}
+
+bool in_ordon(const char* stage) {
+    return std::strcmp(stage, "F_SP103") == 0 || std::strcmp(stage, "F_SP104") == 0 ||
+           std::strcmp(stage, "F_SP00") == 0 || std::strcmp(stage, "R_SP01") == 0;
+}
+
+void repair_midna_shadows() {
+    if (daAlink_getAlinkActorClass() == nullptr || dComIfGp_event_runCheck()) return;
+    const char* stage = dComIfGp_getStartStageName();
+    if (stage == nullptr || stage[0] == '\0' || coop_on_title_screen() || in_ordon(stage)) return;
+    if (!dComIfGs_isEventBit(dSv_event_flag_c::F_0800)) return;
+    dComIfGs_offEventBit(dSv_event_flag_c::F_0800);
+    coop_log::info("coop_mod: [STORY] F_0800 (Midna hiding) was still on in {:.8} - off, so she can "
+                   "be called again", stage);
+    coop_notify_c(kNotifyOther, "Midna is back", "She can be called again.");
+}
+
+void log_state() {
+    static char s_lastStage[9] = {};
+    static int s_lastRoom = -2;
+    static uint32_t s_tick = 0;
+    daAlink_c* alink = daAlink_getAlinkActorClass();
+    const char* stage = dComIfGp_getStartStageName();
+    if (alink == nullptr || stage == nullptr || stage[0] == '\0') return;
+    const int room = dComIfGp_roomControl_getStayNo();
+    const bool moved = std::strncmp(stage, s_lastStage, 8) != 0 || room != s_lastRoom;
+    if (!moved && ++s_tick % 1800 != 0) return;
+    s_tick = 0;
+    std::strncpy(s_lastStage, stage, 8);
+    s_lastRoom = room;
+    const int layer = dComIfG_play_c::getLayerNo_common(stage, room, dComIfGp_getStartStageLayer());
+    coop_log::info("coop_mod: [STATE] {:.8} room {} layer {} | {} twilight={} | sword {:#04x} shield "
+                   "{:#04x} ({}) clothes {:#04x} | hearts {}/{} | {} | midna M_009={} M_067={} "
+                   "F_0800={} M_017={}",
+        stage, room, layer, alink->checkWolf() ? "wolf" : "human", dKy_darkworld_check() ? 1 : 0,
+        dComIfGs_getSelectEquipSword(), dComIfGs_getSelectEquipShield(),
+        alink->mShieldArcName != nullptr ? alink->mShieldArcName : "-",
+        dComIfGs_getSelectEquipClothes(), dComIfGs_getLife(), dComIfGs_getMaxLife(),
+        !coop_net_connected() ? "alone" : coop_net_is_host() ? "host" : "joiner",
+
+        dComIfGs_isEventBit(dSv_event_flag_c::M_009) ? 1 : 0,
+        dComIfGs_isEventBit(dSv_event_flag_c::M_067) ? 1 : 0,
+        dComIfGs_isEventBit(dSv_event_flag_c::F_0800) ? 1 : 0,
+        dComIfGs_isEventBit(dSv_event_flag_c::M_017) ? 1 : 0);
 }
 
 void send_presence() {
@@ -1409,6 +1492,21 @@ void features_init() {
         coop_log::warn("coop_mod: item service unavailable - inventory sync disabled");
     }
     colors_init();
+    const bool stateHook = mods::hook::add_post<StateShareHook>(on_state_share_post) == MOD_OK;
+    coop_log::info("coop_mod: [STATE-SHARE] load watch {}", stateHook ? "attached" :
+        "FAILED - loading a Dusklight state while connected would share its whole save");
+}
+
+void features_leave_after_state_load() {
+    if (!s_stateLoaded) return;
+    s_stateLoaded = false;
+    if (!coop_net_connected()) return;
+    coop_log::warn("coop_mod: [STATE-SHARE] a Dusklight state was loaded - leaving co-op so its "
+                   "items and progress are not shared");
+    coop_net_disconnect();
+    features_toast("Left co-op", "You loaded a Dusklight state, which replaces your whole save. "
+                                 "Rejoin to get the shared world back. To reach a player, pick "
+                                 "them in CO-OP > Players.");
 }
 
 static void run_debug_autowarp() {
@@ -1518,8 +1616,14 @@ void features_update() {
     s_devLogging = features_debug_menu();
     {
         static uint32_t s_eponaTick = 0;
-        if (++s_eponaTick % 60 == 0) repair_early_epona();
+        log_state();
+        if (++s_eponaTick % 60 == 0) {
+            repair_early_epona();
+            repair_rutela_graveyard();
+            repair_midna_shadows();
+        }
     }
+    finish_shield_change();
     found_update();
     voices_update();
     local_skin_colors_update();

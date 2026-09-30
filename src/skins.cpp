@@ -115,6 +115,8 @@ const EquipSlotFile kEquipSlotFiles[] = {
     {"al_podm.bmd", kSkinChoiceMasterSword},
     {"o_al_swm.bmd", kSkinChoiceMasterSword},
     {"al_sha.bmd", kSkinChoiceHylianShield},
+
+    {"al_shb.bmd", kSkinChoiceOrdonShield},
     {"al_shc.bmd", kSkinChoiceOrdonShield},
 
 };
@@ -579,7 +581,8 @@ const EquipName kEquipNames[] = {
     {"al_swa.bmd", "Ordon Sword"},
     {"al_swm.bmd", "Master Sword"},
     {"al_sha.bmd", "Hylian Shield"},
-    {"al_shc.bmd", "Ordon Shield"},
+    {"al_shb.bmd", "Ordon Shield"},
+    {"al_shc.bmd", "Wooden Shield"},
 };
 
 bool skins_ships_equipment_file(const char* name, const char* file);

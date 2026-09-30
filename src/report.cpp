@@ -22,6 +22,8 @@
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <vector>
+#include <algorithm>
 
 #if defined(__ANDROID__)
 #include <sys/system_properties.h>
@@ -63,12 +65,50 @@ std::string current_log() {
     return out;
 }
 
-std::string previous_log() {
-    std::ifstream in(log_dir() / "coop-log-1.txt", std::ios::binary);
-    if (!in) return "(no log from the previous run)\n";
+std::string previous_log(int back = 1, size_t keep = kKeepBytes) {
+    std::ifstream in(log_dir() / ("coop-log-" + std::to_string(back) + ".txt"), std::ios::binary);
+    if (!in) return "(no log from that run)\n";
     std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    if (all.size() > kKeepBytes) all.erase(0, all.size() - kKeepBytes);
+    if (all.size() > keep) all.erase(0, all.size() - keep);
     return all;
+}
+
+std::string crash_trail_tail(size_t keep = 16u * 1024u) {
+    std::ifstream in("coop-crash-trail.txt", std::ios::binary);
+    if (!in) return "(no crash trail)\n";
+    std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (all.size() > keep) {
+        all.erase(0, all.size() - keep);
+        const size_t nl = all.find('\n');
+        if (nl != std::string::npos) all.erase(0, nl + 1);
+    }
+    return all;
+}
+
+std::string engine_log_before(size_t keep = 48u * 1024u) {
+    const std::filesystem::path data = log_dir();
+    if (data.empty()) return "(no engine log)\n";
+    std::error_code ec;
+    const std::filesystem::path logs = data.parent_path().parent_path() / "logs";
+    std::vector<std::filesystem::path> runs;
+    for (const auto& e : std::filesystem::directory_iterator(logs, ec)) {
+        const std::string name = e.path().filename().string();
+        if (name.rfind("dusklight-", 0) == 0 && e.path().extension() == ".log") runs.push_back(e.path());
+    }
+    if (runs.size() < 2) return "(no engine log from that run)\n";
+    std::sort(runs.begin(), runs.end());
+    std::ifstream in(runs[runs.size() - 2], std::ios::binary);
+    if (!in) return "(no engine log from that run)\n";
+    std::string out;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.find("Loading Resource") != std::string::npos) continue;
+        out += line;
+        out += '\n';
+        if (out.size() > 4 * keep) out.erase(0, out.size() - keep);
+    }
+    if (out.size() > keep) out.erase(0, out.size() - keep);
+    return out;
 }
 
 std::ofstream s_file;
@@ -325,7 +365,11 @@ void send_report() {
     const std::string lastRunLog = previous_log();
     const std::string before = "=== the run before this one ===\n" + lastRunLog;
     const std::string now = "=== this run ===\n" + thisRun;
-    const std::string log = lastRun ? before + "\n" + now : now + "\n" + before;
+    std::string log = lastRun ? before + "\n" + now : now + "\n" + before;
+
+    if (lastRun) log += "\n=== two runs before this one ===\n" + previous_log(2, 250u * 1024u);
+    if (lastRun) log += "\n=== crash trail, last lines ===\n" + crash_trail_tail();
+    if (lastRun) log += "\n=== dusklight's own log, the run before ===\n" + engine_log_before();
     const std::string body = build_body("report", "", s_text, kWhen[s_when], log);
     if (!post(body, on_report_sent)) {
         s_status = "Couldn't send it - this build has no network access.";
@@ -376,7 +420,12 @@ void report_init() {
 
 void report_update() {
     ++s_tick;
-    if (s_tick % 300 == 0) flush_to_disk();
+
+    static char s_stage[8] = {};
+    const char* stage = dComIfGp_getStartStageName();
+    const bool newStage = stage != nullptr && std::strncmp(stage, s_stage, sizeof(s_stage)) != 0;
+    if (newStage) std::strncpy(s_stage, stage, sizeof(s_stage));
+    if (newStage || s_tick % 300 == 0) flush_to_disk();
 }
 
 void report_on_message(const uint8_t* payload, size_t size, uint8_t from) {

@@ -2809,7 +2809,8 @@ J3DModelData* local_skin_for(const char* arcName, const char* resName) {
         return data;
     }
 
-    static const char* const kEquipmentArcs[] = {"Alink", "AlAnm", "HyShd", "SWShd", "MstrSword"};
+    static const char* const kEquipmentArcs[] = {"Alink", "AlAnm", "HyShd", "SWShd", "CWShd",
+        "MstrSword"};
     for (const char* arc : kEquipmentArcs) {
         if (std::strcmp(arc, arcName) != 0) continue;
         J3DModelData* data = guard_skin_data(skins_local_equipment_data(resName), resName);
@@ -2837,6 +2838,7 @@ const char* equipment_arc_for_file(const char* file) {
     if (file == nullptr) return "Alink";
     if (std::strcmp(file, "al_sha.bmd") == 0) return "HyShd";
     if (std::strcmp(file, "al_shc.bmd") == 0) return "SWShd";
+    if (std::strcmp(file, "al_shb.bmd") == 0) return "CWShd";
     if (std::strcmp(file, "o_al_swm.bmd") == 0) return "MstrSword";
     return "Alink";
 }
@@ -3587,16 +3589,21 @@ void report_unseen() {
         if (!peer.inGame || coop_on_title_screen() || std::strncmp(peer.stage, "F_SP102", 8) == 0) {
             continue;
         }
+
+        daAlink_c* me = daAlink_getAlinkActorClass();
+        if (me != nullptr && local_in_hiding_event(me)) continue;
+        const int room = q.peerRoom;
+        const bool roomShown = !(room >= 0 && room < 64 && !dComIfGp_roomControl_checkRoomDisp(room));
         uint32_t in = 0, stale = 0, unknown = 0;
         coop_net_snapshot_counts(static_cast<uint8_t>(i), &in, &stale, &unknown);
         coop_log::warn("coop_mod: [UNSEEN] player {} '{}' not drawn for {}s: inGame={} stage='{:.8}' "
                        "visible={} snapshots in={} old={} applied={} notHere={} unknownAddr={} "
-                       "lastPos={}f ago hidden={} state={} outfit={} arc='{}' model={}",
+                       "lastPos={}f ago hidden={} state={} outfit={} arc='{}' model={} theirRoom={} shownHere={}",
             i, peer.name, (s_puppetFrame - q.drawnFrame) / 60, peer.inGame ? 1 : 0, peer.stage,
             q.peerVisible ? 1 : 0, in, stale, q.snapsApplied, q.snapsNotHere, unknown,
             s_puppetFrame - q.snapFrame, (q.combat & kSnapHidden) != 0 ? 1 : 0,
             static_cast<int>(q.state), static_cast<int>(q.outfit), q.heldArc,
-            q.model != nullptr ? 1 : 0);
+            q.model != nullptr ? 1 : 0, room, roomShown ? 1 : 0);
     }
 }
 
@@ -3921,6 +3928,11 @@ void puppet_hook_on_network_snapshot(uint8_t playerId, float x, float y, float z
     pup().swordJoint = equipment.swordJoint;
     pup().sheathJoint = equipment.sheathJoint;
     pup().shieldJoint = equipment.shieldJoint;
+    if (std::strncmp(pup().wantShieldArc, equipment.shieldArc, sizeof(pup().wantShieldArc) - 1) != 0) {
+        coop_log::info("coop_mod: [EQUIP] player {} shield archive '{:.15}' (sword {}, shield shown {})",
+            static_cast<int>(s_pupId), equipment.shieldArc, static_cast<int>(equipment.sword),
+            static_cast<int>(equipment.shieldVisible));
+    }
     std::strncpy(pup().wantShieldArc, equipment.shieldArc,
         sizeof(pup().wantShieldArc) - 1);
     pup().wantShieldArc[sizeof(pup().wantShieldArc) - 1] = '\0';
@@ -4040,6 +4052,8 @@ const char* shield_file_for_arc(const char* arc) {
     if (arc == nullptr || arc[0] == '\0') return nullptr;
     if (std::strcmp(arc, "HyShd") == 0) return "al_sha.bmd";
     if (std::strcmp(arc, "SWShd") == 0) return "al_shc.bmd";
+
+    if (std::strcmp(arc, "CWShd") == 0) return "al_shb.bmd";
     return nullptr;
 }
 
@@ -4511,6 +4525,16 @@ void sync_equipment_models() {
 
             pup().shieldModel = puppet_private_part_from(pup().wantShieldArc,
                 shield_file_for_arc(pup().wantShieldArc), cXyz(1.0f, 1.0f, 1.0f));
+            if (pup().shieldModel == nullptr) {
+                static char s_saidArc[kMaxPuppets][16] = {};
+                if (std::strncmp(s_saidArc[s_pupId], pup().wantShieldArc, 15) != 0) {
+                    std::strncpy(s_saidArc[s_pupId], pup().wantShieldArc, 15);
+                    const char* file = shield_file_for_arc(pup().wantShieldArc);
+                    coop_log::warn("coop_mod: [EQUIP] player {}'s shield did not build from '{}' "
+                                   "(file {})", static_cast<int>(s_pupId), pup().wantShieldArc,
+                        file != nullptr ? file : "unknown");
+                }
+            }
             prep_equipment_model(pup().shieldModel);
             std::strncpy(pup().shieldArc, pup().wantShieldArc, sizeof(pup().shieldArc) - 1);
             coop_log::trace("coop_mod: [DIAG-EQUIP] shield arc='{}' model={:p}",
@@ -4669,6 +4693,26 @@ void draw_puppet_equipment() {
     daAlink_c* localAlink = daAlink_getAlinkActorClass();
     const bool shieldSwapping =
         (localAlink != nullptr) && localAlink->mShieldChangeWaitTimer != 0;
+
+    {
+        static uint32_t s_saidAt[kMaxPuppets] = {};
+        if (pup().wantShield && s_puppetFrame - s_saidAt[s_pupId] >= 600) {
+            s_saidAt[s_pupId] = s_puppetFrame;
+            J3DModelData* body = pup().model != nullptr ? pup().model->getModelData() : nullptr;
+            J3DModelData* sd = pup().shieldModel != nullptr ? pup().shieldModel->getModelData() : nullptr;
+            int hidden = 0;
+            const int mats = sd != nullptr ? sd->getMaterialNum() : 0;
+            for (int m = 0; sd != nullptr && m < mats; ++m) {
+                J3DMaterial* mat = sd->getMaterialNodePointer(static_cast<u16>(m));
+                if (mat != nullptr && mat->getShape() != nullptr && mat->getShape()->checkFlag(J3DShpFlag_Hidden)) ++hidden;
+            }
+            coop_log::info("coop_mod: [EQUIP] player {} shield draw: arc='{}' model={} mats={} hidden={} "
+                           "inHand={} swapping={} shieldJoint={} sheathJoint={} bodyJoints={}",
+                static_cast<int>(s_pupId), pup().shieldArc, pup().shieldModel != nullptr ? 1 : 0, mats,
+                hidden, static_cast<int>(pup().shieldInHand), shieldSwapping ? 1 : 0,
+                pup().shieldJoint, pup().sheathJoint, body != nullptr ? body->getJointNum() : 0);
+        }
+    }
     if (pup().wantShield && !shieldSwapping) {
         if (pup().shieldInHand) {
             draw_equipment_at_joint(pup().shieldModel, pup().shieldJoint);

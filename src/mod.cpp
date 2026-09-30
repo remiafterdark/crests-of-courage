@@ -508,9 +508,16 @@ void handle_tcp_event(const mods::net::Event& event) {
             puppet_hook_request_release();
             break;
         }
-        case NET_EVENT_CLOSED:
-            coop_log::info("coop_mod: socket closed");
+        case NET_EVENT_CLOSED: {
+
+            const int id = link_index_for(event);
+            coop_log::info("coop_mod: socket closed{}", id >= 0 ? " - that player is gone" : "");
+            if (id >= 0) {
+                drop_link(id, "connection closed");
+                puppet_hook_request_release();
+            }
             break;
+        }
         default:
             if (event.error != NET_ERROR_NONE) {
                 mods::log::error("coop_mod: net error: {}", event.message);
@@ -2980,6 +2987,7 @@ void update_backup_route(int i, bool expect) {
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
+    features_leave_after_state_load();
     if (g_autoConnectPending) {
         run_pending_auto_connect();
     }
