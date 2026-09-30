@@ -21,6 +21,8 @@
 #include <fstream>
 #include <cstring>
 #include <unordered_set>
+#include <unordered_map>
+#include <vector>
 
 static const u32 kCoopDifferedDlistFlags = 0x11000284u | J3DDiffFlag_KonstColor | J3DDiffFlag_TexGen;
 
@@ -231,6 +233,39 @@ J3DModel* loadBmdFromArc(const char* arcName, const char* bmdName, cXyz scale) {
 
 std::unordered_set<J3DModelData*> s_looseData;
 
+struct FreshState {
+    std::vector<J3DMaterialAnm*> anms;
+    std::vector<J3DJointCallBack> callbacks;
+    std::vector<J3DMtxCalc*> calcs;
+    std::vector<bool> hidden;
+};
+std::unordered_map<J3DModelData*, FreshState> s_fresh;
+
+std::unordered_set<J3DModelData*> s_worn;
+
+void remember_own_anms(J3DModelData* data) {
+    if (data == nullptr) return;
+    FreshState& f = s_fresh[data];
+    f.anms.assign(data->getMaterialNum(), nullptr);
+    for (u16 i = 0; i < data->getMaterialNum(); ++i) {
+        J3DMaterial* material = data->getMaterialNodePointer(i);
+        if (material != nullptr) f.anms[i] = material->getMaterialAnm();
+    }
+    f.callbacks.assign(data->getJointNum(), nullptr);
+    f.calcs.assign(data->getJointNum(), nullptr);
+    for (u16 i = 0; i < data->getJointNum(); ++i) {
+        J3DJoint* joint = data->getJointNodePointer(i);
+        if (joint == nullptr) continue;
+        f.callbacks[i] = joint->getCallBack();
+        f.calcs[i] = joint->getMtxCalc();
+    }
+    f.hidden.assign(data->getShapeNum(), false);
+    for (u16 i = 0; i < data->getShapeNum(); ++i) {
+        J3DShape* shape = data->getShapeNodePointer(i);
+        if (shape != nullptr) f.hidden[i] = shape->checkFlag(J3DShpFlag_Visible);
+    }
+}
+
 DEFINE_HOOK(&dRes_info_c::onWarpMaterial, WarpOnHook);
 DEFINE_HOOK(&dRes_info_c::offWarpMaterial, WarpOffHook);
 
@@ -319,7 +354,63 @@ J3DModelData* loadBmdDataFromFile(const char* path) {
     coop_log::info("coop_mod: [models] loaded '{}' ({} joints, {} materials)", path,
         data->getJointNum(), data->getMaterialNum());
     s_looseData.insert(data);
+    remember_own_anms(data);
     return data;
+}
+
+void models_fresh_for_game(J3DModelData* data, const char* what) {
+    const auto it = s_fresh.find(data);
+    if (it == s_fresh.end()) return;
+    const FreshState& f = it->second;
+    if (s_worn.count(data) != 0) return;
+
+    int patterns = 0, foreign = 0, joints = 0, shapes = 0;
+    for (u16 i = 0; i < data->getMaterialNum() && i < f.anms.size(); ++i) {
+        J3DMaterial* material = data->getMaterialNodePointer(i);
+        if (material == nullptr || f.anms[i] == nullptr) continue;
+        if (material->getMaterialAnm() != f.anms[i]) ++foreign;
+        for (int t = 0; t < 8; ++t) {
+            if (f.anms[i]->getTexNoAnm(t).getAnimation() != nullptr) {
+                ++patterns;
+                break;
+            }
+        }
+        f.anms[i]->initialize();
+        material->setMaterialAnm(f.anms[i]);
+    }
+    for (u16 i = 0; i < data->getJointNum() && i < f.calcs.size(); ++i) {
+        J3DJoint* joint = data->getJointNodePointer(i);
+        if (joint == nullptr) continue;
+        if (joint->getMtxCalc() != f.calcs[i] || joint->getCallBack() != f.callbacks[i]) ++joints;
+        joint->setMtxCalc(f.calcs[i]);
+        joint->setCallBack(f.callbacks[i]);
+    }
+    for (u16 i = 0; i < data->getShapeNum() && i < f.hidden.size(); ++i) {
+        J3DShape* shape = data->getShapeNodePointer(i);
+        if (shape == nullptr) continue;
+        if (shape->checkFlag(J3DShpFlag_Visible) != f.hidden[i]) ++shapes;
+        if (f.hidden[i]) shape->hide(); else shape->show();
+    }
+    if (patterns + foreign + joints + shapes > 0) {
+        static int s_said = 0;
+        if (s_said++ < 40) {
+            coop_log::info("coop_mod: [SKIN-ANM] '{}' handed back as loaded - it still had {} texture "
+                           "pattern(s), {} of Link's animation slots, {} joint hook(s), {} part(s) "
+                           "hidden or shown", what != nullptr ? what : "?", patterns, foreign, joints,
+                shapes);
+        }
+    }
+}
+
+void models_note_worn(J3DModelData* const* worn, int count) {
+    s_worn.clear();
+    for (int i = 0; i < count; ++i) {
+        if (worn[i] != nullptr) s_worn.insert(worn[i]);
+    }
+}
+
+void models_link_rebuilding() {
+    s_worn.clear();
 }
 
 J3DModelData* loadBmdDataForLink(const char* path) {
@@ -347,6 +438,7 @@ J3DModelData* loadBmdDataForLink(const char* path) {
         return nullptr;
     }
     coop_log::info("coop_mod: [models] loaded '{}' for you, with the warp material", path);
+    remember_own_anms(data);
     return data;
 }
 

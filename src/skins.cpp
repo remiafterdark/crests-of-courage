@@ -291,7 +291,7 @@ void skins_cycle_update() {
     skins_set_local_all(want.c_str());
 }
 
-const int kOutfitSettleTicks = 240;
+const int kOutfitSettleTicks = 90;
 
 void skins_outfit_cycle_update() {
     const int64_t period = cfg_int(s_outfitCycleVar, 0);
@@ -300,7 +300,10 @@ void skins_outfit_cycle_update() {
     if (alink == nullptr) return;
 
     static int settle = 0;
-    if (alink->mClothesChangeWaitTimer != 0) {
+
+    static daAlink_c* s_lastAlink = nullptr;
+    if (alink != s_lastAlink || dComIfGp_isEnableNextStage() || alink->mClothesChangeWaitTimer != 0) {
+        s_lastAlink = alink;
         settle = kOutfitSettleTicks;
         return;
     }

@@ -1,6 +1,7 @@
 
 
 #include "mod.hpp"
+#include "models.hpp"
 #include "net/messages.hpp"
 
 #include "mods/service.hpp"
@@ -1514,12 +1515,13 @@ static void run_debug_autowarp() {
     if (s_vars.debugAutowarp != 0) svc_config->get_int(mod_ctx, s_vars.debugAutowarp, &every);
     if (every <= 0) return;
     static uint32_t ticks = 0;
-    if (daAlink_getAlinkActorClass() == nullptr || dComIfGp_event_runCheck() ||
-        dComIfGp_isEnableNextStage())
-    {
+    daAlink_c* awLink = daAlink_getAlinkActorClass();
+    if (awLink == nullptr || dComIfGp_isEnableNextStage()) {
         ticks = 0;
         return;
     }
+
+    if (dComIfGp_event_runCheck() || awLink->mClothesChangeWaitTimer != 0) return;
     if (++ticks < static_cast<uint32_t>(every)) return;
     ticks = 0;
     const char* stage = dComIfGp_getStartStageName();
@@ -1624,6 +1626,19 @@ void features_update() {
         }
     }
     finish_shield_change();
+
+    if (daAlink_c* me = daAlink_getAlinkActorClass(); me != nullptr && me->mClothesChangeWaitTimer == 0 &&
+        me->mShieldChangeWaitTimer == 0 && !dComIfGp_isEnableNextStage()) {
+        J3DModel* const models[] = {me->mpLinkModel, me->mpLinkFaceModel, me->mpLinkHatModel,
+            me->mpLinkHandModel, me->mpSwAModel, me->mpSwASheathModel, me->mpSwMModel,
+            me->mpSwMSheathModel, me->mShieldModel};
+        J3DModelData* worn[9] = {};
+        int n = 0;
+        for (J3DModel* m : models) {
+            if (m != nullptr) worn[n++] = m->getModelData();
+        }
+        models_note_worn(worn, n);
+    }
     found_update();
     voices_update();
     local_skin_colors_update();
@@ -1729,7 +1744,9 @@ void features_on_roster_changed() {
         }
         s_peers[i] = CoopPeer{};
         s_peerAnnounced[i] = false;
+        colors_forget_player(static_cast<uint8_t>(i));
     }
+    if ((now & ~s_lastRoster) != 0) colors_resend();
     s_lastRoster = now;
     send_hello();
 }

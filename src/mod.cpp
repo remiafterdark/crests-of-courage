@@ -1429,6 +1429,14 @@ void send_local_snapshot() {
             snapshot.hat[3 + i] = alink->field_0x3040[7 + i];
             snapshot.hat[6 + i] = alink->field_0x3066[i];
         }
+
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                snapshot.magneRot[r * 3 + c] = alink->checkMagneBootsOn()
+                    ? static_cast<int16_t>(alink->mMagneBootMtx[r][c] * kMagneRotFixed)
+                    : 0;
+            }
+        }
         snapshot.swordVisible = daAlink_c::checkSwordGet() ? 1 : 0;
         snapshot.shieldVisible = daAlink_c::checkShieldGet() ? 1 : 0;
         snapshot.swordJoint = alink->mLeftItemJntNo;

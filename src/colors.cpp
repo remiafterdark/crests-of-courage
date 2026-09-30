@@ -862,6 +862,15 @@ void colors_on_connected() {
     for (auto& row : s_peer) for (SlotColor& c : row) c = SlotColor{};
 }
 
+void colors_resend() {
+    s_needSend = true;
+}
+
+void colors_forget_player(uint8_t id) {
+    if (id >= kCoopMaxPlayers) return;
+    for (SlotColor& c : s_peer[id]) c = SlotColor{};
+}
+
 void colors_on_disconnected() {
     for (auto& row : s_peer) for (SlotColor& c : row) c = SlotColor{};
     for (SlotColor& c : s_lastSent) c = SlotColor{};

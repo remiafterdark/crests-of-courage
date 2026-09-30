@@ -337,6 +337,7 @@ struct Puppet {
     s16 hatPitch = 0;
     s16 hat[9] = {};
     bool hatHeard = false;
+    s16 magneRot[9] = {};
     J3DModel* chainLinks[kChainLinkPool] = {};
     int chainLinksUsed = 0;
     J3DModel* rodSegModels[kRodSegments] = {};
@@ -3915,6 +3916,7 @@ void puppet_hook_on_network_snapshot(uint8_t playerId, float x, float y, float z
     pup().bootsVisible = equipment.bootsVisible;
     pup().combat = equipment.combat;
     for (int i = 0; i < 9; ++i) pup().hat[i] = equipment.hat[i];
+    for (int i = 0; i < 9; ++i) pup().magneRot[i] = equipment.magneRot[i];
     pup().hatHeard = true;
     pup().bodyRotX = equipment.bodyRotX;
     pup().bodyRotY = equipment.bodyRotY;
@@ -4106,6 +4108,7 @@ void local_equip_install(J3DModel** slot, LocalEquipSlot& rec) {
         if (rec.ours != nullptr && *slot != rec.ours) {
             J3DModelData* inSlot = (*slot != nullptr) ? (*slot)->getModelData() : nullptr;
             if (!skin_fits_original(want, inSlot, rec.file)) return;
+            models_fresh_for_game(want, rec.file);
             *slot = rec.ours;
             breadcrumb2("local: put our held item back", rec.file);
         }
@@ -4115,6 +4118,7 @@ void local_equip_install(J3DModel** slot, LocalEquipSlot& rec) {
     J3DModelData* theirs = (*slot != nullptr) ? (*slot)->getModelData() : nullptr;
     if (!skin_fits_original(want, theirs, rec.file)) return;
 
+    models_fresh_for_game(want, rec.file);
     J3DModel* built = modelFromData(want, cXyz(1.0f, 1.0f, 1.0f));
     if (built == nullptr) return;
     prep_equipment_model(built);
@@ -4782,6 +4786,15 @@ void render_puppet_body_with_upper_split(J3DModel* model, const cXyz& pos, const
     }
 
     mDoMtx_stack_c::transS(pos.x, pos.y, pos.z);
+
+    if (pup().magneRot[0] != 0 || pup().magneRot[4] != 0 || pup().magneRot[8] != 0) {
+        Mtx magne;
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) magne[r][c] = pup().magneRot[r * 3 + c] / kMagneRotFixed;
+            magne[r][3] = 0.0f;
+        }
+        mDoMtx_stack_c::concat(magne);
+    }
     mDoMtx_stack_c::ZXYrotM(angle.x, angle.y, angle.z);
     model->setBaseScale(cXyz(1.0f, 1.0f, 1.0f));
     model->setBaseTRMtx(mDoMtx_stack_c::get());
@@ -6201,6 +6214,7 @@ void puppet_hook_init() {
             J3DModelData* mine = skins_local_aram_data(index);
             const char* file = skins_aram_file_for_index(index);
             if (mine == nullptr || !skin_fits_original(mine, *result, file)) return;
+            models_fresh_for_game(mine, file);
             *result = mine;
             breadcrumb2("local: held item (first draw)", file);
         });
@@ -6217,6 +6231,7 @@ void puppet_hook_init() {
             J3DModelData* mine = skins_local_aram_data(index);
             const char* file = skins_aram_file_for_index(index);
             if (mine == nullptr || !skin_fits_counts(mine, joints, mats, file)) return HOOK_CONTINUE;
+            models_fresh_for_game(mine, file);
             *result = mine;
             breadcrumb2("local: held item", file);
             return HOOK_SKIP_ORIGINAL;
@@ -6232,6 +6247,8 @@ void puppet_hook_init() {
 
             if (mine != nullptr &&
                 skin_fits_original(mine, static_cast<J3DModelData*>(*result), resName)) {
+
+                models_fresh_for_game(mine, resName);
                 *result = mine;
             }
         });
@@ -6244,7 +6261,10 @@ void puppet_hook_init() {
             if (arc == nullptr || std::strcmp(arc, "Wmdl") != 0) return;
             if (mods::arg<int>(args, 1) != dRes_INDEX_WMDL_BMD_WL_e) return;
             J3DModelData* mine = skins_local_part_data(kSkinOutfitWolf, kSkinPartBody);
-            if (mine != nullptr) *result = mine;
+            if (mine != nullptr) {
+                models_fresh_for_game(mine, "wl.bmd");
+                *result = mine;
+            }
         });
 
     const ModResult dtorResult = mods::hook::add_pre<PuppetAlinkDtorHook>(
@@ -6264,6 +6284,7 @@ void puppet_hook_init() {
 
             s_builtAgainstAlink = nullptr;
             s_builtAgainstArcHeap = nullptr;
+            models_link_rebuilding();
             coop_log::info("coop_mod: [LINKDTOR] player actor going away - released {} puppet(s) "
                             "before its archives are deleted",
                 released);

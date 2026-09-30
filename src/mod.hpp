@@ -465,6 +465,8 @@ bool coop_config_json_value(const char* key, std::string* out);
 void colors_init();
 void colors_update();
 void colors_on_connected();
+void colors_resend();
+void colors_forget_player(uint8_t id);
 void colors_on_disconnected();
 void colors_on_message(const uint8_t* payload, size_t size, uint8_t from);
 int colors_slot_count();
