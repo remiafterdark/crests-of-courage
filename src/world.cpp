@@ -399,11 +399,45 @@ const uint16_t kStoryPrivateFlags[] = {
 };
 const int kStoryRegistersFrom = 0xF1;
 
+enum StoryPolicy : uint8_t { kStoryShare, kStoryLocal, kStoryLayer };
+struct StoryFlagInfo {
+    uint16_t flag;
+    StoryPolicy policy;
+    const char* name;
+};
+const StoryFlagInfo kStoryFlags[] = {
+#include "story_flags.inc"
+};
+const int kStoryFlagCount = static_cast<int>(sizeof(kStoryFlags) / sizeof(kStoryFlags[0]));
+
+const StoryFlagInfo* story_flag_info(uint16_t flag) {
+    int lo = 0;
+    int hi = kStoryFlagCount - 1;
+    while (lo <= hi) {
+        const int mid = (lo + hi) / 2;
+        if (kStoryFlags[mid].flag == flag) return &kStoryFlags[mid];
+        if (kStoryFlags[mid].flag < flag) {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return nullptr;
+}
+
+const char* story_flag_name(uint16_t flag) {
+    const StoryFlagInfo* info = story_flag_info(flag);
+    return info != nullptr ? info->name : "?";
+}
+
 uint8_t story_private(int byte) {
     static uint8_t mask[kEventSize] = {};
     static bool built = false;
     if (!built) {
         for (uint16_t flag : kStoryPrivateFlags) mask[flag >> 8] |= static_cast<uint8_t>(flag);
+        for (const StoryFlagInfo& f : kStoryFlags) {
+            if (f.policy == kStoryLocal) mask[f.flag >> 8] |= static_cast<uint8_t>(f.flag);
+        }
         for (int b = kStoryRegistersFrom; b < kEventSize; ++b) mask[b] = 0xFF;
         built = true;
     }
@@ -446,7 +480,8 @@ int story_hold(dSv_info_c* info, const uint8_t* set, int offset, int size) {
 
         for (int bit = 0; bit < 8; ++bit) {
             if ((fresh & (1u << bit)) != 0) {
-                coop_log::info("coop_mod: [STORY] waiting to take flag {:#06x}", (b << 8) | (1u << bit));
+                const uint16_t flag = static_cast<uint16_t>((b << 8) | (1u << bit));
+                coop_log::info("coop_mod: [STORY] waiting to take flag {:#06x} {}", flag, story_flag_name(flag));
             }
         }
     }
@@ -1687,6 +1722,158 @@ void tbox2_update() {
     fopAcM_Search(collect_open_tbox2, nullptr);
 }
 
+struct BundleTrack {
+    bool have = false;
+    char stage[8] = {};
+    int saveNo = -1;
+    uint8_t ev[kEventSize] = {};
+    uint8_t sw[kMemSwitchEnd - kMemSwitchFirst] = {};
+    uint8_t newEv[kEventSize] = {};
+    uint8_t newSw[kMemSwitchEnd - kMemSwitchFirst] = {};
+    bool open = false;
+};
+BundleTrack s_bundle;
+
+struct PendingBundle {
+    bool used = false;
+    MsgStoryBundle msg{};
+};
+const int kPendingBundles = 64;
+PendingBundle s_pendingBundles[kPendingBundles];
+int s_pendingBundleNext = 0;
+
+void bundle_reset() {
+    s_bundle = BundleTrack{};
+    for (PendingBundle& p : s_pendingBundles) p = PendingBundle{};
+}
+
+void bundle_close() {
+    if (!s_bundle.open) return;
+    s_bundle.open = false;
+    MsgStoryBundle msg{};
+    std::memcpy(msg.stage, s_bundle.stage, sizeof(msg.stage));
+    msg.saveNo = static_cast<int8_t>(s_bundle.saveNo);
+
+    int flags = 0;
+    int switches = 0;
+    for (int b = 0; b < kEventSize; ++b) {
+        for (int bit = 0; bit < 8; ++bit) {
+            if ((s_bundle.newEv[b] & (1u << bit)) == 0) continue;
+            if (flags < kBundleFlags) msg.flags[flags] = static_cast<uint16_t>((b << 8) | (1u << bit));
+            ++flags;
+        }
+    }
+    for (int i = 0; i < kMemSwitchEnd - kMemSwitchFirst; ++i) {
+        for (int bit = 0; bit < 8; ++bit) {
+            if ((s_bundle.newSw[i] & (1u << bit)) == 0) continue;
+            if (switches < kBundleSwitches) {
+                msg.sw[switches] = static_cast<uint8_t>((i / 4) * 32 + (3 - i % 4) * 8 + bit);
+            }
+            ++switches;
+        }
+    }
+    std::memset(s_bundle.newEv, 0, sizeof(s_bundle.newEv));
+    std::memset(s_bundle.newSw, 0, sizeof(s_bundle.newSw));
+    if (flags == 0 || switches == 0 || flags > kBundleFlags || switches > kBundleSwitches) return;
+    msg.flagCount = static_cast<uint8_t>(flags);
+    msg.swCount = static_cast<uint8_t>(switches);
+    coop_net_send(kMsgStoryBundle, &msg, sizeof(msg));
+    char name[9] = {};
+    std::memcpy(name, s_bundle.stage, 8);
+    coop_log::info("coop_mod: [STORY] bundle sent stage={} flags={} first={:#06x} {} switches={} first={}",
+        name, msg.flagCount, msg.flags[0], story_flag_name(msg.flags[0]), msg.swCount, msg.sw[0]);
+}
+
+void bundle_track() {
+    dSv_info_c* info = dComIfGs_getSaveInfo();
+    char stage[8];
+    int saveNo = -1;
+    if (info == nullptr || !current_stage(stage, saveNo)) return;
+    const uint8_t* ev = info->getSavedata().getEvent().mEvent;
+    const uint8_t* sw = mem_bytes(info->getMemory()) + kMemSwitchFirst;
+    if (!s_bundle.have || saveNo != s_bundle.saveNo || std::memcmp(stage, s_bundle.stage, 8) != 0) {
+        bundle_close();
+        s_bundle.have = true;
+        std::memcpy(s_bundle.stage, stage, 8);
+        s_bundle.saveNo = saveNo;
+        std::memcpy(s_bundle.ev, ev, kEventSize);
+        std::memcpy(s_bundle.sw, sw, sizeof(s_bundle.sw));
+        return;
+    }
+    bool fresh = false;
+    for (int b = 0; b < kEventSize; ++b) {
+        const uint8_t on = static_cast<uint8_t>(ev[b] & ~s_bundle.ev[b] & ~story_private(b));
+        if (on != 0) {
+            s_bundle.newEv[b] = static_cast<uint8_t>(s_bundle.newEv[b] | on);
+            fresh = true;
+        }
+        s_bundle.ev[b] = ev[b];
+    }
+    for (int i = 0; i < kMemSwitchEnd - kMemSwitchFirst; ++i) {
+        const uint8_t on = static_cast<uint8_t>(sw[i] & ~s_bundle.sw[i]);
+        if (on != 0 && overworld_switch_byte(stage, kMemSwitchFirst + i)) {
+            s_bundle.newSw[i] = static_cast<uint8_t>(s_bundle.newSw[i] | on);
+            fresh = true;
+        }
+        s_bundle.sw[i] = sw[i];
+    }
+    if (fresh) s_bundle.open = true;
+    if (s_bundle.open && !local_mid_sequence()) bundle_close();
+}
+
+void bundle_on_message(const MsgStoryBundle& msg) {
+    if (msg.saveNo < 0 || msg.saveNo >= dSv_save_c::STAGE_MAX) return;
+    if (msg.flagCount == 0 || msg.flagCount > kBundleFlags || msg.swCount == 0 ||
+        msg.swCount > kBundleSwitches) {
+        return;
+    }
+    PendingBundle& p = s_pendingBundles[s_pendingBundleNext];
+    s_pendingBundleNext = (s_pendingBundleNext + 1) % kPendingBundles;
+    p.used = true;
+    p.msg = msg;
+    coop_log::info("coop_mod: [STORY] bundle held flags={} first={:#06x} {} switches={}", msg.flagCount,
+        msg.flags[0], story_flag_name(msg.flags[0]), msg.swCount);
+}
+
+void bundle_apply_ready() {
+    dSv_info_c* info = dComIfGs_getSaveInfo();
+    char stage[8];
+    int saveNo = -1;
+    if (info == nullptr || !current_stage(stage, saveNo) || local_mid_sequence()) return;
+    for (PendingBundle& p : s_pendingBundles) {
+        if (!p.used) continue;
+        bool ready = true;
+        for (int i = 0; i < p.msg.flagCount && ready; ++i) {
+            ready = dComIfGs_isEventBit(p.msg.flags[i]) != 0;
+        }
+        if (!ready) continue;
+        char name[9] = {};
+        std::memcpy(name, p.msg.stage, 8);
+        const bool sameSlot = saveNo == p.msg.saveNo;
+        uint8_t* target = sameSlot ? mem_bytes(info->getMemory())
+                                   : mem_bytes(info->getSavedata().getSave(p.msg.saveNo));
+        int turned = 0;
+        for (int i = 0; i < p.msg.swCount; ++i) {
+            const uint8_t sw = p.msg.sw[i];
+            if (sw >= 0x80) continue;
+            const int byte = kMemSwitchFirst + 4 * (sw >> 5) + (3 - ((sw & 31) >> 3));
+            if (!overworld_switch_byte(name, byte)) continue;
+            const uint8_t bit = static_cast<uint8_t>(1u << (sw & 7));
+            if ((target[byte] & bit) != 0) continue;
+            target[byte] = static_cast<uint8_t>(target[byte] | bit);
+
+            if (sameSlot && s_bundle.have) {
+                s_bundle.sw[byte - kMemSwitchFirst] =
+                    static_cast<uint8_t>(s_bundle.sw[byte - kMemSwitchFirst] | bit);
+            }
+            ++turned;
+        }
+        coop_log::info("coop_mod: [STORY] bundle applied stage={} flag={:#06x} {} switches on={} live={}",
+            name, p.msg.flags[0], story_flag_name(p.msg.flags[0]), turned, sameSlot);
+        p = PendingBundle{};
+    }
+}
+
 HookAction on_stage_load_pre(ModContext*, void*, void*, void*) {
     dSv_info_c* info = dComIfGs_getSaveInfo();
     if (info == nullptr) return HOOK_CONTINUE;
@@ -1702,6 +1889,18 @@ HookAction on_stage_load_pre(ModContext*, void*, void*, void*) {
     }
     if (s_storyPendingBits == 0) return HOOK_CONTINUE;
     uint8_t* ev = info->getSavedata().getEvent().mEvent;
+
+    for (int b = 0; b < kEventSize; ++b) {
+        const uint8_t fresh = static_cast<uint8_t>(s_storyPending[b] & ~ev[b]);
+        for (int bit = 0; bit < 8 && fresh != 0; ++bit) {
+            if ((fresh & (1u << bit)) == 0) continue;
+            const uint16_t flag = static_cast<uint16_t>((b << 8) | (1u << bit));
+            const StoryFlagInfo* f = story_flag_info(flag);
+            if (f != nullptr && f->policy == kStoryLayer) {
+                coop_log::info("coop_mod: [STORY] layer flag {:#06x} {} taken", flag, f->name);
+            }
+        }
+    }
     for (int b = 0; b < kEventSize; ++b) {
         ev[b] = static_cast<uint8_t>(ev[b] | s_storyPending[b]);
 
@@ -1721,6 +1920,7 @@ void forget_pending_story(ModContext*, uint32_t, void*) {
     std::memset(s_storyPending, 0, sizeof(s_storyPending));
     s_storyPendingBits = 0;
     std::memset(s_statusBPending, 0, sizeof(s_statusBPending));
+    bundle_reset();
 }
 
 }
@@ -1870,6 +2070,10 @@ void world_update() {
         s_replayingWorld = false;
         s_heldWorldCount = 0;
     }
+    if (coop_session(kSessDungeon, cfg_bool(s_dungeonVar, true))) {
+        bundle_track();
+        if (s_tick % 30 == 0) bundle_apply_ready();
+    }
     if (s_tick % 10 == 0) scan();
     if (s_tick % 30 == 0 && daAlink_getAlinkActorClass() != nullptr) retry_pending_chests();
 
@@ -1901,6 +2105,7 @@ bool world_hold_story_flag(uint16_t flag) {
 }
 
 void world_on_connected() {
+    bundle_reset();
     s_base.have = false;
     s_lightDrop.have = false;
     s_collect.have = false;
@@ -1920,6 +2125,13 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
         MsgWorldSyncRequest req;
         std::memcpy(&req, payload, sizeof(req));
         answer_sync_request(req);
+        return;
+    }
+    if (type == kMsgStoryBundle) {
+        if (size < sizeof(MsgStoryBundle) || !coop_session(kSessDungeon, cfg_bool(s_dungeonVar, true))) return;
+        MsgStoryBundle msg;
+        std::memcpy(&msg, payload, sizeof(msg));
+        bundle_on_message(msg);
         return;
     }
     if (type == kMsgShopSoldOut) {

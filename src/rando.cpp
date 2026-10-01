@@ -728,7 +728,8 @@ void rando_update() {
     update_mode_prompts();
     pick_host_seed();
     const bool inGame = daAlink_getAlinkActorClass() != nullptr && !coop_on_title_screen();
-    if (s_tick % 60 == 0) {
+
+    if (s_tick % 60 == 0 && (inGame || coop_on_title_screen())) {
         const bool active = inGame && probe_seed_active();
         if (active != s_seedActive) {
             s_seedActive = active;

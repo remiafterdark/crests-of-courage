@@ -116,6 +116,19 @@ enum CoopMsgType : uint8_t {
     kMsgLogRequest = 71,
     kMsgJoinSyncWant = 72,
     kMsgShopSoldOut = 73,
+    kMsgStoryBundle = 74,
+};
+
+const int kBundleFlags = 8;
+const int kBundleSwitches = 16;
+struct MsgStoryBundle {
+    char stage[8];
+    int8_t saveNo;
+    uint8_t flagCount;
+    uint8_t swCount;
+    uint8_t pad;
+    uint16_t flags[kBundleFlags];
+    uint8_t sw[kBundleSwitches];
 };
 
 struct MsgShopSoldOut {
@@ -584,7 +597,7 @@ struct MsgWorldDigest {
 
     uint8_t storyRules;
 };
-const uint8_t kStoryRules = 2;
+const uint8_t kStoryRules = 3;
 
 struct MsgDeathLink {
     char name[kCoopNameMax];

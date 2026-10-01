@@ -1948,6 +1948,7 @@ void features_on_message(uint8_t type, const uint8_t* payload, size_t size, uint
     case kMsgWorldFull:
     case kMsgTbox2:
     case kMsgShopSoldOut:
+    case kMsgStoryBundle:
     case kMsgWorldDigest: world_on_message(type, payload, size, from); break;
     case kMsgEnemyState:
     case kMsgEnemyGone:
