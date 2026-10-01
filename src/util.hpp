@@ -13,6 +13,8 @@ std::string cfg_string(ConfigVarHandle var, const char* fallback);
 
 bool peer_shares_stage();
 
+int8_t safe_reverb(int room);
+
 int power_class_to_damage(int atp);
 
 class JUTFont;

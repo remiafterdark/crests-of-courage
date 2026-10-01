@@ -688,7 +688,7 @@ void fx_on_sounds(const uint8_t* payload, size_t size, uint8_t from) {
 
     const CoopPeer& peer = features_peer_of(from);
     const s8 reverb = peer.present && peer.inGame
-                          ? dComIfGp_getReverb(static_cast<int>(peer.curRoom))
+                          ? safe_reverb(static_cast<int>(peer.curRoom))
                           : 0;
 
     {
@@ -742,7 +742,7 @@ void fx_play_for(uint8_t playerId, uint32_t soundId, const float* pos) {
         if (voices_local_silent() && voices_is_link_voice(soundId)) return;
         voices_begin_local();
         daAlink_c* alink = daAlink_getAlinkActorClass();
-        if (alink != nullptr) reverb = dComIfGp_getReverb(fopAcM_GetRoomNo(alink));
+        if (alink != nullptr) reverb = safe_reverb(fopAcM_GetRoomNo(alink));
     } else {
         const CoopPeer& peer = features_peer_of(playerId);
         const char* voiceSkin = peer.present ? peer.skins.name[kSkinChoiceVoice] : "";
@@ -750,7 +750,7 @@ void fx_play_for(uint8_t playerId, uint32_t soundId, const float* pos) {
         const bool haveIt = voiceSkin[0] != '\0' &&
                             skins_have(voiceSkin, peer.skins.hash[kSkinChoiceVoice]);
         voices_begin_remote(haveIt ? voiceSkin : nullptr);
-        if (peer.present && peer.inGame) reverb = dComIfGp_getReverb(static_cast<int>(peer.curRoom));
+        if (peer.present && peer.inGame) reverb = safe_reverb(static_cast<int>(peer.curRoom));
     }
     ++s_suppress;
     Vec& at = s_oneShotPos[s_oneShotNext];

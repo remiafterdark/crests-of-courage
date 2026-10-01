@@ -87,3 +87,13 @@ float coop_text_width(JUTFont* font, const char* text, float cell) {
     }
     return width;
 }
+
+int8_t safe_reverb(int room) {
+    roomRead_class* table = dComIfGp_getStageRoom();
+    if (table == nullptr) return 0;
+    const int count = table->num;
+    if (count <= 0) return 0;
+    if (room < 0 || room >= count) room = 0;
+    if (table->m_entries[room] == nullptr) return 0;
+    return dComIfGp_getReverb(room);
+}

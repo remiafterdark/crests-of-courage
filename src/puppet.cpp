@@ -196,6 +196,21 @@ struct PuppetAttachSlot {
     u16 wireIdx = 0xFFFF;
 };
 
+struct MidnaTiredSave {
+    static const int kMax = 32;
+    struct Entry {
+        u16 mat;
+        u8 reg;
+        bool konst;
+        J3DGXColorS10 c;
+        J3DGXColor k;
+    };
+    Entry entries[kMax];
+    int count = 0;
+    bool saved = false;
+    bool applied = false;
+};
+
 struct Puppet {
     int state = 0;
     u8 outfit = kPuppetOutfitDefault;
@@ -313,6 +328,7 @@ struct Puppet {
     int midnaAge = 0;
 
     J3DModel* midnaSolid[4] = {};
+    MidnaTiredSave midnaTired[4];
     J3DModel* midnaShadow[5] = {};
 
     mDoExt_invisibleModel midnaInv[4];
@@ -722,6 +738,7 @@ void release_midna_models() {
         pup().midnaInv[i].mModel = nullptr;
         pup().midnaInvReady[i] = false;
         puppet_free_later(pup().midnaSolid[i]);
+        pup().midnaTired[i] = MidnaTiredSave{};
     }
     for (int i = 0; i < 5; ++i) {
         puppet_free_later(pup().midnaShadow[i]);
@@ -5411,6 +5428,90 @@ void midna_set_hair_colors(J3DModel* model, const MidnaSnapshot& snap, bool isHa
     }
 }
 
+const int kMidnaTiredBrk[4] = {18, 20, 21, 19};
+
+void midna_apply_tired(J3DModel* model, int part, bool on) {
+    MidnaTiredSave& save = pup().midnaTired[part];
+    J3DModelData* data = model != nullptr ? model->getModelData() : nullptr;
+    if (data == nullptr) return;
+    if (!on) {
+        if (!save.applied) return;
+        for (int i = 0; i < save.count; ++i) {
+            const MidnaTiredSave::Entry& e = save.entries[i];
+            J3DMaterial* m = data->getMaterialNodePointer(e.mat);
+            if (m == nullptr) continue;
+            if (e.konst) {
+                m->setTevKColor(e.reg, &e.k);
+            } else {
+                m->setTevColor(e.reg, &e.c);
+            }
+        }
+        save.applied = false;
+        return;
+    }
+    if (pup().heldArc[0] == 0) return;
+    auto* brk = static_cast<J3DAnmTevRegKey*>(dComIfG_getObjectRes(pup().heldArc, kMidnaTiredBrk[part]));
+    if (brk == nullptr) return;
+    const u16 matNum = data->getMaterialNum();
+    if (!save.saved) {
+        brk->searchUpdateMaterialID(data);
+        save.count = 0;
+        for (u16 i = 0; i < brk->getCRegUpdateMaterialNum() && save.count < MidnaTiredSave::kMax; ++i) {
+            const u16 id = brk->getCRegUpdateMaterialID(i);
+            const u8 reg = brk->getAnmCRegKeyTable()[i].mColorId;
+            J3DMaterial* m = id < matNum ? data->getMaterialNodePointer(id) : nullptr;
+            if (m == nullptr || reg >= 4 || m->getTevColor(reg) == nullptr) continue;
+            MidnaTiredSave::Entry& e = save.entries[save.count++];
+            e.mat = id;
+            e.reg = reg;
+            e.konst = false;
+            e.c = *m->getTevColor(reg);
+        }
+        for (u16 i = 0; i < brk->getKRegUpdateMaterialNum() && save.count < MidnaTiredSave::kMax; ++i) {
+            const u16 id = brk->getKRegUpdateMaterialID(i);
+            const u8 reg = brk->getAnmKRegKeyTable()[i].mColorId;
+            J3DMaterial* m = id < matNum ? data->getMaterialNodePointer(id) : nullptr;
+            if (m == nullptr || reg >= 4 || m->getTevKColor(reg) == nullptr) continue;
+            MidnaTiredSave::Entry& e = save.entries[save.count++];
+            e.mat = id;
+            e.reg = reg;
+            e.konst = true;
+            e.k = *m->getTevKColor(reg);
+        }
+        save.saved = true;
+    }
+    brk->setFrame(1.0f);
+    for (u16 i = 0; i < brk->getCRegUpdateMaterialNum(); ++i) {
+        const u16 id = brk->getCRegUpdateMaterialID(i);
+        const u8 reg = brk->getAnmCRegKeyTable()[i].mColorId;
+        J3DMaterial* m = id < matNum ? data->getMaterialNodePointer(id) : nullptr;
+        if (m == nullptr || reg >= 4) continue;
+        GXColorS10 c;
+        brk->getTevColorReg(i, &c);
+        J3DGXColorS10 jc;
+        jc.r = c.r;
+        jc.g = c.g;
+        jc.b = c.b;
+        jc.a = c.a;
+        m->setTevColor(reg, &jc);
+    }
+    for (u16 i = 0; i < brk->getKRegUpdateMaterialNum(); ++i) {
+        const u16 id = brk->getKRegUpdateMaterialID(i);
+        const u8 reg = brk->getAnmKRegKeyTable()[i].mColorId;
+        J3DMaterial* m = id < matNum ? data->getMaterialNodePointer(id) : nullptr;
+        if (m == nullptr || reg >= 4) continue;
+        GXColor k;
+        brk->getTevKonstReg(i, &k);
+        J3DGXColor jk;
+        jk.r = k.r;
+        jk.g = k.g;
+        jk.b = k.b;
+        jk.a = k.a;
+        m->setTevKColor(reg, &jk);
+    }
+    save.applied = true;
+}
+
 void draw_midna_solid(daAlink_c* alink, const MidnaSnapshot& snap, MtxP base,
     const Mtx joints[kMidnaJoints]) {
     J3DModel* body = midna_model(kMidnaPartBody, true);
@@ -5420,12 +5521,14 @@ void draw_midna_solid(daAlink_c* alink, const MidnaSnapshot& snap, MtxP base,
     if (body == nullptr || hands == nullptr || mask == nullptr || hair == nullptr) return;
 
     dKy_tevstr_c* tev = &alink->tevStr;
+    const bool tired = (snap.flags & kMidnaFlagTired) != 0;
 
     {
         PuppetGuard guard;
         if (puppet_guard_begin(body, guard)) {
             midna_pose(body, base, snap.baseScale, joints);
             midna_set_hair_colors(body, snap, false);
+            midna_apply_tired(body, kMidnaPartBody, tired);
             g_env_light.setLightTevColorType_MAJI(body, tev);
             MidnaShapeEdits vis;
 
@@ -5444,6 +5547,7 @@ void draw_midna_solid(daAlink_c* alink, const MidnaSnapshot& snap, MtxP base,
         PuppetGuard guard;
         if (puppet_guard_begin(hands, guard)) {
             midna_pose_hands(hands, base, joints);
+            midna_apply_tired(hands, kMidnaPartHands, tired);
             g_env_light.setLightTevColorType_MAJI(hands, tev);
             MidnaShapeEdits vis;
             const u16 n = hands->getModelData()->getMaterialNum() < 4
@@ -5467,6 +5571,7 @@ void draw_midna_solid(daAlink_c* alink, const MidnaSnapshot& snap, MtxP base,
             mDoMtx_concat(base, rel, world);
             midna_pose(hair, world, 1.0f, nullptr);
             midna_set_hair_colors(hair, snap, true);
+            midna_apply_tired(hair, kMidnaPartHair, tired);
             g_env_light.setLightTevColorType_MAJI(hair, tev);
             MidnaShapeEdits vis;
             for (u16 i = 0; i < 3; ++i) vis.set(hair, i, snap.hairShape == i);
@@ -5482,6 +5587,7 @@ void draw_midna_solid(daAlink_c* alink, const MidnaSnapshot& snap, MtxP base,
             Mtx head;
             mDoMtx_copy(joints[kMidnaJntHead], head);
             midna_pose(mask, head, 1.0f, nullptr);
+            midna_apply_tired(mask, kMidnaPartMask, tired);
             g_env_light.setLightTevColorType_MAJI(mask, tev);
             mDoExt_modelEntryDL(mask);
             puppet_guard_end(guard);

@@ -1848,7 +1848,9 @@ void send_state(EnemyList& list) {
 }
 
 bool is_downed_alive(fopAc_ac_c* actor) {
-    return actor != nullptr && fopAcM_GetName(actor) == fpcNm_E_S1_e;
+    if (actor == nullptr) return false;
+    const s16 name = fopAcM_GetName(actor);
+    return name == fpcNm_E_S1_e || name == fpcNm_E_HP_e;
 }
 
 void send_gone(int8_t room, uint32_t key) {
@@ -4497,7 +4499,7 @@ void torch_on_message(const MsgTorch& msg) {
         TorchSeen* seen = torch_slot(fopAcM_GetID(torch), true);
         if (seen != nullptr) seen->lit = msg.lit != 0;
         mDoAud_seStart(msg.lit ? Z2SE_OBJ_FIRE_IGNITION : Z2SE_OBJ_FIRE_OFF, &torch->current.pos, 0,
-            dComIfGp_getReverb(fopAcM_GetRoomNo(torch)));
+            safe_reverb(fopAcM_GetRoomNo(torch)));
         return;
     }
 }

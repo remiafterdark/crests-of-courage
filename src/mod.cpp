@@ -2187,6 +2187,10 @@ void send_local_midna() {
     if (hairUp) snap.flags |= kMidnaFlagHairhand;
 
     if (midna->field_0x668 != nullptr) snap.flags |= kMidnaFlagTevColor;
+    if ((daMidna_c::checkMidnaTired() || midna->checkForceTiredColor()) &&
+        !midna->checkForceNormalColor()) {
+        snap.flags |= kMidnaFlagTired;
+    }
     snap.hairShape = local_midna_hair_shape(midna);
     snap.leftHand = midna->mLeftHandShapeIdx == 0xFD ? 0xFE : midna->mLeftHandShapeIdx;
     snap.rightHand = midna->mRightHandShapeIdx == 0xFD ? 0xFE : midna->mRightHandShapeIdx;

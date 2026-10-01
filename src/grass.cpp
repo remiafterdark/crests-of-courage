@@ -135,7 +135,7 @@ void cut_flower(dFlower_data_c* d, u8 bits, int room) {
         dComIfGp_particle_set(0x8299, &at, tev, nullptr, nullptr);
         dComIfGp_particle_set(0x829A, &at, tev, nullptr, nullptr);
     }
-    mDoAud_seStart(JA_SE_LK_CUT_GRASS, &d->m_pos, 0, dComIfGp_getReverb(room));
+    mDoAud_seStart(JA_SE_LK_CUT_GRASS, &d->m_pos, 0, safe_reverb(room));
 }
 
 void cut_clump(dGrass_packet_c* grass, dGrass_data_c* d, int room) {
@@ -157,7 +157,7 @@ void cut_clump(dGrass_packet_c* grass, dGrass_data_c* d, int room) {
     env.a = 0;
     dComIfGp_particle_set(particle, &at, dComIfGp_roomControl_getTevStr(room), &rot, nullptr, 255,
         dPa_control_c::getLight8EcallBack(), -1, &env, nullptr, nullptr);
-    mDoAud_seStart(JA_SE_LK_CUT_GRASS, &d->m_pos, 0, dComIfGp_getReverb(room));
+    mDoAud_seStart(JA_SE_LK_CUT_GRASS, &d->m_pos, 0, safe_reverb(room));
 }
 
 }

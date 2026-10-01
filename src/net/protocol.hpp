@@ -229,6 +229,8 @@ const uint8_t kMidnaFlagTevColor = 0x04;
 
 const uint8_t kMidnaFlagWorldBase = 0x08;
 
+const uint8_t kMidnaFlagTired = 0x10;
+
 struct MidnaJointSnapshot {
     int16_t rot[9];
     float pos[3];
