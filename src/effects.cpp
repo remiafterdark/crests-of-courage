@@ -152,7 +152,7 @@ void queue_sound(JAISoundID soundID, uint8_t kind, const Vec* pos) {
     ++s_soundCount;
 }
 
-bool is_rebuilt_by_puppet(u16 id) {
+bool is_puppet_effect(u16 id) {
     switch (id) {
     case ID_ZI_J_KAITENGIRI_A: case ID_ZI_J_KAITENGIRI_B:
     case ID_ZI_J_KAITENGIRIL_A: case ID_ZI_J_KAITENGIRIL_B:
@@ -163,6 +163,8 @@ bool is_rebuilt_by_puppet(u16 id) {
     case ID_ZI_J_WL_KAITENAT_A: case ID_ZI_J_WL_KAITENAT_B:
     case ID_ZI_J_LK_DJGIRI_A: case ID_ZI_J_LK_DJGIRI_B: case ID_ZI_J_LK_DJGIRI_C:
     case ID_ZI_J_LK_DJGIRI_D: case ID_ZI_J_LK_DJGIRI_E: case ID_ZI_J_LK_DJGIRI_F:
+
+    case ID_ZI_J_ATOW_C:
         return true;
     default:
         return false;
@@ -172,7 +174,7 @@ bool is_rebuilt_by_puppet(u16 id) {
 void queue_particle(uint8_t flags, uint8_t type, u16 id, u32 key, const cXyz* pos, const csXyz* rot,
     const cXyz* scale, u8 alpha, const GXColor* prm, const GXColor* env, f32 blend,
     JPABaseEmitter* emitter) {
-    if (is_rebuilt_by_puppet(id) || s_particleCount >= kMaxParticlesPerFrame) return;
+    if (is_puppet_effect(id) || s_particleCount >= kMaxParticlesPerFrame) return;
     MsgParticleEntry& e = s_particles[s_particleCount];
     if (!relative_to_link(pos, e.rel)) return;
     e.id = id;
@@ -208,7 +210,7 @@ void on_local_sound_pre(ModContext*, void*, void*, void*) {
     voices_begin_local();
 }
 
-bool silence_ours(void* args, bool objectSound) {
+bool should_mute_local(void* args, bool objectSound) {
     if (s_suppress > 0 || !voices_local_silent()) return false;
     if (!voices_is_link_voice(mods::arg<JAISoundID>(args, 1))) return false;
     if (objectSound) {
@@ -387,8 +389,9 @@ KeySlot s_keySlots[64];
 KeySlot* key_slot(uint8_t sender, u32 senderKey) {
     KeySlot* freeSlot = nullptr;
     for (KeySlot& s : s_keySlots) {
-        if (s.sender == sender && s.senderKey == senderKey && s_tick - s.lastTick <= 5) return &s;
-        if (freeSlot == nullptr && (s.senderKey == 0 || s_tick - s.lastTick > 5)) freeSlot = &s;
+
+        if (s.sender == sender && s.senderKey == senderKey && s_tick - s.lastTick <= 8) return &s;
+        if (freeSlot == nullptr && (s.senderKey == 0 || s_tick - s.lastTick > 8)) freeSlot = &s;
     }
     if (freeSlot != nullptr) {
         freeSlot->sender = sender;
@@ -399,12 +402,12 @@ KeySlot* key_slot(uint8_t sender, u32 senderKey) {
 }
 
 bool sender_position(uint8_t sender, float* x, float* y, float* z) {
-    return puppet_hook_get_pose_of(sender, x, y, z, nullptr, nullptr, nullptr);
+    return puppet_hook_fx_pos(sender, x, y, z);
 }
 
 const s32 kOnceMaxFrames = 30;
 
-const uint32_t kKeyedBridgeTicks = 3;
+const uint32_t kKeyedBridgeTicks = 6;
 
 void capture_emitter_state(MsgParticleEntry& e, const JPABaseEmitter* em) {
     e.flags |= kParticleHasState;
@@ -488,6 +491,11 @@ void emit_particle(dPa_control_c* particles, daAlink_c* alink, const MsgParticle
                 }
             }
         }
+
+        if (keyed != nullptr && e.id == ID_ZI_J_WTOA_B) {
+            Mtx chest;
+            if (puppet_hook_joint_mtx(slot->sender, 2, chest)) keyed->setGlobalRTMatrix(chest);
+        }
         return;
     }
     JPABaseEmitter* emitter = particles->set(e.type, e.id, &pos, &alink->tevStr, rotP, scaleP,
@@ -535,7 +543,7 @@ void fx_init() {
     const ModResult b = mods::hook::add_post<CoopFxObjLevelSound>(on_obj_level_sound_post);
     mods::hook::add_pre<CoopFxSeStart>(
         [](ModContext* ctx, void* a, void* r, void* u) -> HookAction {
-            if (silence_ours(a, false)) {
+            if (should_mute_local(a, false)) {
                 if (r != nullptr) *static_cast<bool*>(r) = false;
                 return HOOK_SKIP_ORIGINAL;
             }
@@ -544,7 +552,7 @@ void fx_init() {
         });
     mods::hook::add_pre<CoopFxSeStartLevel>(
         [](ModContext* ctx, void* a, void* r, void* u) -> HookAction {
-            if (silence_ours(a, false)) {
+            if (should_mute_local(a, false)) {
                 if (r != nullptr) *static_cast<bool*>(r) = false;
                 return HOOK_SKIP_ORIGINAL;
             }
@@ -553,7 +561,7 @@ void fx_init() {
         });
     mods::hook::add_pre<CoopFxObjSound>(
         [](ModContext* ctx, void* a, void* r, void* u) -> HookAction {
-            if (silence_ours(a, true)) {
+            if (should_mute_local(a, true)) {
                 if (r != nullptr) *static_cast<Z2SoundHandlePool**>(r) = nullptr;
                 return HOOK_SKIP_ORIGINAL;
             }
@@ -562,7 +570,7 @@ void fx_init() {
         });
     mods::hook::add_pre<CoopFxObjLevelSound>(
         [](ModContext*, void* a, void* r, void*) -> HookAction {
-            if (!silence_ours(a, true)) return HOOK_CONTINUE;
+            if (!should_mute_local(a, true)) return HOOK_CONTINUE;
             if (r != nullptr) *static_cast<Z2SoundHandlePool**>(r) = nullptr;
             return HOOK_SKIP_ORIGINAL;
         });
@@ -608,7 +616,22 @@ bool local_in_cutscene() {
     daAlink_c* alink = daAlink_getAlinkActorClass();
     if (alink == nullptr) return false;
 
-    return alink->checkEventRun() != FALSE || boss_local_demo_running();
+    if (boss_local_demo_running()) return true;
+    if (alink->checkEventRun() == FALSE) return false;
+
+    switch (alink->mProcID) {
+    case daAlink_c::PROC_METAMORPHOSE:
+    case daAlink_c::PROC_METAMORPHOSE_ONLY:
+    case daAlink_c::PROC_WARP:
+    case daAlink_c::PROC_DUNGEON_WARP_READY:
+    case daAlink_c::PROC_DUNGEON_WARP:
+    case daAlink_c::PROC_DUNGEON_WARP_SCN_START:
+        return false;
+    default:
+        break;
+    }
+    dEvt_control_c* evt = dComIfGp_getEvent();
+    return evt == nullptr || evt->getMode() != dEvt_mode_TALK_e;
 }
 
 void fx_update() {

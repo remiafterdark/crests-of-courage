@@ -468,8 +468,7 @@ void note_loaded_rooms(dSv_info_c* info) {
         if (room < 0 || room >= kRooms || s_settledRoom[room]) continue;
         s_settledRoom[room] = true;
         s_settleTicks = kSettleTicks;
-        coop_log::info("coop_mod: [ENEMY] room {} just loaded - anything appearing after this is "
-                        "a runtime spawn", room);
+        coop_log::info("coop_mod: [ENEMY] room {} loaded, later actors are runtime spawns", room);
     }
 }
 
@@ -534,7 +533,7 @@ int s_unnamedLogged = 0;
 
 bool s_keyingLive = false;
 
-bool key_already_cached(fpc_ProcID id) {
+bool is_key_cached(fpc_ProcID id) {
     for (int i = 0; i < kKeyCacheMax; ++i) {
         if (s_keyCache[i].key != 0 && s_keyCache[i].id == id) return true;
     }
@@ -572,8 +571,7 @@ uint32_t placement_key(fopAc_ac_c* actor) {
     if (s_keyCache[slot].key != 0) {
         ++s_keyCacheEvictions;
         if (s_keyCacheEvictions <= 4) {
-            coop_log::warn("coop_mod: [ENEMY] key cache full ({} entries) - evicting a key last "
-                            "used {} ticks ago. If this repeats, enemies are being renamed.",
+            coop_log::warn("coop_mod: [ENEMY] key cache full ({}), evicted key idle {} ticks",
                 kKeyCacheMax, static_cast<int>(s_tick - s_keyCache[slot].used));
         }
     }
@@ -589,8 +587,7 @@ uint32_t placement_key(fopAc_ac_c* actor) {
     s_keyCache[slot].used = s_tick;
     if (key == 0 && s_unnamedLogged < 4) {
         ++s_unnamedLogged;
-        coop_log::warn("coop_mod: [ENEMY-DYN] ran out of sequence slots naming name={} in room "
-                        "{} - leaving it local on both sides rather than risk a shared identity",
+        coop_log::warn("coop_mod: [ENEMY-DYN] out of sequence slots name={} room={}, kept local",
             static_cast<int>(fopAcM_GetName(actor)), static_cast<int>(fopAcM_GetRoomNo(actor)));
     }
     if (s_dumped < kDumpMax) {
@@ -703,8 +700,7 @@ void* mark_boss_room(void* proc, void* data) {
     const int room = fopAcM_GetRoomNo(actor);
     if (room < 0 || room >= kRooms || s_bossRoom[room]) return nullptr;
     s_bossRoom[room] = true;
-    coop_log::info("coop_mod: [ENEMY] room {} holds a boss ({}) - everything in it runs locally "
-                    "from now on", room, static_cast<int>(fopAcM_GetName(actor)));
+    coop_log::info("coop_mod: [ENEMY] room {} has boss {}, running locally", room, static_cast<int>(fopAcM_GetName(actor)));
     return nullptr;
 }
 
@@ -765,7 +761,7 @@ bool bosses_setting_on() {
 }
 
 bool session_live() {
-    return coop_net_connected() && in_gameplay() && peer_on_our_stage();
+    return coop_net_connected() && in_gameplay() && peer_shares_stage();
 }
 
 bool enemies_enabled_now() {
@@ -882,8 +878,7 @@ void claim_after_hit(Tracked* t, uint8_t player) {
     if (active && t->hitClaimPlayer < player) player = t->hitClaimPlayer;
     if (!active || t->hitClaimPlayer != player) {
         ++s_diagClaims;
-        coop_log::info("coop_mod: [ENEMY] room={} key={:#010x} goes to player {} until it recovers "
-                       "- they hit it{}", static_cast<int>(t->room), t->key,
+        coop_log::info("coop_mod: [ENEMY] room={} key={:#010x} owner -> player {} after hit{}", static_cast<int>(t->room), t->key,
             static_cast<int>(player), player == coop_net_local_id() ? " (us)" : "");
     }
     t->hitClaimPlayer = player;
@@ -967,7 +962,7 @@ uint8_t player_of_owner(uint8_t owner) {
     return owner == kRoomOwnerNone ? kCoopNoPlayer : static_cast<uint8_t>(owner - 1);
 }
 
-uint8_t our_owner_id() {
+uint8_t local_owner_id() {
     return owner_of(coop_net_local_id());
 }
 
@@ -1009,7 +1004,7 @@ void set_room_owner(int room, uint8_t owner) {
     if (room < 0 || room >= kRooms) return;
     if (s_rooms.owner[room] == owner) return;
     s_rooms.owner[room] = owner;
-    coop_log::info("coop_mod: [ROOM] room {} is now owned by {}", room,
+    coop_log::info("coop_mod: [ROOM] room {} owner={}", room,
         owner == kRoomOwnerNone ? -1 : static_cast<int>(player_of_owner(owner)));
     announce_room_owner(room, owner);
 }
@@ -1024,15 +1019,15 @@ void update_room_claims(int myRoom) {
         s_rooms.saveNo = static_cast<int8_t>(saveNo);
     }
 
-    const uint8_t us = our_owner_id();
-    const bool wePaused = coop_player_paused(coop_net_local_id());
+    const uint8_t us = local_owner_id();
+    const bool localPaused = coop_player_paused(coop_net_local_id());
 
     for (int r = 0; coop_net_is_host() && r < kRooms; ++r) {
         const uint8_t owner = s_rooms.owner[r];
         if (owner == kRoomOwnerNone) continue;
         if (owner == us) {
 
-            if (r != myRoom || wePaused) {
+            if (r != myRoom || localPaused) {
                 set_room_owner(r, kRoomOwnerNone);
                 s_rooms.claimed[r] = false;
             }
@@ -1057,7 +1052,7 @@ void update_room_claims(int myRoom) {
 
     if (myRoom < 0 || myRoom >= kRooms) return;
 
-    if (wePaused) return;
+    if (localPaused) return;
 
     if (s_rooms.claimed[myRoom] && s_rooms.owner[myRoom] == kRoomOwnerNone &&
         s_tick - s_rooms.claimTick[myRoom] > kClaimRetryTicks)
@@ -1123,7 +1118,7 @@ uint8_t intended_owner(int8_t room, uint32_t key) {
 
 const uint32_t kOwnerlessTicks = 90;
 
-bool we_own(int8_t room, uint32_t key) {
+bool is_owned_locally(int8_t room, uint32_t key) {
     const uint8_t me = coop_net_local_id();
     if (me >= kCoopMaxPlayers) return true;
     const uint8_t owner = intended_owner(room, key);
@@ -1136,11 +1131,10 @@ bool we_own(int8_t room, uint32_t key) {
         const bool undescribed =
             t != nullptr && (!t->describedEver || s_tick - t->describedStamp > kOwnerlessTicks);
         if (undescribed) {
-            static uint32_t s_saidTick = 0;
-            if (s_tick - s_saidTick > 300) {
-                s_saidTick = s_tick;
-                coop_log::info("coop_mod: [ENEMY] room {} key {:#010x} was nobody's - taking it, "
-                               "we own the room", static_cast<int>(room), key);
+            static uint32_t s_loggedTick = 0;
+            if (s_tick - s_loggedTick > 300) {
+                s_loggedTick = s_tick;
+                coop_log::info("coop_mod: [ENEMY] room {} key {:#010x} unowned, claimed (room owner)", static_cast<int>(room), key);
             }
             return true;
         }
@@ -1825,7 +1819,7 @@ void send_state(EnemyList& list) {
     for (int i = 0; i < list.count && count < kCoopMaxEnemiesPerMessage; ++i) {
         fopAc_ac_c* actor = list.actors[i];
         if (!syncable(actor)) continue;
-        if (!we_own(list.rooms[i], list.keys[i])) continue;
+        if (!is_owned_locally(list.rooms[i], list.keys[i])) continue;
 
         if (Tracked* ot = find_tracked(list.rooms[i], list.keys[i])) ot->decisionKnown = false;
         MsgEnemyEntry entry{};
@@ -1853,7 +1847,7 @@ void send_state(EnemyList& list) {
     coop_net_send(kMsgEnemyState, buffer, 1 + count * sizeof(MsgEnemyEntry));
 }
 
-bool down_is_not_dead(fopAc_ac_c* actor) {
+bool is_downed_alive(fopAc_ac_c* actor) {
     return actor != nullptr && fopAcM_GetName(actor) == fpcNm_E_S1_e;
 }
 
@@ -1862,7 +1856,7 @@ void send_gone(int8_t room, uint32_t key) {
     msg.key = key;
     msg.room = room;
     coop_net_send(kMsgEnemyGone, &msg, sizeof(msg));
-    coop_log::info("coop_mod: [ENEMY] killed room={} key={:#010x} - telling the other player",
+    coop_log::info("coop_mod: [ENEMY] killed room={} key={:#010x}, sent",
         static_cast<int>(room), key);
 }
 
@@ -1901,7 +1895,7 @@ void sweep(EnemyList& list, bool host) {
         t->carriedByUs = fopAcM_checkCarryNow(actor) != 0;
         if (t->carriedByUs && t->procName == fpcNm_E_BI_e) t->convertedByUsTick = s_tick;
 
-        if (!we_own(room, key)) {
+        if (!is_owned_locally(room, key)) {
             bool heardOfIt = false;
             for (int r = 0; r < kMaxTracked; ++r) {
                 if (s_remote[r].used && s_remote[r].room == room && s_remote[r].key == key) {
@@ -1915,14 +1909,11 @@ void sweep(EnemyList& list, bool host) {
                 t->lonelyReported = true;
                 ++s_diagLonely;
                 coop_log::info(
-                    "coop_mod: [ENEMY-DYN] room={} key={:#010x} name={} has existed here for 3s and "
-                    "the other game has never described it - almost certainly a runtime spawn, "
-                    "running independently on each screen",
+                    "coop_mod: [ENEMY-DYN] room={} key={:#010x} name={} unknown to peer after 3s, treated as runtime spawn",
                     static_cast<int>(room), key, static_cast<int>(fopAcM_GetName(actor)));
 
                 coop_log::info(
-                    "coop_mod: [ENEMY-DYN]   key inputs: name={} param={:#010x} setID={} "
-                    "home=({},{},{}) homeAngleY={}",
+                    "coop_mod: [ENEMY-DYN]   key name={} param={:#010x} setID={} home=({},{},{}) homeAngleY={}",
                     static_cast<int>(fopAcM_GetName(actor)),
                     static_cast<uint32_t>(fopAcM_GetParam(actor)),
                     static_cast<int>(actor->setID),
@@ -1936,7 +1927,7 @@ void sweep(EnemyList& list, bool host) {
 
         (void)fresh;
 
-        if (t->health > 0 && health <= 0 && !down_is_not_dead(actor)) t->killed = true;
+        if (t->health > 0 && health <= 0 && !is_downed_alive(actor)) t->killed = true;
         t->health = health;
         if (t->killed) ++t->killedTicks;
     }
@@ -1951,16 +1942,14 @@ void sweep(EnemyList& list, bool host) {
         if (catchable && !t.killed && !t.goneSent && t.convertedByUsTick != 0 &&
             s_tick - t.convertedByUsTick < 90 && room_is_loaded(t.room)) {
             send_gone(t.room, t.key);
-            coop_log::info("coop_mod: [ENEMY] our Bombling became our bomb (room {} key={:#010x}) - "
-                           "telling the others to drop theirs", static_cast<int>(t.room), t.key);
+            coop_log::info("coop_mod: [ENEMY] local Bombling -> bomb room={} key={:#010x}, sent", static_cast<int>(t.room), t.key);
             t = Tracked{};
             continue;
         }
         if (!t.killed && t.runtime && !t.goneSent && !catchable && room_is_loaded(t.room)) {
             if (quiet) continue;
             send_gone(t.room, t.key);
-            coop_log::trace("coop_mod: [ENEMY-DYN] a spawned actor was removed here (room {} "
-                            "key={:#010x}) - telling the other game", static_cast<int>(t.room),
+            coop_log::trace("coop_mod: [ENEMY-DYN] spawned actor removed room={} key={:#010x}, sent", static_cast<int>(t.room),
                 t.key);
             t = Tracked{};
             continue;
@@ -2008,7 +1997,7 @@ void apply_remote(EnemyList& list) {
                 t->goneSent = true;
 
                 if (t->killedTicks > kForceDeleteTicks && !t->deleteAsked && actor->health <= 0 &&
-                    !down_is_not_dead(actor) && deleteCount < kMaxTracked) {
+                    !is_downed_alive(actor) && deleteCount < kMaxTracked) {
                     t->deleteAsked = true;
                     toDelete[deleteCount++] = actor;
                 }
@@ -2018,7 +2007,7 @@ void apply_remote(EnemyList& list) {
 
         if (!syncable(actor)) continue;
 
-        if (we_own(r.room, r.key)) {
+        if (is_owned_locally(r.room, r.key)) {
             Tracked* ot = find_tracked(r.room, r.key);
             r = Remote{};
 
@@ -2108,7 +2097,7 @@ void apply_remote(EnemyList& list) {
     }
 
     for (int i = 0; i < deleteCount; ++i) {
-        coop_log::info("coop_mod: [ENEMY] force-removing a body the other player already killed");
+        coop_log::info("coop_mod: [ENEMY] removing body killed by peer");
         fopAcM_delete(toDelete[i]);
     }
 }
@@ -2119,10 +2108,10 @@ void owner_finish_kills(EnemyList& list) {
     for (int i = 0; i < kMaxTracked; ++i) {
         Tracked& t = s_tracked[i];
         if (!t.used || !t.killed || t.deleteAsked || t.killedTicks <= kForceDeleteTicks) continue;
-        if (!we_own(t.room, t.key)) continue;
+        if (!is_owned_locally(t.room, t.key)) continue;
         fopAc_ac_c* actor = find_local(list, t.room, t.key);
         if (actor != nullptr && actor->health > 0) continue;
-        if (down_is_not_dead(actor)) continue;
+        if (is_downed_alive(actor)) continue;
         if (actor != nullptr && deleteCount < kMaxTracked) {
             t.deleteAsked = true;
             toDelete[deleteCount++] = actor;
@@ -2483,8 +2472,7 @@ void on_switch_off_post(ModContext*, void* args, void*, void*) {
     msg.room = static_cast<int8_t>(room);
     msg.off = 1;
     coop_net_send(kMsgEnemySwitch, &msg, sizeof(msg));
-    coop_log::info("coop_mod: [ENEMY] relayed switch {} (room {}) turned off again - telling "
-                   "everybody", sw, room);
+    coop_log::info("coop_mod: [ENEMY] relayed switch {} room={} off again, sent", sw, room);
 }
 
 void on_switch_post(ModContext*, void* args, void*, void*) {
@@ -2506,7 +2494,7 @@ void on_switch_post(ModContext*, void* args, void*, void*) {
     msg.procName = name;
     coop_net_send(kMsgEnemySwitch, &msg, sizeof(msg));
     ++s_enemySwitchesSent;
-    coop_log::info("coop_mod: [ENEMY] enemy {:#x} turned switch {} (room {}) on - telling everybody",
+    coop_log::info("coop_mod: [ENEMY] enemy {:#x} set switch {} room={}, sent",
         static_cast<unsigned>(name), static_cast<int>(msg.sw), static_cast<int>(msg.room));
 }
 
@@ -2522,7 +2510,7 @@ void apply_enemy_switch(const MsgEnemySwitch& msg) {
         s_applyingEnemySwitch = true;
         dComIfGs_offSwitch(msg.sw, msg.room);
         s_applyingEnemySwitch = false;
-        coop_log::info("coop_mod: [ENEMY] switch {} (room {}) off again, as where it was set",
+        coop_log::info("coop_mod: [ENEMY] switch {} room={} off (remote)",
             static_cast<int>(msg.sw), static_cast<int>(msg.room));
         return;
     }
@@ -2532,7 +2520,7 @@ void apply_enemy_switch(const MsgEnemySwitch& msg) {
     dComIfGs_onSwitch(msg.sw, msg.room);
     s_applyingEnemySwitch = false;
     ++s_enemySwitchesApplied;
-    coop_log::info("coop_mod: [ENEMY] switch {} (room {}) on - another player's enemy {:#x} set it",
+    coop_log::info("coop_mod: [ENEMY] switch {} room={} on (remote enemy {:#x})",
         static_cast<int>(msg.sw), static_cast<int>(msg.room), static_cast<unsigned>(msg.procName));
 }
 
@@ -2568,7 +2556,7 @@ HookAction on_proc_execute_pre(ModContext*, void* args, void*, void*) {
     if (s_keyingLive) {
         auto* proc = mods::arg<base_process_class*>(args, 0);
 
-        if (proc != nullptr && !key_already_cached(proc->id)) {
+        if (proc != nullptr && !is_key_cached(proc->id)) {
             fopAc_ac_c* actor = fopAcM_SearchByID(proc->id);
             if (actor != nullptr && fopAcM_GetGroup(actor) == fopAc_ENEMY_e) {
                 placement_key(actor);
@@ -2616,7 +2604,7 @@ void for_each_tg_collider(fopAc_ac_c* actor, int count, Fn visit) {
     }
 }
 
-bool blow_is_ours(fopAc_ac_c* attacker) {
+bool is_local_blow(fopAc_ac_c* attacker) {
     fopAc_ac_c* player = dComIfGp_getPlayer(0);
     if (attacker == nullptr || player == nullptr) return false;
 
@@ -2635,7 +2623,7 @@ void apply_damage_amount(fopAc_ac_c* actor, int8_t room, uint32_t key, int amoun
     Tracked* t = find_tracked(room, key);
     if (t != nullptr) {
         t->health = actor->health;
-        if (health == 0 && !down_is_not_dead(actor)) t->killed = true;
+        if (health == 0 && !is_downed_alive(actor)) t->killed = true;
     }
 }
 
@@ -2677,14 +2665,14 @@ void rearm_disarmed_attacks() {
     s_disarmedCount = 0;
 }
 
-bool launched_by_us(fopAc_ac_c* thing) {
+bool is_local_launch(fopAc_ac_c* thing) {
     fopAc_ac_c* player = dComIfGp_getPlayer(0);
     if (thing == nullptr || player == nullptr || thing == player) return false;
     if (projectiles_is_remote(thing) || spawns_is_replica(thing)) return false;
     return thing->parentActorID == fopAcM_GetID(player);
 }
 
-void claim_for_us(Tracked* t, int8_t room, uint32_t key) {
+void claim_local(Tracked* t, int8_t room, uint32_t key) {
     if (t == nullptr) return;
     claim_after_hit(t, coop_net_local_id());
     if (t->claimSentStamp != 0 && s_tick - t->claimSentStamp < 20) return;
@@ -2718,9 +2706,9 @@ void capture_landed_hits(EnemyList& list) {
             if (atInf == nullptr) return false;
 
             fopAc_ac_c* attacker = inf->GetTgHitAc();
-            if (!blow_is_ours(attacker)) {
+            if (!is_local_blow(attacker)) {
 
-                if (launched_by_us(attacker)) claim_for_us(t, room, key);
+                if (is_local_launch(attacker)) claim_local(t, room, key);
                 return false;
             }
 
@@ -2759,7 +2747,7 @@ void capture_landed_hits(EnemyList& list) {
             claim_after_hit(t, coop_net_local_id());
             ++s_hitsSent;
             coop_log::info(
-                "coop_mod: [ENEMY] relaying our blow on room={} key={:#010x} type={:#x} atp={} spl={}",
+                "coop_mod: [ENEMY] blow sent room={} key={:#010x} type={:#x} atp={} spl={}",
                 static_cast<int>(room), key, msg.atType, static_cast<int>(msg.atp),
                 static_cast<int>(msg.spl));
             return true;
@@ -2836,7 +2824,7 @@ void inject_pending_hits(EnemyList& list) {
 
             if (t != nullptr) t->hitQuietTicks = kHitRelayQuietTicks;
             coop_log::info(
-                "coop_mod: [ENEMY] replaying their blow on room={} key={:#010x} atp={} hurtboxes={} hp={}",
+                "coop_mod: [ENEMY] blow replayed room={} key={:#010x} atp={} hurtboxes={} hp={}",
                 static_cast<int>(msg.room), msg.key, static_cast<int>(msg.atp), landed,
                 static_cast<int>(actor->health));
         } else {
@@ -2964,8 +2952,7 @@ void* collect_breakable(void* proc, void* data) {
     if (list->count >= kMaxBreakables) {
         if (!s_breakableOverflowLogged) {
             s_breakableOverflowLogged = true;
-            coop_log::info("coop_mod: [OBJ] more than {} placed objects loaded - the rest will "
-                            "not relay blows", kMaxBreakables);
+            coop_log::info("coop_mod: [OBJ] over {} placed objects, rest not relayed", kMaxBreakables);
         }
         return nullptr;
     }
@@ -3051,7 +3038,7 @@ void note_move_applied(fopAc_ac_c* actor) {
         if (s_seen[i] == name) return;
     }
     if (s_seenCount < 64) s_seen[s_seenCount++] = name;
-    coop_log::info("coop_mod: [OBJ] first move applied to proc {:#x} setID={} room={}",
+    coop_log::info("coop_mod: [OBJ] first move proc={:#x} setID={} room={}",
         static_cast<int>(name), static_cast<int>(actor->setID),
         static_cast<int>(fopAcM_GetRoomNo(actor)));
 }
@@ -3131,6 +3118,8 @@ struct BlobRun {
 const int kMaxBlobRuns = 8;
 
 int blob_runs(fopAc_ac_c* actor, BlobRun* out) {
+
+    if (fopAcM_GetName(actor) == fpcNm_Obj_KLift00_e) return 0;
     switch (fopAcM_GetName(actor)) {
     case fpcNm_Obj_Lv6TogeTrap_e:
         out[0] = {offsetof(daLv6TogeTrap_c, mPathNo), offsetof(daLv6TogeTrap_c, mLine)};
@@ -3363,7 +3352,7 @@ bool nearest_to(const cXyz& pos) {
     return true;
 }
 
-bool runs_by_itself(fopAc_ac_c* actor) {
+bool is_autonomous(fopAc_ac_c* actor) {
     if (is_timed_hazard(actor)) return true;
     switch (fopAcM_GetName(actor)) {
     case fpcNm_Obj_Lv6TogeTrap_e:
@@ -3379,12 +3368,12 @@ bool runs_by_itself(fopAc_ac_c* actor) {
     }
 }
 
-bool mechanism_is_ours(fopAc_ac_c* actor, int8_t room) {
+bool is_local_mechanism(fopAc_ac_c* actor, int8_t room) {
     if (coop_player_paused(coop_net_local_id())) return false;
 
-    if (!runs_by_itself(actor)) return nearest_to(actor->home.pos);
+    if (!is_autonomous(actor)) return nearest_to(actor->home.pos);
     if (room >= 0 && room < kRooms && s_rooms.owner[room] != kRoomOwnerNone) {
-        return s_rooms.owner[room] == our_owner_id();
+        return s_rooms.owner[room] == local_owner_id();
     }
     return nearest_to(actor->home.pos);
 }
@@ -3495,13 +3484,13 @@ const int kCatchUpPerFrame = 10;
 const int kCatchUpMaxKeys = 96;
 const f32 kCatchUpDisplaced = 5.0f;
 
-struct PeerWhere {
+struct PeerLocation {
     bool here = false;
 };
-PeerWhere s_peerWhere[kCoopMaxPlayers];
-char s_ourStage[8] = {};
-int8_t s_ourRoom = -1;
-uint32_t s_ourRoomSince = 0;
+PeerLocation s_peerLocation[kCoopMaxPlayers];
+char s_localStage[8] = {};
+int8_t s_localRoom = -1;
+uint32_t s_localRoomSince = 0;
 uint32_t s_catchUpAt[2] = {0, 0};
 int8_t s_catchUpRoom = -1;
 bool s_catchUpDue = false;
@@ -3532,29 +3521,29 @@ void watch_arrivals() {
     const int8_t room = me != nullptr ? static_cast<int8_t>(fopAcM_GetRoomNo(me)) : -1;
     char st[8] = {};
     if (stage != nullptr) std::strncpy(st, stage, 8);
-    if (room != s_ourRoom || std::memcmp(st, s_ourStage, 8) != 0) {
-        s_ourRoom = room;
-        std::memcpy(s_ourStage, st, 8);
-        s_ourRoomSince = s_tick;
+    if (room != s_localRoom || std::memcmp(st, s_localStage, 8) != 0) {
+        s_localRoom = room;
+        std::memcpy(s_localStage, st, 8);
+        s_localRoomSince = s_tick;
         s_catchUpAt[0] = s_catchUpAt[1] = 0;
         s_catchUpFramesLeft = 0;
     }
     const uint8_t us = coop_net_local_id();
-    const bool settled = room >= 0 && s_tick - s_ourRoomSince >= kCatchUpSettledTicks &&
+    const bool settled = room >= 0 && s_tick - s_localRoomSince >= kCatchUpSettledTicks &&
                          !coop_player_paused(us);
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         if (static_cast<uint8_t>(i) == us) continue;
         const CoopPeer& peer = features_peer_of(static_cast<uint8_t>(i));
         const bool here = peer.present && peer.inGame && room >= 0 && stage != nullptr &&
                           std::strncmp(peer.stage, stage, 8) == 0 && peer.curRoom == room;
-        if (here && !s_peerWhere[i].here && settled && objects_live()) {
+        if (here && !s_peerLocation[i].here && settled && objects_live()) {
             s_catchUpAt[0] = s_tick + kCatchUpAfterTicks[0];
             s_catchUpAt[1] = s_tick + kCatchUpAfterTicks[1];
             s_catchUpRoom = room;
-            coop_log::info("coop_mod: [OBJ] player {} came into room {} - bringing them up to date",
+            coop_log::info("coop_mod: [OBJ] player {} entered room {}, sending state",
                 i, static_cast<int>(room));
         }
-        s_peerWhere[i].here = here;
+        s_peerLocation[i].here = here;
     }
     for (uint32_t& at : s_catchUpAt) {
         if (at != 0 && static_cast<int32_t>(s_tick - at) >= 0) {
@@ -3589,7 +3578,7 @@ void catch_up_enemies(int8_t room) {
         ++sent;
     }
     if (sent > 0) {
-        coop_log::info("coop_mod: [ENEMY] room {}: told them about {} enemies already dead here",
+        coop_log::info("coop_mod: [ENEMY] room {}: sent {} dead enemies",
             static_cast<int>(room), sent);
     }
 }
@@ -3608,7 +3597,7 @@ void catch_up_frame() {
     s_catchUpBudget = s_catchUpFramesLeft > 0 ? kCatchUpPerFrame : 0;
 }
 
-bool carry_driven_elsewhere(int8_t room, uint32_t key);
+bool is_remote_carry(int8_t room, uint32_t key);
 bool carry_driven_here(int8_t room, uint32_t key);
 
 void capture_moved_objects(BreakableList& list) {
@@ -3629,7 +3618,7 @@ void capture_moved_objects(BreakableList& list) {
 
         if (fopAcM_GetName(actor) == fpcNm_Obj_RotBridge_e) continue;
 
-        if (carry_driven_elsewhere(room, key)) continue;
+        if (is_remote_carry(room, key)) continue;
         ObjPos* last = remember_position(room, key, actor->current.pos, actor->shape_angle);
         if (last == nullptr) continue;
         const cXyz step = actor->current.pos - last->pos;
@@ -3667,7 +3656,7 @@ void capture_moved_objects(BreakableList& list) {
         m->lastPos = actor->current.pos;
         m->tail = kMoverTailTicks;
         if (!forced &&
-            (mechanism ? !mechanism_is_ours(actor, room) : !nearest_to(actor->current.pos))) {
+            (mechanism ? !is_local_mechanism(actor, room) : !nearest_to(actor->current.pos))) {
             continue;
         }
         daAlink_c* alink = daAlink_getAlinkActorClass();
@@ -3742,10 +3731,7 @@ fopAc_ac_c* find_by_placement(BreakableList& list, const MsgObjectMove& msg) {
                 static_cast<int>(msg.setID), msg.home[0], msg.home[1], msg.home[2],
                 static_cast<int>(msg.homeAngleY));
         } else {
-            coop_log::warn("coop_mod: [OBJ] key differs for proc={} room={}: theirs {:#010x} "
-                           "(param={:#x} setID={} home=({:.1f},{:.1f},{:.1f}) angY={}) ours {:#010x} "
-                           "(param={:#x} setID={} home=({:.1f},{:.1f},{:.1f}) angY={}) - matched by "
-                           "placement",
+            coop_log::warn("coop_mod: [OBJ] key mismatch proc={} room={}: remote {:#010x} (param={:#x} setID={} home=({:.1f},{:.1f},{:.1f}) angY={}) local {:#010x} (param={:#x} setID={} home=({:.1f},{:.1f},{:.1f}) angY={}), matched by placement",
                 static_cast<int>(msg.procName), static_cast<int>(msg.room), msg.key, msg.param,
                 static_cast<int>(msg.setID), msg.home[0], msg.home[1], msg.home[2],
                 static_cast<int>(msg.homeAngleY), list.keys[bestIdx], fopAcM_GetParam(best),
@@ -3795,7 +3781,7 @@ void apply_pending_moves() {
         if (carry_driven_here(msg.room, msg.key)) continue;
 
         if (msg.catchUp == 0 &&
-            (has_blob(actor) ? mechanism_is_ours(actor, msg.room) : nearest_to(actor->current.pos))) {
+            (has_blob(actor) ? is_local_mechanism(actor, msg.room) : nearest_to(actor->current.pos))) {
             continue;
         }
 
@@ -4026,7 +4012,7 @@ void capture_carried() {
     daAlink_c* alink = daAlink_getAlinkActorClass();
     fopAc_ac_c* statue = alink != nullptr ? alink->getCopyRodControllActor() : nullptr;
 
-    if (statue != nullptr && carry_driven_elsewhere(fopAcM_GetRoomNo(statue),
+    if (statue != nullptr && is_remote_carry(fopAcM_GetRoomNo(statue),
                                  compute_placement_key(statue))) {
         fopAc_ac_c* rod = alink->getCopyRodActor();
         if (rod != nullptr) static_cast<daCrod_c*>(rod)->offControll();
@@ -4058,7 +4044,7 @@ void capture_carried() {
             c->id = id;
             c->key = key;
             c->room = fopAcM_GetRoomNo(actor);
-            coop_log::info("coop_mod: [CARRY] picked up {:#x} (proc {})", key,
+            coop_log::info("coop_mod: [CARRY] picked up {:#x} proc={}", key,
                 static_cast<int>(fopAcM_GetName(actor)));
         }
         c->phase = kPhaseHeld;
@@ -4074,7 +4060,7 @@ void capture_carried() {
         if (actor == nullptr) {
 
             send_simple(c, nullptr, kCarryGone);
-            coop_log::info("coop_mod: [CARRY] {:#x} is gone", c.key);
+            coop_log::info("coop_mod: [CARRY] {:#x} gone", c.key);
             c = Carried{};
             continue;
         }
@@ -4197,7 +4183,7 @@ void place(fopAc_ac_c* actor, const cXyz& at) {
     actor->speed.set(0.0f, 0.0f, 0.0f);
 }
 
-void hold_still(fopAc_ac_c* actor, bool isPot) {
+void freeze_in_place(fopAc_ac_c* actor, bool isPot) {
     if (!isPot) return;
     auto* pot = static_cast<daObjCarry_c*>(actor);
     pot->field_0xd3c = ZeroQuat;
@@ -4255,7 +4241,7 @@ void apply_remote_carry() {
 
         switch (msg.state) {
         case kCarryGone:
-            coop_log::info("coop_mod: [CARRY] {:#x} broke in their game - breaking ours", msg.key);
+            coop_log::info("coop_mod: [CARRY] {:#x} broke remotely, breaking local", msg.key);
 
             if (isPot) static_cast<daObjCarry_c*>(actor)->obj_break(true, true, true);
             fopAcM_delete(actor);
@@ -4274,7 +4260,7 @@ void apply_remote_carry() {
                     actor->shape_angle.y = static_cast<s16>(yaw + msg.relYaw);
                     actor->shape_angle.z = msg.angle[2];
                     actor->current.angle.y = actor->shape_angle.y;
-                    hold_still(actor, isPot);
+                    freeze_in_place(actor, isPot);
                     pin_held(actor);
                     break;
                 }
@@ -4284,7 +4270,7 @@ void apply_remote_carry() {
             actor->shape_angle.y = msg.angle[1];
             actor->shape_angle.z = msg.angle[2];
             actor->current.angle.y = msg.angle[1];
-            hold_still(actor, isPot);
+            freeze_in_place(actor, isPot);
             pin_held(actor);
             break;
         }
@@ -4380,7 +4366,7 @@ void apply_remote_carry() {
     }
 }
 
-bool carry_driven_elsewhere(int8_t room, uint32_t key) {
+bool is_remote_carry(int8_t room, uint32_t key) {
     for (const RemoteCarry& r : s_remoteCarry) {
         if (r.used && r.msg.room == room && r.msg.key == key) return true;
     }
@@ -4530,7 +4516,7 @@ struct AnimalSteer {
     cXyz pos;
     int16_t angleY = 0;
     f32 speedF = 0.0f;
-    f32 theirDist = 0.0f;
+    f32 peerDist = 0.0f;
     uint32_t heardTick = 0;
 };
 const int kMaxAnimals = 48;
@@ -4573,7 +4559,7 @@ void tick_animals() {
         const uint32_t key = compute_placement_key(animal);
         if (key == 0) continue;
 
-        if (carry_driven_elsewhere(static_cast<int8_t>(fopAcM_GetRoomNo(animal)), key)) continue;
+        if (is_remote_carry(static_cast<int8_t>(fopAcM_GetRoomNo(animal)), key)) continue;
         AnimalSteer* steer = animal_steer_for(animal, key);
         const bool fresh = steer != nullptr && s_tick - steer->heardTick <= kAnimalFreshTicks;
 
@@ -4581,7 +4567,7 @@ void tick_animals() {
         const f32 mine = (shared - me->current.pos).abs();
         bool ours = nearest_to(shared);
 
-        if (fresh && steer->theirDist < mine) ours = false;
+        if (fresh && steer->peerDist < mine) ours = false;
 
         if (ours) {
             if (s_tick % 6 != 0) continue;
@@ -4639,7 +4625,7 @@ void animal_on_message(const MsgAnimal& msg) {
     slot->pos.set(msg.pos[0], msg.pos[1], msg.pos[2]);
     slot->angleY = msg.angleY;
     slot->speedF = msg.speedF;
-    slot->theirDist = msg.dist;
+    slot->peerDist = msg.dist;
     slot->heardTick = s_tick;
 }
 
@@ -4775,7 +4761,7 @@ void capture_broken_carryables() {
 
         if (carry_driven_here(was.room, was.key)) continue;
 
-        if (carry_driven_elsewhere(was.room, was.key)) continue;
+        if (is_remote_carry(was.room, was.key)) continue;
         if (!nearest_to(was.pos)) continue;
         MsgCarry msg{};
         msg.key = was.key;
@@ -4786,7 +4772,7 @@ void capture_broken_carryables() {
         msg.pos[2] = was.pos.z;
         coop_net_send(kMsgCarry, &msg, sizeof(msg));
         ++s_brokenSent;
-        coop_log::info("coop_mod: [CARRY] pot {:#x} broke here - telling the others", was.key);
+        coop_log::info("coop_mod: [CARRY] pot {:#x} broke, sent", was.key);
     }
 }
 
@@ -4845,7 +4831,7 @@ void capture_landed_object_hits(BreakableList& list) {
             dCcD_GObjInf* atInf = dCcD_GetGObjInf(atObj);
             if (atInf == nullptr) return false;
             fopAc_ac_c* attacker = inf->GetTgHitAc();
-            if (!blow_is_ours(attacker)) return false;
+            if (!is_local_blow(attacker)) return false;
 
             MsgEnemyHit msg{};
             msg.key = key;
@@ -4874,7 +4860,7 @@ void capture_landed_object_hits(BreakableList& list) {
             breakable_go_quiet(room, key);
             ++s_objHitsSent;
             coop_log::info(
-                "coop_mod: [OBJ] relaying our blow on room={} key={:#010x} name={} type={:#x}",
+                "coop_mod: [OBJ] blow sent room={} key={:#010x} name={} type={:#x}",
                 static_cast<int>(room), key, static_cast<int>(fopAcM_GetName(actor)), msg.atType);
             return true;
         });
@@ -4974,7 +4960,7 @@ void inject_pending_object_hits() {
             ++s_objHitsApplied;
             show_relayed_hitmark(actor, firstTg, msg);
             coop_log::info(
-                "coop_mod: [OBJ] replaying their blow on room={} key={:#010x} name={} hurtboxes={}",
+                "coop_mod: [OBJ] blow replayed room={} key={:#010x} name={} hurtboxes={}",
                 static_cast<int>(msg.room), msg.key, static_cast<int>(fopAcM_GetName(actor)),
                 landed);
         }
@@ -5065,12 +5051,12 @@ void run_self_test(EnemyList& list, bool host) {
             break;
         }
         coop_log::warn(
-            "coop_mod: [ENEMY-SELFTEST] *** DEBUG *** {} swinging at room={} key={:#010x} name={} hp={}",
+            "coop_mod: [ENEMY-SELFTEST] {} attacking room={} key={:#010x} name={} hp={}",
             host ? "host" : "joiner", static_cast<int>(list.rooms[i]), list.keys[i],
             static_cast<int>(fopAcM_GetName(actor)), static_cast<int>(actor->health));
         return;
     }
-    coop_log::info("coop_mod: [ENEMY-SELFTEST] nothing left to swing at (tracking {})", list.count);
+    coop_log::info("coop_mod: [ENEMY-SELFTEST] no targets left (tracking {})", list.count);
 }
 
 template <class Row, int N>
@@ -5080,12 +5066,11 @@ void audit_one_table(const char* what, const Row (&rows)[N]) {
         for (int j = i + 1; j < N; ++j) {
             if (rows[i].procName != rows[j].procName) continue;
             ++dupes;
-            coop_log::info("coop_mod: [ENEMY-AUDIT] {} has TWO rows for proc={:#05x} (rows {} and "
-                            "{}) - the second is dead and the first may be the wrong class",
+            coop_log::info("coop_mod: [ENEMY-AUDIT] {} duplicate rows for proc={:#05x} ({} and {})",
                 what, rows[i].procName, i, j);
         }
     }
-    coop_log::info("coop_mod: [ENEMY-AUDIT] {}: {} rows, {} duplicate procNames", what, N, dupes);
+    coop_log::info("coop_mod: [ENEMY-AUDIT] {}: {} rows, {} duplicate procs", what, N, dupes);
 }
 
 void audit_layout_tables() {
@@ -5200,10 +5185,10 @@ BridgeSeen* bridge_seen(daRotBridge_c* b) {
     return free;
 }
 
-bool bridge_theirs_counts(const BridgeSeen& seen, uint32_t theirAge, uint8_t from) {
+bool bridge_theirs_counts(const BridgeSeen& seen, uint32_t peerAge, uint8_t from) {
     const uint32_t ours = s_tick - seen.firstTick;
-    if (theirAge > ours + kBridgeAgeSlack) return true;
-    if (ours > theirAge + kBridgeAgeSlack) return false;
+    if (peerAge > ours + kBridgeAgeSlack) return true;
+    if (ours > peerAge + kBridgeAgeSlack) return false;
     return from < coop_net_local_id();
 }
 
@@ -5286,7 +5271,7 @@ HookAction on_rot_bridge_execute(ModContext*, void* args, void*, void*) {
                 start_bridge_turn(b);
                 moving = true;
                 seen->ignoreEdgeUntil = s_tick + kBridgeEdgeGraceTicks;
-                coop_log::info("coop_mod: [OBJ] rotating bridge room={} turning with theirs",
+                coop_log::info("coop_mod: [OBJ] rotating bridge room={} following remote",
                     static_cast<int>(room));
             }
             seen->lastTurnTick = s_tick;
@@ -5298,8 +5283,7 @@ HookAction on_rot_bridge_execute(ModContext*, void* args, void*, void*) {
             if (bridge_angle_near(b->shape_angle.y, msg.angle) && b->mBridgeAngle == msg.facing) {
                 continue;
             }
-            coop_log::info("coop_mod: [OBJ] rotating bridge room={} put where theirs rests "
-                           "({:#06x} -> {:#06x})", static_cast<int>(room),
+            coop_log::info("coop_mod: [OBJ] rotating bridge room={} snapped to remote ({:#06x} -> {:#06x})", static_cast<int>(room),
                 static_cast<uint16_t>(b->shape_angle.y), static_cast<uint16_t>(msg.angle));
             place_bridge(b, msg.angle, msg.facing);
         }
@@ -5424,9 +5408,7 @@ void warn_if_debug_armed() {
     if (s_selfTestVar != 0) svc_config->get_int(mod_ctx, s_selfTestVar, &enemyTicks);
     if (enemyTicks == 0) return;
     coop_log::warn(
-        "coop_mod: *** DEBUG SELF-TEST IS ARMED *** debug_enemy_selftest_ticks={} - this game will "
-        "attack its own enemies every {} ticks and tell the other player to do the same. Set it to "
-        "0 (or launch with play.ps1) unless you are running the automated test.",
+        "coop_mod: [ENEMY-SELFTEST] armed debug_enemy_selftest_ticks={} interval={}",
         enemyTicks, enemyTicks);
 }
 
@@ -5465,9 +5447,9 @@ void enemies_init() {
     audit_layout_tables();
 }
 
-bool enemies_carried_by_other(fopAc_ac_c* actor) {
+bool enemies_remote_carried(fopAc_ac_c* actor) {
     if (actor == nullptr) return false;
-    return carry_driven_elsewhere(static_cast<int8_t>(fopAcM_GetRoomNo(actor)),
+    return is_remote_carry(static_cast<int8_t>(fopAcM_GetRoomNo(actor)),
         compute_placement_key(actor));
 }
 
@@ -5566,7 +5548,7 @@ void capture_cage_bars() {
         msg.home[1] = actor->home.pos.y;
         msg.home[2] = actor->home.pos.z;
         coop_net_send(kMsgCageBars, &msg, sizeof(msg));
-        coop_log::info("coop_mod: [OBJ] cage room={} bars broken here {:#04x}",
+        coop_log::info("coop_mod: [OBJ] cage room={} bars broken {:#04x}",
             static_cast<int>(msg.room), static_cast<int>(now));
     }
 }
@@ -5632,7 +5614,7 @@ void apply_pending_cages() {
         box.SetTgHit(&s_cageBlow);
         box.OnTgHitNoActor();
         box.SetTgHitPos(at);
-        coop_log::info("coop_mod: [OBJ] cage room={} knocking out bar {} (theirs {:#04x})",
+        coop_log::info("coop_mod: [OBJ] cage room={} breaking bar {} (remote {:#04x})",
             static_cast<int>(p.msg.room), bar, static_cast<int>(p.msg.mask));
 
     }
@@ -5664,7 +5646,7 @@ void on_bomb_caught(const MsgBombCaught& msg, uint8_t from) {
     for (PendingCatch& p : s_pendingCatch) {
         if (p.used) continue;
         p = PendingCatch{true, msg.room, msg.key, from, s_tick};
-        coop_log::info("coop_mod: [ENEMY] player {}'s boomerang caught Bombling room={} key={:#010x}",
+        coop_log::info("coop_mod: [ENEMY] player {} boomerang caught Bombling room={} key={:#010x}",
             static_cast<int>(from), static_cast<int>(msg.room), msg.key);
         return;
     }
@@ -5693,8 +5675,7 @@ void process_pending_catches() {
         }
         fopAcM_delete(actor);
         const bool riding = spawns_ride_bomb_on_boomerang_of(p.from, bomb);
-        coop_log::info("coop_mod: [ENEMY] caught Bombling room={} key={:#010x} for player {} - their "
-                       "replica missed it ({}; bomb {})",
+        coop_log::info("coop_mod: [ENEMY] caught Bombling room={} key={:#010x} for player {}, replica missed ({}; bomb {})",
             static_cast<int>(p.room), p.key, static_cast<int>(p.from),
             bomb != nullptr ? "made" : "NOT made", riding ? "on their boomerang" : "loose");
         p = PendingCatch{};
@@ -5716,8 +5697,7 @@ void enemies_note_enemy_bomb() {
         t->convertedByUsTick = s_tick;
     }
     send_gone(room, key);
-    coop_log::info("coop_mod: [ENEMY] our Bombling became our bomb (room {} key={:#010x}) - "
-                   "telling the others to drop theirs", static_cast<int>(room), key);
+    coop_log::info("coop_mod: [ENEMY] local Bombling -> bomb room={} key={:#010x}, sent", static_cast<int>(room), key);
 }
 
 void enemies_note_boomerang_bomb() {
@@ -5735,8 +5715,7 @@ void enemies_note_boomerang_bomb() {
     msg.key = placement_key(actor);
     if (msg.key == 0) return;
     coop_net_send(kMsgBombCaught, &msg, sizeof(msg));
-    coop_log::info("coop_mod: [ENEMY] our boomerang caught Bombling room={} key={:#010x} - telling "
-                   "the others", static_cast<int>(msg.room), msg.key);
+    coop_log::info("coop_mod: [ENEMY] local boomerang caught Bombling room={} key={:#010x}, sent", static_cast<int>(msg.room), msg.key);
 }
 
 void enemies_update() {
@@ -5839,14 +5818,13 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
                 }
             }
 
-            if (find_tracked(entry.room, entry.key) != nullptr && we_own(entry.room, entry.key)) {
+            if (find_tracked(entry.room, entry.key) != nullptr && is_owned_locally(entry.room, entry.key)) {
                 ++s_diagConflicts;
 
                 if (s_diagConflicts <= 12 || s_diagConflicts % 400 == 0) {
                     const Tracked* ct = find_tracked(entry.room, entry.key);
                     coop_log::info(
-                        "coop_mod: [ENEMY-CONFLICT] #{} key={:#010x} name={} from={} - ours by: "
-                        "tracked={} claim={}({}t left) target={}(known={} age={}) roomOwner={}",
+                        "coop_mod: [ENEMY-CONFLICT] #{} key={:#010x} name={} from={} local: tracked={} claim={}({}t) target={}(known={} age={}) roomOwner={}",
                         s_diagConflicts, entry.key, static_cast<int>(entry.procName),
                         static_cast<int>(from), ct != nullptr ? 1 : 0,
                         ct != nullptr ? static_cast<int>(ct->hitClaimPlayer) : -1,
@@ -5911,7 +5889,7 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
         if (r == nullptr) return;
         r->gone = true;
         r->stamp = s_tick;
-        coop_log::info("coop_mod: [ENEMY] the other player killed room={} key={:#010x}",
+        coop_log::info("coop_mod: [ENEMY] peer killed room={} key={:#010x}",
             static_cast<int>(msg.room), msg.key);
         break;
     }
@@ -5976,7 +5954,7 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
             s_pendingHits[i].msg = msg;
             return;
         }
-        coop_log::info("coop_mod: [ENEMY] dropped a relayed blow - {} already queued",
+        coop_log::info("coop_mod: [ENEMY] relayed blow dropped, {} queued",
             kMaxPendingHits);
         break;
     }
@@ -6028,7 +6006,7 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
             s_pendingObjectHits[i].msg = msg;
             return;
         }
-        coop_log::info("coop_mod: [OBJ] dropped a relayed blow - {} already queued",
+        coop_log::info("coop_mod: [OBJ] relayed blow dropped, {} queued",
             kMaxPendingObjectHits);
         break;
     }
@@ -6106,7 +6084,7 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
         fopAc_ac_c* actor = find_local(list, msg.room, msg.key);
         if (actor == nullptr) return;
         apply_damage_amount(actor, msg.room, msg.key, msg.amount);
-        coop_log::info("coop_mod: [ENEMY] the other player hit room={} key={:#010x} for {} (now {})",
+        coop_log::info("coop_mod: [ENEMY] peer hit room={} key={:#010x} dmg={} hp={}",
             static_cast<int>(msg.room), msg.key, static_cast<int>(msg.amount),
             static_cast<int>(actor->health));
         break;

@@ -392,7 +392,7 @@ void say_hello() {
     send_json(hello);
     if (!s_mappedOther.empty() && bare(s_mappedOther) != bare(s_mapped)) {
 
-        coop_log::info("coop_mod: [ONLINE] strict router here - STUN saw {} and {}", s_mapped,
+        coop_log::info("coop_mod: [ONLINE] strict NAT, STUN saw {} and {}", s_mapped,
             s_mappedOther);
     }
     if (s_host) {
@@ -450,7 +450,7 @@ bool on_stun(const uint8_t* data, size_t size) {
     if (s_mapped.empty()) {
         s_mapped = mapped;
         s_firstStunAnswerMs = now_ms();
-        coop_log::info("coop_mod: [ONLINE] {} says we are {}", server, mapped);
+        coop_log::info("coop_mod: [ONLINE] {} reports address {}", server, mapped);
     } else if (s_mappedOther.empty()) {
         s_mappedOther = mapped;
         say_hello();
@@ -466,7 +466,7 @@ void update_stun() {
     }
     if (now - s_phaseStartMs >= kStunGiveUpMs) {
 
-        coop_log::info("coop_mod: [ONLINE] no STUN answer - going on the server's view alone");
+        coop_log::info("coop_mod: [ONLINE] no STUN answer, using server view");
         say_hello();
         return;
     }
@@ -541,8 +541,11 @@ std::string error_text(const std::string& why, const std::string& detail) {
     if (why == "no_room") return "There is no room " + s_code + ". Check the code with the host.";
     if (why == "version") {
         const int theirs = std::atoi(detail.c_str());
-        return "The host is on " + coop_version_text(static_cast<uint16_t>(theirs)) +
-               " and you are on " COOP_MOD_VERSION ". You both need the same one.";
+        const std::string host = coop_version_text(static_cast<uint16_t>(theirs));
+        if (theirs > kCoopWireVersion) {
+            return "Host is on " + host + ", you're on " COOP_MOD_VERSION ". Update to join.";
+        }
+        return "Host is on " + host + ", they need to update.";
     }
     if (why == "busy") return "That room is busy. Try again in a moment.";
     if (why == "taken") {
@@ -595,6 +598,21 @@ void on_server_message(const std::string& text) {
         return;
     }
 
+    if (op == "joiner_version" && s_host) {
+        const int theirs = std::atoi(msg.str("v").c_str());
+        const std::string version = coop_version_text(static_cast<uint16_t>(theirs));
+        coop_log::info("coop_mod: [ONLINE] joiner on {} refused (local {})", version,
+            COOP_MOD_VERSION);
+        if (theirs > kCoopWireVersion) {
+            coop_notify_c(kNotifyOther, "Update Crests of Courage",
+                ("Someone joined on " + version + ", you're on " COOP_MOD_VERSION).c_str());
+        } else {
+            coop_notify_c(kNotifyOther, "Different mod version",
+                ("Someone joined on " + version + ", they need to update").c_str());
+        }
+        return;
+    }
+
     if (op != "peer") return;
     PendingPeer peer;
     if (!parse_hex_token(msg.str("token"), peer.token)) return;
@@ -611,8 +629,7 @@ void on_server_message(const std::string& text) {
     s_target = std::move(peer);
     s_hostUpnp = msg.str("upnp");
     s_sameNet = msg.boolean("sameNet");
-    coop_log::info("coop_mod: [ONLINE] introduced to the host: {} addresses, upnp '{}', same "
-                   "network {}", s_target.candidates.size(), s_hostUpnp, s_sameNet);
+    coop_log::info("coop_mod: [ONLINE] host addresses={} upnp='{}' sameNetwork={}", s_target.candidates.size(), s_hostUpnp, s_sameNet);
     if (s_target.candidates.empty() && s_hostUpnp.empty()) {
         joiner_give_up(kTailscaleHint);
         return;

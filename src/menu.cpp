@@ -201,7 +201,7 @@ std::string ping_text(uint8_t id) {
     return ", " + std::to_string(ms) + " ms";
 }
 
-std::string where_text(const CoopPeer& peer) {
+std::string location_text(const CoopPeer& peer) {
     const std::string stage(peer.stage);
     if (stage.empty()) return "?";
     const char* mine = dComIfGp_getStartStageName();
@@ -247,7 +247,7 @@ std::string party_text() {
             out += "loading";
             continue;
         }
-        out += where_text(p);
+        out += location_text(p);
         const std::string ping = ping_text(id);
         if (!ping.empty()) out += ping;
         if (coop_player_unheard(id)) out += ", no signal";
@@ -290,7 +290,7 @@ void push_players(SurfaceHandles& h) {
                                 : coop_player_paused(id) ? " (paused)"
                                                          : "";
             h.rowLabels.push_back(p.name + state + ", " +
-                                  where_text(p) + ping_text(id));
+                                  location_text(p) + ping_text(id));
             joined += h.rowLabels.back() + " ";
         }
     }
@@ -849,7 +849,7 @@ void build_screen(UiElementHandle pane, UiElementHandle detail) {
 
 std::vector<std::string> s_modelNames;
 std::vector<std::string> s_modelTitles;
-std::vector<std::string> s_modelAbout;
+std::vector<std::string> s_modelHelp;
 
 std::string escape_rml(const std::string& text) {
     std::string out;
@@ -1040,12 +1040,12 @@ void build_models(UiElementHandle pane, SurfaceHandles& h, UiElementHandle detai
 
     s_modelNames.clear();
     s_modelTitles.clear();
-    s_modelAbout.clear();
+    s_modelHelp.clear();
     for (int i = 0; i < skins_count(); ++i) {
         if (skins_hidden(i)) continue;
         s_modelNames.push_back(skins_name(i));
         s_modelTitles.push_back(skins_title(i));
-        s_modelAbout.push_back(model_help_rml(i));
+        s_modelHelp.push_back(model_help_rml(i));
     }
 
     h.lastModels = worn_text();
@@ -1073,7 +1073,7 @@ void build_models(UiElementHandle pane, SurfaceHandles& h, UiElementHandle detai
                 desc.is_selected = [](ModContext*, void*) { return skins_all_same(""); };
             } else {
                 desc.label = s_modelTitles[i - 1].c_str();
-                desc.help_rml = s_modelAbout[i - 1].c_str();
+                desc.help_rml = s_modelHelp[i - 1].c_str();
                 desc.user_data = pack_model(static_cast<int>(i - 1));
                 desc.on_pressed = [](ModContext*, void* d) {
                     const int index = model_of(d);
@@ -1188,7 +1188,6 @@ void build_debug(UiElementHandle pane) {
 }
 
 ModResult build_panel(ModContext*, UiElementHandle pane, void*, ModError*) {
-    version_remind();
     report_hint_arm();
     s_panel = SurfaceHandles{};
     UiControlDesc open = UI_CONTROL_DESC_INIT;
@@ -1458,7 +1457,6 @@ select-button.group-button key {
 )RCSS";
 
 void open_window() {
-    version_remind();
     report_hint_arm();
     if (s_windowHandle != 0) return;
 

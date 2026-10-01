@@ -124,7 +124,7 @@ State s;
 u32 s_frame = 0;
 ConfigVarHandle s_testVar = 0;
 bool s_testDone = false;
-u8 s_promptFor = kCoopNoPlayer;
+u8 s_promptTarget = kCoopNoPlayer;
 u8 s_waitingFrom = kCoopNoPlayer;
 u32 s_waitingSince = 0;
 u8 s_lastOpponent = kCoopNoPlayer;
@@ -184,17 +184,17 @@ bool in_ring(const daTagArena_c* arena, f32 x, f32 z) {
     return dx * dx + dz * dz < r * r;
 }
 
-bool beat_bo() {
+bool has_beaten_bo() {
     return dComIfGs_isEventBit(kBeatBo);
 }
 
-bool free_to_wrestle(daAlink_c* alink) {
+bool can_wrestle(daAlink_c* alink) {
     return alink != nullptr && !alink->checkWolf() && !dComIfGp_event_runCheck() &&
-           alink->mClothesChangeWaitTimer == 0 && beat_bo();
+           alink->mClothesChangeWaitTimer == 0 && has_beaten_bo();
 }
 
 u8 prompt_target(daAlink_c* alink) {
-    if (!free_to_wrestle(alink) || alink->speedF > 0.5f) return kCoopNoPlayer;
+    if (!can_wrestle(alink) || alink->speedF > 0.5f) return kCoopNoPlayer;
     daTagArena_c* arena = find_arena();
     if (arena == nullptr || find_bo() == nullptr || find_wrestler() != nullptr) return kCoopNoPlayer;
     const cXyz& me = alink->current.pos;
@@ -241,8 +241,8 @@ void challenge(u8 target) {
     coop_log::info("coop_mod: [SUMO] challenged {}", target);
 }
 
-bool free_to_be_asked(daAlink_c* alink) {
-    return s.phase == kIdle && free_to_wrestle(alink) && find_bo() != nullptr && find_arena() != nullptr &&
+bool can_be_challenged(daAlink_c* alink) {
+    return s.phase == kIdle && can_wrestle(alink) && find_bo() != nullptr && find_arena() != nullptr &&
            find_wrestler() == nullptr;
 }
 
@@ -254,7 +254,7 @@ void take_challenge(u8 from) {
     s.lastHeard = s_frame;
     set_phase(kAsked);
     features_toast("Sumo", (s.name + " wants to wrestle! Face them in the ring and press A.").c_str());
-    coop_log::info("coop_mod: [SUMO] {} challenged us", from);
+    coop_log::info("coop_mod: [SUMO] challenged by {}", from);
 }
 
 void spawn_wrestler(daNpcBouS_c* bo);
@@ -284,7 +284,7 @@ void spawn_wrestler(daNpcBouS_c* bo) {
     const u32 params = (2u << 24) | 0x700u | static_cast<u8>(bo->getArenaNo());
     bo->parentActorID = fopAcM_createChild(fpcNm_NPC_WRESTLER_e, fopAcM_GetID(bo), params,
         &bo->current.pos, fopAcM_GetRoomNo(bo), nullptr, nullptr, bo->getType(), nullptr);
-    coop_log::info("coop_mod: [SUMO] wrestler spawned for the match against {}", s.opponent);
+    coop_log::info("coop_mod: [SUMO] wrestler spawned, opponent={}", s.opponent);
 }
 
 const u8 kChoicesFollow[] = {0x1A, 0x05, 0x00, 0x00, 0x20};
@@ -332,7 +332,7 @@ bool reword(ModContext*, const MessageOverrideContext* message, MessageTextData*
     for (size_t i = 0; i < sizeof(kRewords) / sizeof(kRewords[0]); ++i) {
         if (kRewords[i].id == message->message_id && s_logged[i] != s.since + 1) {
             s_logged[i] = s.since + 1;
-            coop_log::info("coop_mod: [SUMO] our line for message {}", message->message_id);
+            coop_log::info("coop_mod: [SUMO] custom line for message {}", message->message_id);
         }
     }
     s_text.push_back('\0');
@@ -343,7 +343,7 @@ bool reword(ModContext*, const MessageOverrideContext* message, MessageTextData*
 
 void register_rewords() {
     if (svc_message == nullptr) {
-        coop_log::warn("coop_mod: [SUMO] no message service - Bo keeps his own lines");
+        coop_log::warn("coop_mod: [SUMO] no message service, default Bo lines");
         return;
     }
     const u8 languages[] = {MESSAGE_LANGUAGE_ENGLISH, MESSAGE_LANGUAGE_GERMAN, MESSAGE_LANGUAGE_FRENCH,
@@ -366,25 +366,25 @@ const FlowNodeData kBoTalkStartNode = {{0x02, 0x02, 0x00, 0x01, 0x00, 0xE8, 0x00
 const u16 kWrestlerTalkStart = 218;
 const FlowNodeData kWrestlerTalkStartNode = {{0x02, 0x02, 0x00, 0x0A, 0x00, 0x30, 0x00, 0x7E}};
 
-enum TalkPath : u16 { kTalkTheirOwn, kTalkChallenge, kTalkWeWon, kTalkWeLost, kTalkPaths };
+enum TalkPath : u16 { kTalkDefault, kTalkChallenge, kTalkWon, kTalkLost, kTalkPaths };
 
 mods::flow::Query s_talkQuery;
 mods::flow::Graph s_talkGraph;
-std::vector<mods::flow::RegisteredMessage> s_ourMessages;
+std::vector<mods::flow::RegisteredMessage> s_localMessages;
 
-bool we_won(u8 result);
+bool local_won(u8 result);
 
 uint16_t talk_query(ModContext*, const FlowQueryContext* query, void*) {
-    if (query == nullptr || query->speaker_actor == nullptr) return kTalkTheirOwn;
+    if (query == nullptr || query->speaker_actor == nullptr) return kTalkDefault;
     auto* speaker = static_cast<fopAc_ac_c*>(const_cast<void*>(query->speaker_actor));
     const s16 name = fopAcM_GetName(speaker);
-    TalkPath path = kTalkTheirOwn;
+    TalkPath path = kTalkDefault;
 
     if (s.phase == kMatch && s.result != 0 && name == fpcNm_NPC_WRESTLER_e) {
-        path = we_won(s.result) ? kTalkWeWon : kTalkWeLost;
+        path = local_won(s.result) ? kTalkWon : kTalkLost;
     }
-    if (query->phase == FLOW_QUERY_PHASE_EXECUTE && path != kTalkTheirOwn) {
-        coop_log::info("coop_mod: [SUMO] talk: our path {}", static_cast<int>(path));
+    if (query->phase == FLOW_QUERY_PHASE_EXECUTE && path != kTalkDefault) {
+        coop_log::info("coop_mod: [SUMO] talk path {}", static_cast<int>(path));
     }
     return path;
 }
@@ -401,10 +401,10 @@ const mods::flow::MessageStyle kBoStyle = mods::flow::MessageStyle{}
                                               .speaker(kBoVoice)
                                               .box_position(MESSAGE_POSITION_AUTO)
                                               .trailing_data(0x0400);
-const mods::flow::MessageStyle kTheirStyle =
+const mods::flow::MessageStyle kRivalStyle =
     mods::flow::MessageStyle{}.box_position(MESSAGE_POSITION_AUTO).trailing_data(0x0400);
 
-u16 our_message(const mods::flow::MessageBuilder& builder) {
+u16 local_message(const mods::flow::MessageBuilder& builder) {
     const MessageLanguage languages[] = {MESSAGE_LANGUAGE_ENGLISH, MESSAGE_LANGUAGE_GERMAN,
         MESSAGE_LANGUAGE_FRENCH, MESSAGE_LANGUAGE_SPANISH, MESSAGE_LANGUAGE_ITALIAN,
         MESSAGE_LANGUAGE_JAPANESE};
@@ -414,17 +414,17 @@ u16 our_message(const mods::flow::MessageBuilder& builder) {
         mods::flow::register_message(kBoGroup, std::span<const mods::flow::MessageVariant>(variants));
     if (!message) return 0;
     const u16 id = message.id();
-    s_ourMessages.push_back(std::move(message));
+    s_localMessages.push_back(std::move(message));
     return id;
 }
 
 u16 line_of(const mods::flow::MessageStyle& style, const char* text) {
-    return our_message(mods::flow::MessageBuilder{style}.text(text));
+    return local_message(mods::flow::MessageBuilder{style}.text(text));
 }
 
 void build_talks() {
     if (svc_flow == nullptr || svc_message == nullptr) {
-        coop_log::warn("coop_mod: [SUMO] no flow service - Bo keeps his own talk");
+        coop_log::warn("coop_mod: [SUMO] no flow service, default Bo talk");
         return;
     }
     s_talkQuery = mods::flow::register_query("coop sumo talk", talk_query);
@@ -432,17 +432,17 @@ void build_talks() {
         coop_log::warn("coop_mod: [SUMO] flow query refused ({})", static_cast<int>(s_talkQuery.result()));
         return;
     }
-    const u16 choiceMsg = our_message(mods::flow::MessageBuilder{}.options("Sure!", "Maybe later..."));
+    const u16 choiceMsg = local_message(mods::flow::MessageBuilder{}.options("Sure!", "Maybe later..."));
     const u16 yes1Msg = line_of(kBoStyle, "Now this I've gotta see!");
     const u16 yes2Msg = line_of(kBoStyle, "All righty! Into the ring, you two!");
     const u16 noMsg = line_of(kBoStyle, "Maybe next time, eh?");
-    const u16 lost1Msg = line_of(kTheirStyle, "Ugh... you got me!");
-    const u16 lost2Msg = line_of(kTheirStyle, "Good match!");
-    const u16 won1Msg = line_of(kTheirStyle, "Hah! Out you go!");
-    const u16 won2Msg = line_of(kTheirStyle, "Better luck next time!");
+    const u16 lost1Msg = line_of(kRivalStyle, "Ugh... you got me!");
+    const u16 lost2Msg = line_of(kRivalStyle, "Good match!");
+    const u16 won1Msg = line_of(kRivalStyle, "Hah! Out you go!");
+    const u16 won2Msg = line_of(kRivalStyle, "Better luck next time!");
     if (choiceMsg == 0 || yes1Msg == 0 || yes2Msg == 0 || noMsg == 0 || lost1Msg == 0 || lost2Msg == 0 ||
         won1Msg == 0 || won2Msg == 0) {
-        coop_log::warn("coop_mod: [SUMO] our lines refused - Bo keeps his own talk");
+        coop_log::warn("coop_mod: [SUMO] custom lines refused, default Bo talk");
         return;
     }
     using mods::flow::kEnd;
@@ -469,7 +469,7 @@ void build_talks() {
     g.patch_branch(kBoTalkStart, s_talkQuery.id(), 0, boPaths);
     g.patch_branch(kWrestlerTalkStart, s_talkQuery.id(), 0, wrestlerPaths);
     s_talkGraph = g.commit();
-    coop_log::info("coop_mod: [SUMO] our talks: {}", s_talkGraph ? "in" : "refused");
+    coop_log::info("coop_mod: [SUMO] talks: {}", s_talkGraph ? "in" : "refused");
 }
 
 enum Act : u8 {
@@ -681,7 +681,7 @@ bool in_match() {
     return (s.phase == kStarting || s.phase == kMatch) && s.opponent != kCoopNoPlayer;
 }
 
-bool ours(daNpcWrestler_c* w) {
+bool is_match_wrestler(daNpcWrestler_c* w) {
     return in_match() && w != nullptr;
 }
 
@@ -695,12 +695,12 @@ bool mirror_fight() {
 
 void on_ai_post(ModContext*, void* args, void*, void*) {
     auto* w = mods::arg<daNpcWrestler_c*>(args, 0);
-    if (ours(w)) w->mWrestlerAction = kMoveWait;
+    if (is_match_wrestler(w)) w->mWrestlerAction = kMoveWait;
 }
 
 HookAction on_wait_pre(ModContext*, void* args, void* r, void*) {
     auto* w = mods::arg<daNpcWrestler_c*>(args, 0);
-    if (!ours(w)) return HOOK_CONTINUE;
+    if (!is_match_wrestler(w)) return HOOK_CONTINUE;
     if (!s.fight) {
 
         s.fight = true;
@@ -715,7 +715,7 @@ HookAction on_wait_pre(ModContext*, void* args, void* r, void*) {
     if (s.move != 0 && s_frame - s.moveAt <= kMoveStale) {
         w->mWrestlerAction = s.move;
         w->field_0xe80 = -1;
-        coop_log::info("coop_mod: [SUMO] the wrestler makes their move {}", s.move);
+        coop_log::info("coop_mod: [SUMO] wrestler move {}", s.move);
         s.move = 0;
     } else {
 
@@ -728,14 +728,14 @@ HookAction on_wait_pre(ModContext*, void* args, void* r, void*) {
 
 void on_step_angle_post(ModContext*, void* args, void*, void*) {
     auto* w = mods::arg<daNpcWrestler_c*>(args, 0);
-    if (!ours(w) || !s.authority || s.stepDir == 0) return;
+    if (!is_match_wrestler(w) || !s.authority || s.stepDir == 0) return;
     const s16 speed = static_cast<s16>(std::abs(w->mStepAngle));
     w->mStepAngle = s.stepDir > 0 ? speed : static_cast<s16>(-speed);
 }
 
 HookAction on_side_step_pre(ModContext*, void* args, void* r, void*) {
     auto* w = mods::arg<daNpcWrestler_c*>(args, 0);
-    if (!ours(w) || !s.authority || w->field_0xe96 != 2 || w->field_0xe80 > 0) return HOOK_CONTINUE;
+    if (!is_match_wrestler(w) || !s.authority || w->field_0xe96 != 2 || w->field_0xe80 > 0) return HOOK_CONTINUE;
     daPy_py_c* player = daPy_getPlayerActorClass();
     if (player == nullptr || !player->checkSumouTackleMiss() || s.move == kMoveTackle) return HOOK_CONTINUE;
     set_action(w, kActWait);
@@ -745,7 +745,7 @@ HookAction on_side_step_pre(ModContext*, void* args, void* r, void*) {
 
 HookAction on_stagger_pre(ModContext*, void* args, void*, void*) {
     auto* w = mods::arg<daNpcWrestler_c*>(args, 0);
-    if (!ours(w) || !s.authority) return HOOK_CONTINUE;
+    if (!is_match_wrestler(w) || !s.authority) return HOOK_CONTINUE;
     if (w->field_0xe96 == 0) {
         s.mashBase = s.mashes;
         s.pushedSince = s_frame;
@@ -763,7 +763,7 @@ HookAction on_stagger_pre(ModContext*, void* args, void*, void*) {
 
 HookAction on_wrestler_voice_pre(ModContext*, void* args, void*, void*) {
     auto* w = mods::arg<daNpcWrestler_c*>(args, 0);
-    if (!ours(w)) return HOOK_CONTINUE;
+    if (!is_match_wrestler(w)) return HOOK_CONTINUE;
 
     if (mirror_fight()) return HOOK_SKIP_ORIGINAL;
     const u8 bck = bck_of(w);
@@ -782,7 +782,7 @@ void clear_match_marks() {
     daNpcF_offTmpBit(0x30);
 }
 
-void back_where_we_stood() {
+void restore_start_pos() {
     daAlink_c* alink = daAlink_getAlinkActorClass();
     if (alink != nullptr && s.home) {
         cXyz at = s.homePos;
@@ -792,7 +792,7 @@ void back_where_we_stood() {
 
 HookAction on_go_home_pre(ModContext*, void* args, void*, void*) {
     auto* w = mods::arg<daNpcWrestler_c*>(args, 0);
-    if (!ours(w) || w->field_0xe96 != 0) return HOOK_CONTINUE;
+    if (!is_match_wrestler(w) || w->field_0xe96 != 0) return HOOK_CONTINUE;
     clear_match_marks();
     s_goingHomeStep = true;
     return HOOK_CONTINUE;
@@ -807,15 +807,15 @@ void on_go_home_post(ModContext*, void* args, void*, void*) {
         bo->setMessageNo(bo->getMessageNo());
         bo->onDispFlag();
     }
-    back_where_we_stood();
-    coop_log::info("coop_mod: [SUMO] home: Bo left to his own talk, us where we stood");
+    restore_start_pos();
+    coop_log::info("coop_mod: [SUMO] match end: Bo talk reset, player restored");
 }
 
 HookAction on_back_to_living_pre(ModContext*, void* args, void*, void*) {
     auto* w = mods::arg<daNpcWrestler_c*>(args, 0);
-    if (!ours(w)) return HOOK_CONTINUE;
+    if (!is_match_wrestler(w)) return HOOK_CONTINUE;
     if (auto* bo = static_cast<daNpcBouS_c*>(fpcM_SearchByID(w->parentActorID))) bo->onDispFlag();
-    back_where_we_stood();
+    restore_start_pos();
 
     clear_match_marks();
     w->field_0xe99 = 1;
@@ -894,12 +894,12 @@ void mirror_frame(daAlink_c* alink, daNpcWrestler_c* w) {
             send(s.opponent, kSumoMash, 1);
         } else {
             send(s.opponent, kSumoMove, kMoveTackle);
-            coop_log::info("coop_mod: [SUMO] our move: tackle");
+            coop_log::info("coop_mod: [SUMO] local move: tackle");
         }
     } else if (alink->swordTrigger()) {
         if (!pushed(act) && !pushing(act)) {
             send(s.opponent, kSumoMove, kMoveSlap);
-            coop_log::info("coop_mod: [SUMO] our move: slap");
+            coop_log::info("coop_mod: [SUMO] local move: slap");
         }
     } else if (!pushed(act) && !pushing(act) && alink->checkInputOnR() &&
                s_frame - s.sideSentAt >= kSideRepeat) {
@@ -1001,28 +1001,28 @@ bool pvp_next_action(daNpcWrestler_c* w) {
 
 HookAction on_next_action_pre(ModContext*, void* args, void* r, void*) {
     auto* w = mods::arg<daNpcWrestler_c*>(args, 0);
-    if (!ours(w)) return HOOK_CONTINUE;
+    if (!is_match_wrestler(w)) return HOOK_CONTINUE;
     const bool acted = pvp_next_action(w);
     if (r != nullptr) *static_cast<bool*>(r) = acted;
     return HOOK_SKIP_ORIGINAL;
 }
 
 HookAction on_wrestler_draw_pre(ModContext*, void* args, void* r, void*) {
-    if (!ours(mods::arg<daNpcWrestler_c*>(args, 0))) return HOOK_CONTINUE;
+    if (!is_match_wrestler(mods::arg<daNpcWrestler_c*>(args, 0))) return HOOK_CONTINUE;
     if (r != nullptr) *static_cast<int*>(r) = 1;
     return HOOK_SKIP_ORIGINAL;
 }
 
-bool we_won(u8 result) {
+bool local_won(u8 result) {
     return result == (s.authority ? kSumoChallengerWon : kSumoChallengedWon);
 }
 
-u8 result_for(bool weWon) {
-    return (weWon == s.authority) ? kSumoChallengerWon : kSumoChallengedWon;
+u8 result_for(bool localWon) {
+    return (localWon == s.authority) ? kSumoChallengerWon : kSumoChallengedWon;
 }
 
 void ring_out(void* args, void* r, bool player) {
-    if (r == nullptr || !ours(mods::arg<daNpcWrestler_c*>(args, 0))) return;
+    if (r == nullptr || !is_match_wrestler(mods::arg<daNpcWrestler_c*>(args, 0))) return;
     bool& out = *static_cast<bool*>(r);
     if (!s.authority && s.result == 0) {
         out = false;
@@ -1036,7 +1036,7 @@ void ring_out(void* args, void* r, bool player) {
         coop_log::info("coop_mod: [SUMO] ring-out seen here: {}", player ? "we lost" : "we won");
     }
     if (s.result != 0) {
-        out = player ? !we_won(s.result) : we_won(s.result);
+        out = player ? !local_won(s.result) : local_won(s.result);
     }
 }
 
@@ -1074,7 +1074,7 @@ void sumo_after_player(daAlink_c* alink) {
     } else if (s.phase == kAsked && prompt_target(alink) == s.opponent) {
         target = s.opponent;
     }
-    if (s_promptFor != kCoopNoPlayer && s_promptFor == target && alink->doTrigger()) {
+    if (s_promptTarget != kCoopNoPlayer && s_promptTarget == target && alink->doTrigger()) {
         if (s.phase == kIdle) {
             challenge(target);
         } else if (s.phase == kAsked) {
@@ -1083,7 +1083,7 @@ void sumo_after_player(daAlink_c* alink) {
     }
 
     if (s_waitingFrom != kCoopNoPlayer) {
-        if (free_to_be_asked(alink)) {
+        if (can_be_challenged(alink)) {
             take_challenge(s_waitingFrom);
             s_waitingFrom = kCoopNoPlayer;
         } else if (s_frame - s_waitingSince > kRematchWait) {
@@ -1091,8 +1091,8 @@ void sumo_after_player(daAlink_c* alink) {
             s_waitingFrom = kCoopNoPlayer;
         }
     }
-    s_promptFor = (s.phase == kIdle || s.phase == kAsked) ? target : kCoopNoPlayer;
-    s_labelActive = s_promptFor != kCoopNoPlayer;
+    s_promptTarget = (s.phase == kIdle || s.phase == kAsked) ? target : kCoopNoPlayer;
+    s_labelActive = s_promptTarget != kCoopNoPlayer;
     if (s_labelActive && dComIfGp_getDoStatus() == 0) {
         dComIfGp_setDoStatus(BUTTON_STATUS_SPEAK, BUTTON_STATUS_FLAG_NONE);
     }
@@ -1139,7 +1139,7 @@ void sumo_after_player(daAlink_c* alink) {
             if (in_end_scene(wrestler)) {
                 s.ended = true;
             } else if (s_frame - s.resultAt >= 2) {
-                const bool won = we_won(s.result);
+                const bool won = local_won(s.result);
                 s.ended = set_action(wrestler, won ? kActLose : kActWin);
                 coop_log::info("coop_mod: [SUMO] ending the match here: {} ({})", won ? "we won" : "we lost",
                     s.ended ? "done" : "no scene to play");
@@ -1166,7 +1166,7 @@ void sumo_on_message(const uint8_t* payload, size_t size, uint8_t from) {
     daAlink_c* alink = daAlink_getAlinkActorClass();
     switch (msg.kind) {
     case kSumoChallenge: {
-        if (free_to_be_asked(alink)) {
+        if (can_be_challenged(alink)) {
             take_challenge(from);
             return;
         }
@@ -1175,11 +1175,11 @@ void sumo_on_message(const uint8_t* payload, size_t size, uint8_t from) {
 
             s_waitingFrom = from;
             s_waitingSince = s_frame;
-            coop_log::info("coop_mod: [SUMO] {} wants a rematch - once this match is over", from);
+            coop_log::info("coop_mod: [SUMO] {} wants rematch after this match", from);
             return;
         }
         send(from, kSumoAnswer, 0);
-        coop_log::info("coop_mod: [SUMO] {} challenged us - not free, said no", from);
+        coop_log::info("coop_mod: [SUMO] challenged by {}, busy, declined", from);
         return;
     }
     case kSumoAnswer:
@@ -1225,11 +1225,11 @@ void sumo_on_message(const uint8_t* payload, size_t size, uint8_t from) {
         if (s.result == 0) {
             s.result = msg.value;
             s.resultAt = s_frame;
-            coop_log::info("coop_mod: [SUMO] ring-out seen there: {}", we_won(s.result) ? "we won" : "we lost");
+            coop_log::info("coop_mod: [SUMO] ring-out seen there: {}", local_won(s.result) ? "we won" : "we lost");
         } else if (s.result != msg.value) {
 
-            coop_log::info("coop_mod: [SUMO] both screens saw a ring-out at once - {}",
-                s.authority ? "ours stands" : "the challenger's stands");
+            coop_log::info("coop_mod: [SUMO] simultaneous ring-out: {}",
+                s.authority ? "is_match_wrestler stands" : "the challenger's stands");
             if (s.authority) {
                 send(s.opponent, kSumoResult, s.result);
             } else {
@@ -1339,7 +1339,7 @@ void sumo_init() {
     };
     int failed = 0;
     for (int result : results) failed += result != 0 ? 1 : 0;
-    coop_log::info("coop_mod: [SUMO] {} of {} hooks in; {} of {} wrestler actions",
+    coop_log::info("coop_mod: [SUMO] hooks {}/{}, wrestler actions {}/{}",
         static_cast<int>(sizeof(results) / sizeof(results[0])) - failed,
         static_cast<int>(sizeof(results) / sizeof(results[0])), resolved, static_cast<int>(kActCount));
 }

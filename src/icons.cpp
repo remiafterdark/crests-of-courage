@@ -53,7 +53,7 @@ void load_for(const std::string& model) {
     file.read(magic, 9);
     file.read(reinterpret_cast<char*>(&count), sizeof(count));
     if (std::memcmp(magic, "COOPICON1", 9) != 0 || count == 0 || count > 4096) {
-        coop_log::warn("coop_mod: [ICON] '{}' icons.bin is not one of ours", model);
+        coop_log::warn("coop_mod: [ICON] '{}' icons.bin format unknown", model);
         s_loaded = model;
         return;
     }

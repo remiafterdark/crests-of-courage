@@ -58,7 +58,7 @@ bool in_gameplay() {
 
 bool boss_sync_on() {
     return coop_net_connected() && coop_session(kSessBosses, cfg_bool(s_enableVar, false)) &&
-           in_gameplay() && peer_on_our_stage();
+           in_gameplay() && peer_shares_stage();
 }
 
 bool boss_wait_possible() {
@@ -73,8 +73,8 @@ struct BossList {
 };
 
 void note_boss_beaten(const char* stage, int room);
-bool boss_already_beaten(const char* stage, int room);
-bool kind_holds_a_fight(uint8_t kind);
+bool boss_defeated(const char* stage, int room);
+bool kind_has_fight(uint8_t kind);
 
 uint8_t kind_of(s16 procName) {
     switch (procName) {
@@ -328,7 +328,7 @@ bool s_hostInDemo = false;
 
 uint8_t s_fightOwner = kCoopNoPlayer;
 
-bool i_run_the_fight() {
+bool is_fight_authority() {
     return s_fightOwner == coop_net_local_id();
 }
 
@@ -379,12 +379,10 @@ void write_diababa(fopAc_ac_c* actor, const MsgBossActor& m) {
             b->mMode = 0;
             b->mDemoMode = kBqDemoDeath;
             b->mDemoModeTimer = 0;
-            coop_log::info("coop_mod: [BOSS] the fight is over - starting the death demo "
-                            "(action={} demoMode={}), the rest is local",
+            coop_log::info("coop_mod: [BOSS] fight over, death demo start action={} demoMode={}, local from now",
                             static_cast<int>(b->mAction), static_cast<int>(b->mDemoMode));
         } else {
-            coop_log::info("coop_mod: [BOSS] the fight is over - we were already dying "
-                            "(demoMode={}), the rest is local", static_cast<int>(b->mDemoMode));
+            coop_log::info("coop_mod: [BOSS] fight over, already dying demoMode={}, local from now", static_cast<int>(b->mDemoMode));
         }
         return;
     }
@@ -428,7 +426,7 @@ bool bh_action_is_eating(s16 action) {
 }
 
 void write_tentacle(fopAc_ac_c* actor, const MsgBossActor& m) {
-    const bool ourHit = in_hit_grace(kBossKindTentacle, m.index);
+    const bool localHit = in_hit_grace(kBossKindTentacle, m.index);
     auto* t = reinterpret_cast<b_bh_class*>(actor);
     if (s_fightOver) return;
 
@@ -444,7 +442,7 @@ void write_tentacle(fopAc_ac_c* actor, const MsgBossActor& m) {
     write_morf(t->mpModelMorf, m);
 
     adapter_write_fields(actor, adapter_for_kind(kBossKindTentacle), m,
-        ourHit ? boss_skip_action_mode() : 0);
+        localHit ? boss_skip_action_mode() : 0);
     for (int i = 0; i < 5; ++i) t->mTimers[i] = m.timers[i];
     for (int i = 0; i < 17; ++i) t->field_0x8d4[i] = m.extra[i];
 }
@@ -589,12 +587,11 @@ void write_ook(fopAc_ac_c* actor, const MsgBossActor& m) {
         if (actor->health > 0) actor->health = 0;
 
         mDoAud_subBgmStop();
-        coop_log::info("coop_mod: [BOSS] Ook is down - starting our own death demo, "
-                        "and he is local from here");
+        coop_log::info("coop_mod: [BOSS] Ook down, local death demo");
         return;
     }
 
-    const bool ourHit = in_hit_grace(kBossKindOok, m.index);
+    const bool localHit = in_hit_grace(kBossKindOok, m.index);
     if (actor->health > m.health) actor->health = m.health;
     const s16 keepHealth = actor->health;
 
@@ -607,7 +604,7 @@ void write_ook(fopAc_ac_c* actor, const MsgBossActor& m) {
     }
     write_morf(o->anmP, m);
     adapter_write_fields(actor, adapter_for_kind(kBossKindOok), m,
-        ourHit ? boss_skip_action_mode() : 0);
+        localHit ? boss_skip_action_mode() : 0);
     for (int i = 0; i < 4; ++i) o->timer[i] = m.timers[i];
     o->posTarget.set(m.targetPos[0], m.targetPos[1], m.targetPos[2]);
     ook_fix_db_target(o);
@@ -643,7 +640,7 @@ void cache_state(const MsgBossActor& m) {
     }
 }
 
-void still_the_body(fopAc_ac_c* actor) {
+void is_same_body(fopAc_ac_c* actor) {
     actor->speed.set(0.0f, 0.0f, 0.0f);
     actor->speedF = 0.0f;
     actor->gravity = 0.0f;
@@ -679,7 +676,7 @@ void reapply_cached(BossList& list, bool afterExecute) {
         }
         s_morfAhead = 0.0f;
 
-        if (!kind_has_flag(m.kind, kBossSelfMoving) || host_stalled()) still_the_body(actor);
+        if (!kind_has_flag(m.kind, kBossSelfMoving) || host_stalled()) is_same_body(actor);
     }
 }
 
@@ -842,7 +839,7 @@ void refresh_boss_procs(BossList& list) {
 
 HookAction on_boss_execute_pre(ModContext*, void* args, void*, void*) {
     if (s_lieDepth++ != 0) return HOOK_CONTINUE;
-    if (s_bossProcCount == 0 || !i_run_the_fight()) return HOOK_CONTINUE;
+    if (s_bossProcCount == 0 || !is_fight_authority()) return HOOK_CONTINUE;
     auto* proc = mods::arg<base_process_class*>(args, 0);
     if (proc == nullptr) return HOOK_CONTINUE;
     const uint8_t show = boss_proc_shows(proc->id);
@@ -918,7 +915,7 @@ void report_hit(uint8_t kind, uint8_t index, uint8_t collider, dCcD_GObjInf* tg)
                        : 0;
     msg.fastCut = (alink != nullptr && daPy_getPlayerActorClass()->checkFastSwordCut()) ? 1 : 0;
     coop_net_send(kMsgBossHit, &msg, sizeof(msg));
-    coop_log::info("coop_mod: [BOSS] we hit kind={} collider={} attacker={} atp={} - telling the host",
+    coop_log::info("coop_mod: [BOSS] local hit kind={} collider={} attacker={} atp={}, sent to host",
         static_cast<int>(kind), static_cast<int>(collider), static_cast<int>(msg.attackerName),
         static_cast<int>(msg.atp));
 }
@@ -933,7 +930,7 @@ struct HitGrace {
 };
 HitGrace s_hitGrace[kMaxBossActors];
 
-void note_our_hit(uint8_t kind, uint8_t index) {
+void record_local_hit(uint8_t kind, uint8_t index) {
     for (int i = 0; i < kMaxBossActors; ++i) {
         if (s_hitGrace[i].used && s_hitGrace[i].kind == kind && s_hitGrace[i].index == index) {
             s_hitGrace[i].until = s_tick + kHitGraceTicks;
@@ -959,7 +956,7 @@ bool in_hit_grace(uint8_t kind, uint8_t index) {
     return false;
 }
 
-void capture_our_hits() {
+void capture_local_hits() {
     BossList list;
     collect(list);
     for (int i = 0; i < list.count; ++i) {
@@ -967,24 +964,24 @@ void capture_our_hits() {
             auto* bq = reinterpret_cast<b_bq_class*>(list.actors[i]);
             if (bq->mCcSph.ChkTgHit()) {
                 report_hit(kBossKindDiababa, list.indices[i], kBossColliderBody, &bq->mCcSph);
-                note_our_hit(kBossKindDiababa, list.indices[i]);
+                record_local_hit(kBossKindDiababa, list.indices[i]);
             }
             if (bq->mCcCoreSph.ChkTgHit()) {
                 report_hit(kBossKindDiababa, list.indices[i], kBossColliderCore, &bq->mCcCoreSph);
-                note_our_hit(kBossKindDiababa, list.indices[i]);
+                record_local_hit(kBossKindDiababa, list.indices[i]);
             }
         } else if (list.kinds[i] == kBossKindTentacle) {
             auto* bh = reinterpret_cast<b_bh_class*>(list.actors[i]);
             if (bh->mTgSph.ChkTgHit()) {
                 report_hit(kBossKindTentacle, list.indices[i], kBossColliderTentacle, &bh->mTgSph);
-                note_our_hit(kBossKindTentacle, list.indices[i]);
+                record_local_hit(kBossKindTentacle, list.indices[i]);
             }
         } else if (list.kinds[i] == kBossKindOok) {
 
             auto* ook = reinterpret_cast<e_mk_class*>(list.actors[i]);
             if (ook->tgSph.ChkTgHit()) {
                 report_hit(kBossKindOok, list.indices[i], kBossColliderOok, &ook->tgSph);
-                note_our_hit(kBossKindOok, list.indices[i]);
+                record_local_hit(kBossKindOok, list.indices[i]);
             }
         }
     }
@@ -1022,7 +1019,7 @@ void apply_remote_hit(const MsgBossHit& msg) {
             bq->field_0x6de = 30;
             bq->field_0x11fc++;
             dComIfGs_onOneZoneSwitch(8, -1);
-            coop_log::info("coop_mod: [BOSS] their bomb stunned Diababa");
+            coop_log::info("coop_mod: [BOSS] remote bomb stunned Diababa");
             return;
         }
         if (msg.collider == kBossColliderCore) {
@@ -1041,7 +1038,7 @@ void apply_remote_hit(const MsgBossHit& msg) {
                 bq->mAction = kBqActionEnd;
                 bq->mMode = 0;
                 bq->mDemoMode = kBqDemoDeath;
-                coop_log::info("coop_mod: [BOSS] their finishing spin on the core - Diababa is done");
+                coop_log::info("coop_mod: [BOSS] remote finishing spin on core, Diababa done");
                 return;
             }
             if (finished) {
@@ -1049,14 +1046,14 @@ void apply_remote_hit(const MsgBossHit& msg) {
             } else if (msg.cutCount != 0 && bq->mTimers[0] < 30) {
                 bq->mTimers[0] = 30;
             }
-            coop_log::info("coop_mod: [BOSS] their hit on the core: hp now {}", hp);
+            coop_log::info("coop_mod: [BOSS] remote core hit hp={}", hp);
             return;
         }
     } else if (msg.kind == kBossKindTentacle) {
         int hp = actor->health - power_class_to_damage(msg.atp);
         if (hp < 0) hp = 0;
         actor->health = static_cast<s16>(hp);
-        coop_log::info("coop_mod: [BOSS] their hit on a tentacle: hp now {}", hp);
+        coop_log::info("coop_mod: [BOSS] remote tentacle hit hp={}", hp);
     } else if (msg.kind == kBossKindOok) {
 
         auto* ook = reinterpret_cast<e_mk_class*>(actor);
@@ -1072,23 +1069,23 @@ void apply_remote_hit(const MsgBossHit& msg) {
             ook->invulnerabilityTimer = 20000;
 
             mDoAud_subBgmStop();
-            coop_log::info("coop_mod: [BOSS] their blow killed Ook - starting his death demo");
+            coop_log::info("coop_mod: [BOSS] remote blow killed Ook, death demo start");
         } else {
             ook->action = e_mk_class::ACT_DAMAGE;
             ook->mode = 0;
             ook->invulnerabilityTimer = 10;
-            coop_log::info("coop_mod: [BOSS] their hit on Ook: hp now {}", hp);
+            coop_log::info("coop_mod: [BOSS] remote Ook hit hp={}", hp);
         }
     }
 }
 
 void on_boss_collision_post(ModContext*, void*, void*, void*) {
-    if (!boss_sync_on() || i_run_the_fight()) return;
-    capture_our_hits();
+    if (!boss_sync_on() || is_fight_authority()) return;
+    capture_local_hits();
 }
 
 HookAction on_boss_collision_pre(ModContext*, void*, void*, void*) {
-    if (!boss_sync_on() || i_run_the_fight()) return HOOK_CONTINUE;
+    if (!boss_sync_on() || is_fight_authority()) return HOOK_CONTINUE;
     BossList list;
     collect(list);
     reapply_cached(list, true);
@@ -1245,7 +1242,7 @@ void queue_wait_popup(bool visible, const char* top, const char* bottom) {
     dComIfGd_set2DXlu(&s_waitDlst);
 }
 
-void boss_go_anyway();
+void boss_force_start();
 
 ConfigVarHandle s_waitVar = 0;
 
@@ -1256,11 +1253,11 @@ char s_readyStage[kCoopMaxPlayers][8] = {};
 int8_t s_readyRoom[kCoopMaxPlayers] = {};
 const uint32_t kReadyStaleTicks = 200;
 
-bool ready_for_our_fight(uint8_t id);
+bool fight_ready(uint8_t id);
 
 bool local_ready_now();
 
-bool fight_already_underway(BossList& list) {
+bool fight_in_progress(BossList& list) {
     for (int i = 0; i < list.count; ++i) {
         if (list.kinds[i] != kBossKindDiababa) continue;
         if (reinterpret_cast<b_bq_class*>(list.actors[i])->mAction != 0) return true;
@@ -1278,11 +1275,11 @@ bool player_ready(uint8_t id) {
     if (id == coop_net_local_id()) return local_ready_now();
     if ((s_remoteReady & (1u << id)) == 0) return false;
 
-    if (!ready_for_our_fight(id)) return false;
+    if (!fight_ready(id)) return false;
     return s_tick - s_readyStamp[id] <= kReadyStaleTicks;
 }
 
-int players_still_coming() {
+int players_pending() {
     const uint16_t roster = coop_net_roster();
     int missing = 0;
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
@@ -1304,7 +1301,7 @@ int others_ready_count() {
     return n;
 }
 
-int others_still_coming() {
+int peers_pending() {
     const uint16_t roster = coop_net_roster();
     int missing = 0;
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
@@ -1316,12 +1313,12 @@ int others_still_coming() {
 }
 int s_waitTicks = 0;
 const int kMaxWaitTicks = 30 * 60;
-bool s_goAnyway = false;
+bool s_forceStart = false;
 bool s_wasWaiting = false;
 int s_bossRoom = -1;
 char s_bossStage[8] = {};
 
-bool ready_for_our_fight(uint8_t id) {
+bool fight_ready(uint8_t id) {
     if (id >= kCoopMaxPlayers) return false;
     if (s_bossRoom < 0) return false;
     if (s_readyRoom[id] != static_cast<int8_t>(s_bossRoom)) return false;
@@ -1362,7 +1359,7 @@ void update_ready_latch() {
 
     if (settled || wedged || s_roomTicks > kReadyLatchCeiling) {
         s_readyLatched = true;
-        coop_log::info("coop_mod: [BOSS] through the entry cutscene ({}) - ready",
+        coop_log::info("coop_mod: [BOSS] entry cutscene done ({}), ready",
             settled ? (s_sawEvent ? "the entry cutscene ended" : "there was no entry cutscene")
                     : (wedged ? "the intro is wedged behind our own hold" : "waited long enough"));
     }
@@ -1384,7 +1381,7 @@ const int kMaxBeatenBosses = 16;
 BeatenBoss s_beaten[kMaxBeatenBosses];
 int s_beatenCount = 0;
 
-bool boss_already_beaten(const char* stage, int room) {
+bool boss_defeated(const char* stage, int room) {
     if (stage == nullptr || room < 0) return false;
     for (int i = 0; i < s_beatenCount; ++i) {
         if (s_beaten[i].room == static_cast<int8_t>(room) &&
@@ -1396,12 +1393,12 @@ bool boss_already_beaten(const char* stage, int room) {
 }
 
 void note_boss_beaten(const char* stage, int room) {
-    if (stage == nullptr || room < 0 || boss_already_beaten(stage, room)) return;
+    if (stage == nullptr || room < 0 || boss_defeated(stage, room)) return;
     if (s_beatenCount >= kMaxBeatenBosses) return;
     std::memcpy(s_beaten[s_beatenCount].stage, stage, 8);
     s_beaten[s_beatenCount].room = static_cast<int8_t>(room);
     ++s_beatenCount;
-    coop_log::info("coop_mod: [BOSS] {}:{} is beaten - the door wait will not run here again",
+    coop_log::info("coop_mod: [BOSS] {}:{} defeated, door wait disabled",
         stage, room);
 }
 
@@ -1412,7 +1409,7 @@ bool local_in_boss_room(BossList& list) {
     if (stage == nullptr) return false;
 
     for (int i = 0; i < list.count; ++i) {
-        if (!kind_holds_a_fight(list.kinds[i])) continue;
+        if (!kind_has_fight(list.kinds[i])) continue;
         s_bossRoom = fopAcM_GetRoomNo(list.actors[i]);
         std::memcpy(s_bossStage, stage, 8);
         break;
@@ -1436,7 +1433,7 @@ s16 s_heldAction = -1;
 s16 s_heldDemoMode = -1;
 s16 s_heldDemoTimer = -1;
 
-bool kind_holds_a_fight(uint8_t kind) {
+bool kind_has_fight(uint8_t kind) {
     return kind_has_flag(kind, kBossHoldsDoor);
 }
 
@@ -1456,8 +1453,7 @@ void hold_fight(BossList& list) {
                 if (ook->demoMode != e_mk_class::DEMO_MODE_NONE && s_heldOokDemo < 0) {
                     s_heldOokDemo = ook->demoMode;
                     s_heldOokSubDemo = ook->demoSubMode;
-                    coop_log::info("coop_mod: [BOSS] caught Ook's intro trying to start "
-                                    "(demoMode={} sub={}) - holding it until everyone is here",
+                    coop_log::info("coop_mod: [BOSS] holding Ook intro demoMode={} sub={} until all players arrive",
                         s_heldOokDemo, s_heldOokSubDemo);
                 }
                 if (s_heldOokDemo >= 0) {
@@ -1477,8 +1473,7 @@ void hold_fight(BossList& list) {
         if (bq->mDemoMode != 0 && s_heldDemoMode < 0) {
             s_heldDemoMode = bq->mDemoMode;
             s_heldDemoTimer = bq->mDemoModeTimer;
-            coop_log::info("coop_mod: [BOSS] caught the intro trying to start (demoMode={}) - "
-                            "holding it until everyone is here", s_heldDemoMode);
+            coop_log::info("coop_mod: [BOSS] holding intro demoMode={} until all players arrive", s_heldDemoMode);
         }
         if (bq->mAction != 0 && s_heldAction < 0) s_heldAction = bq->mAction;
         bq->mAction = 0;
@@ -1501,7 +1496,7 @@ bool release_fight(BossList& list) {
                     ook->demoSubMode = static_cast<s16>(s_heldOokSubDemo);
                 }
                 if (ook->action == e_mk_class::ACT_S_DEMO && ook->mode == 1) ook->timer[0] = 1;
-                coop_log::info("coop_mod: [BOSS] released Ook - handing back demoMode={} sub={}",
+                coop_log::info("coop_mod: [BOSS] released Ook demoMode={} sub={}",
                     s_heldOokDemo, s_heldOokSubDemo);
                 s_heldOokDemo = -1;
                 s_heldOokSubDemo = -1;
@@ -1517,7 +1512,7 @@ bool release_fight(BossList& list) {
             bq->mDemoModeTimer = s_heldDemoTimer;
         }
         if (s_heldAction >= 0) bq->mAction = s_heldAction;
-        coop_log::info("coop_mod: [BOSS] released - handing back action={} demoMode={}",
+        coop_log::info("coop_mod: [BOSS] released action={} demoMode={}",
             s_heldAction, s_heldDemoMode);
         handedBack = true;
     }
@@ -1547,9 +1542,8 @@ void update_wait(BossList& list) {
     static bool announced = false;
     if (here && !announced) {
         announced = true;
-        coop_log::info("coop_mod: [BOSS] walked into the boss room (room {}) - waitEnabled={} "
-                        "peerInRoom={} goAnyway={}",
-            s_bossRoom, wait_enabled() ? 1 : 0, players_still_coming(), s_goAnyway ? 1 : 0);
+        coop_log::info("coop_mod: [BOSS] entered boss room {} waitEnabled={} peerInRoom={} forceStart={}",
+            s_bossRoom, wait_enabled() ? 1 : 0, players_pending(), s_forceStart ? 1 : 0);
     }
     if (!here) announced = false;
 
@@ -1574,10 +1568,10 @@ void update_wait(BossList& list) {
             discard_held_fight();
         }
 
-        if (s_goAnyway) {
-            s_goAnyway = false;
+        if (s_forceStart) {
+            s_forceStart = false;
             if (wasInRoom) {
-                coop_log::info("coop_mod: [BOSS] left the boss room - the wait is armed again");
+                coop_log::info("coop_mod: [BOSS] left boss room, wait re-armed");
             }
         }
         s_waitText[0] = '\0';
@@ -1594,24 +1588,23 @@ void update_wait(BossList& list) {
         s_sentReady = ready;
         s_lastReadySent = s_tick;
 
-        send_ready(ready, s_goAnyway);
+        send_ready(ready, s_forceStart);
     }
 
-    if (s_wasWaiting && ++s_waitTicks > kMaxWaitTicks && !s_goAnyway) {
-        s_goAnyway = true;
-        coop_log::info("coop_mod: [BOSS] wait timed out after {} ticks - releasing rather than "
-                        "leaving the room stuck", s_waitTicks);
+    if (s_wasWaiting && ++s_waitTicks > kMaxWaitTicks && !s_forceStart) {
+        s_forceStart = true;
+        coop_log::info("coop_mod: [BOSS] wait timed out after {} ticks, releasing", s_waitTicks);
     }
 
-    const bool underway = fight_already_underway(list) && others_ready_count() >= 1;
+    const bool underway = fight_in_progress(list) && others_ready_count() >= 1;
 
-    const int missing = players_still_coming();
-    const int missingShown = others_still_coming();
+    const int missing = players_pending();
+    const int missingShown = peers_pending();
 
     const bool retired = s_fightOver ||
-                         boss_already_beaten(dComIfGp_getStartStageName(), s_bossRoom);
+                         boss_defeated(dComIfGp_getStartStageName(), s_bossRoom);
     const bool waiting =
-        wait_enabled() && !s_goAnyway && missing > 0 && !underway && !retired;
+        wait_enabled() && !s_forceStart && missing > 0 && !underway && !retired;
     if (waiting) {
         hold_fight(list);
 
@@ -1629,10 +1622,10 @@ void update_wait(BossList& list) {
         const bool pressed = (cpad.mPressedButtonFlags & PAD_BUTTON_DOWN) != 0;
         cpad.mPressedButtonFlags &= ~PAD_BUTTON_DOWN;
         cpad.mButtonFlags &= ~PAD_BUTTON_DOWN;
-        if (pressed) boss_go_anyway();
+        if (pressed) boss_force_start();
         if (!s_wasWaiting) {
             s_wasWaiting = true;
-            coop_log::info("coop_mod: [BOSS] holding the fight - {}", s_waitText);
+            coop_log::info("coop_mod: [BOSS] fight held: {}", s_waitText);
         }
     } else if (s_wasWaiting) {
         queue_wait_popup(false, "", "");
@@ -1640,16 +1633,16 @@ void update_wait(BossList& list) {
         s_waitTicks = 0;
         s_wasWaiting = false;
         s_waitText[0] = '\0';
-        coop_log::info("coop_mod: [BOSS] wait over ({}) - starting the fight",
-            s_goAnyway ? "continue anyway" : "everyone is here");
+        coop_log::info("coop_mod: [BOSS] wait over ({}), starting fight",
+            s_forceStart ? "continue anyway" : "everyone is here");
     } else {
         queue_wait_popup(false, "", "");
     }
 }
 
-void boss_go_anyway() {
+void boss_force_start() {
     if (!s_wasWaiting) return;
-    s_goAnyway = true;
+    s_forceStart = true;
     send_ready(s_sentInRoom, true);
     coop_log::info("coop_mod: [BOSS] go anyway pressed");
 }
@@ -1704,13 +1697,13 @@ void boss_on_connected() {
         s_readyStage[i][0] = 0;
         s_readyRoom[i] = -1;
     }
-    s_goAnyway = false;
+    s_forceStart = false;
     s_wasWaiting = false;
     s_sentInRoom = false;
     s_waitText[0] = '\0';
 }
 
-bool boss_waiting_for_peer() {
+bool boss_waiting() {
     return s_wasWaiting;
 }
 
@@ -1750,7 +1743,7 @@ void* scan_pillar_rolls(void* proc, void* data) {
                                               : daPillar_c::SHAKE_CRASH);
     coop_net_send(kMsgPillarShake, &msg, sizeof(msg));
     ++scan->sent;
-    coop_log::info("coop_mod: [PILLAR] rolled into pillar sw={} room={} - telling the others",
+    coop_log::info("coop_mod: [PILLAR] rolled into pillar sw={} room={}, sent",
         static_cast<int>(msg.swBit), static_cast<int>(msg.room));
     return nullptr;
 }
@@ -1826,7 +1819,7 @@ void apply_pillar_shake(const MsgPillarShake& msg) {
     want.homeZ = msg.homeZ;
     want.hit = 0;
     fopAcM_Search(apply_pillar_shake_to, &want);
-    coop_log::info("coop_mod: [PILLAR] the other player rolled into pillar sw={} - shook {}",
+    coop_log::info("coop_mod: [PILLAR] remote roll into pillar sw={}, shook {}",
         static_cast<int>(msg.swBit), want.hit);
 }
 
@@ -1890,7 +1883,7 @@ void announce_bomb_eats(BossList& list) {
         msg.index = list.indices[i];
         msg.phase2 = t->mAction == kBhActionBBombEat ? 1 : 0;
         coop_net_send(kMsgBossBombEat, &msg, sizeof(msg));
-        coop_log::info("coop_mod: [BOSS] head {} took a Bombling (phase2={}) - telling the others",
+        coop_log::info("coop_mod: [BOSS] head {} ate Bombling phase2={}, sent",
             static_cast<int>(msg.index), static_cast<int>(msg.phase2));
     }
 }
@@ -1931,8 +1924,7 @@ void apply_bomb_eat(const MsgBossBombEat& msg) {
 
     EatWatch* w = eat_slot(msg.index);
     if (w != nullptr) w->eating = true;
-    coop_log::info("coop_mod: [BOSS] their Bombling went into head {} (phase2={}, dropped {} of "
-                    "our own bombs)",
+    coop_log::info("coop_mod: [BOSS] remote Bombling into head {} phase2={}, dropped {} local bombs",
         static_cast<int>(msg.index), static_cast<int>(msg.phase2), scan.deleted);
 }
 
@@ -1966,7 +1958,7 @@ uint8_t decide_fight_owner(const BossList& list) {
     int room = -1;
     for (int i = 0; i < list.count; ++i) {
 
-        if (kind_holds_a_fight(list.kinds[i])) {
+        if (kind_has_fight(list.kinds[i])) {
             room = fopAcM_GetRoomNo(list.actors[i]);
             break;
         }
@@ -1975,7 +1967,7 @@ uint8_t decide_fight_owner(const BossList& list) {
 
     const bool ownerStillHere = s_fightOwner != kCoopNoPlayer &&
         (s_fightOwner == coop_net_local_id() || coop_net_player_present(s_fightOwner));
-    if (ownerStillHere && (s_fightOver || s_hostFightOver || boss_already_beaten(stage, room))) {
+    if (ownerStillHere && (s_fightOver || s_hostFightOver || boss_defeated(stage, room))) {
         return s_fightOwner;
     }
 
@@ -2006,7 +1998,7 @@ void boss_update() {
         const uint8_t owner = decide_fight_owner(demoList);
         if (owner != s_fightOwner) {
             if (demoList.count > 0) {
-                coop_log::info("coop_mod: [BOSS] player {} is running the fight now (was {})",
+                coop_log::info("coop_mod: [BOSS] fight authority player {} (was {})",
                     static_cast<int>(owner),
                     s_fightOwner == kCoopNoPlayer ? -1 : static_cast<int>(s_fightOwner));
             }
@@ -2027,7 +2019,7 @@ void boss_update() {
             s_wasWaiting = false;
             s_waitTicks = 0;
             s_waitText[0] = '\0';
-            coop_log::info("coop_mod: [BOSS] disconnected during the door wait - releasing the fight");
+            coop_log::info("coop_mod: [BOSS] disconnected during door wait, releasing fight");
         }
         return;
     }
@@ -2085,7 +2077,7 @@ void boss_update() {
                         "localAction={} localDemo={} remoteAction={} remoteInDemo={} "
                         "proc={:#x} event={} ready={} latched={} roomTicks={}",
             coop_net_local_id(), coop_net_is_host() ? 1 : 0, list.count, cached,
-            boss_sync_on() ? 1 : 0, peer_on_our_stage() ? 1 : 0, in_gameplay() ? 1 : 0,
+            boss_sync_on() ? 1 : 0, peer_shares_stage() ? 1 : 0, in_gameplay() ? 1 : 0,
             coop_session(kSessBosses, cfg_bool(s_enableVar, false)) ? 1 : 0, s_fightOver ? 1 : 0,
             locAct, locDemo, remAct, remDemo,
 
@@ -2097,7 +2089,7 @@ void boss_update() {
     }
 
     if (!boss_sync_on()) return;
-    if (!i_run_the_fight()) {
+    if (!is_fight_authority()) {
 
         reapply_cached(list, false);
         return;
@@ -2110,7 +2102,7 @@ void boss_update() {
     }
 
     if (s_tick % 300 == 0) {
-        coop_log::info("coop_mod: [BOSS] player {} (us) describing {} actors",
+        coop_log::info("coop_mod: [BOSS] player {} (local) describing {} actors",
             static_cast<int>(coop_net_local_id()), list.count);
     }
 }
@@ -2155,15 +2147,15 @@ void boss_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t 
             std::memcpy(s_readyStage[from], msg.stage, sizeof(s_readyStage[from]));
         }
 
-        if (msg.goAnyway != 0 && !s_goAnyway && s_sentInRoom && ready_for_our_fight(from)) {
-            s_goAnyway = true;
-            coop_log::info("coop_mod: [BOSS] the other player chose to go anyway");
+        if (msg.goAnyway != 0 && !s_forceStart && s_sentInRoom && fight_ready(from)) {
+            s_forceStart = true;
+            coop_log::info("coop_mod: [BOSS] peer forced start");
         }
         return;
     }
     if (type == kMsgBossStem) {
 
-        if (i_run_the_fight() || from != s_fightOwner || size < sizeof(MsgBossStem)) return;
+        if (is_fight_authority() || from != s_fightOwner || size < sizeof(MsgBossStem)) return;
         if (!coop_session(kSessBosses, cfg_bool(s_enableVar, false)) || !in_gameplay()) return;
         MsgBossStem m;
         std::memcpy(&m, payload, sizeof(m));
@@ -2172,7 +2164,7 @@ void boss_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t 
     }
     if (type == kMsgBossHit) {
 
-        if (!i_run_the_fight() || size < sizeof(MsgBossHit)) return;
+        if (!is_fight_authority() || size < sizeof(MsgBossHit)) return;
         if (!coop_session(kSessBosses, cfg_bool(s_enableVar, false)) || !in_gameplay()) return;
         MsgBossHit msg;
         std::memcpy(&msg, payload, sizeof(msg));
@@ -2180,7 +2172,7 @@ void boss_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t 
         return;
     }
     if (type != kMsgBossState) return;
-    if (i_run_the_fight() || from != s_fightOwner) return;
+    if (is_fight_authority() || from != s_fightOwner) return;
     if (!coop_session(kSessBosses, cfg_bool(s_enableVar, false)) || !in_gameplay()) return;
     if (size < 1) return;
     const int count = payload[0];

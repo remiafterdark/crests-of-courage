@@ -47,7 +47,7 @@ const u32 kArcHeapWanted = 40u * 1024u * 1024u;
 const u32 kArcHeapMin = 8u * 1024u * 1024u;
 
 std::chrono::steady_clock::time_point s_arcHeapNextTry{};
-bool s_arcHeapSaidLow = false;
+bool s_arcHeapLowLogged = false;
 
 JKRHeap* arc_heap() {
     if (s_arcHeap != nullptr) return s_arcHeap;
@@ -77,18 +77,16 @@ JKRHeap* arc_heap() {
         }
     }
     if (size < kArcHeapMin) {
-        if (!s_arcHeapSaidLow) {
-            s_arcHeapSaidLow = true;
-            coop_log::warn("coop_mod: [ARC] only {} KB free in the root heap - using the game's "
-                           "archive heap until there is room", rootFree / 1024);
+        if (!s_arcHeapLowLogged) {
+            s_arcHeapLowLogged = true;
+            coop_log::warn("coop_mod: [ARC] root heap low ({} KB), using game archive heap", rootFree / 1024);
         }
         return nullptr;
     }
     s_arcHeap = JKRExpHeap::create(size, parent, false);
     if (s_arcHeap != nullptr) {
         s_arcHeap->setName("CoopArcHeap");
-        coop_log::info("coop_mod: [ARC] {} MB of our own for other players' archives, from the {} "
-                       "heap ({} KB free in the root heap)", size >> 20,
+        coop_log::info("coop_mod: [ARC] {} MB reserved for peer archives from {} heap ({} KB free in root)", size >> 20,
             parent == root ? "root" : "game", rootFree / 1024);
     }
     return s_arcHeap;
@@ -103,7 +101,7 @@ void unmount(PrivateArc& a) {
     }
     if (a.archive != nullptr) {
         a.archive->unmount();
-        coop_log::info("coop_mod: [ARC] unmounted our copy of '{}'", a.name);
+        coop_log::info("coop_mod: [ARC] unmounted private '{}'", a.name);
     }
     a = PrivateArc{};
 }
@@ -154,7 +152,7 @@ namespace {
 J3DModelData* private_arc_build(JKRArchive* archive, const char* name, u32 index, void* raw);
 }
 
-JKRHeap* private_arc_heap_if_any() {
+JKRHeap* private_arc_heap_peek() {
     return s_arcHeap;
 }
 
@@ -189,9 +187,9 @@ bool private_arc_request(const char* name) {
     }
 
     if (JKRHeap* heap = arc_heap(); heap != nullptr && heap->getFreeSize() < 4u * 1024u * 1024u) {
-        static int s_saidFull = 0;
-        if (s_saidFull++ % 60 == 0) {
-            coop_log::warn("coop_mod: [ARC] not mounting '{}' yet - {} KB left in our heap", name,
+        static int s_mapFullLogged = 0;
+        if (s_mapFullLogged++ % 60 == 0) {
+            coop_log::warn("coop_mod: [ARC] mount '{}' deferred, {} KB left", name,
                 heap->getFreeSize() / 1024);
         }
         if (slot != nullptr && slot->failed) slot->failedAt = std::chrono::steady_clock::now();
@@ -212,7 +210,7 @@ bool private_arc_request(const char* name) {
         coop_log::warn("coop_mod: [ARC] could not start a private mount of '{}'", a.name);
         return false;
     }
-    coop_log::info("coop_mod: [ARC] mounting our own copy of '{}'", a.name);
+    coop_log::info("coop_mod: [ARC] mounting private '{}'", a.name);
     return true;
 }
 
@@ -231,7 +229,7 @@ int private_arc_poll(const char* name) {
             coop_log::warn("coop_mod: [ARC] private mount of '{}' produced no archive", a->name);
             return -1;
         }
-        coop_log::info("coop_mod: [ARC] '{}' is ours now, {} files", a->name,
+        coop_log::info("coop_mod: [ARC] '{}' private, {} files", a->name,
             static_cast<int>(a->archive->countFile()));
     }
     return a->archive != nullptr ? 1 : -1;
@@ -368,8 +366,7 @@ J3DModelData* private_arc_build(JKRArchive* archive, const char* name, u32 index
     if (parent->getFreeSize() < want + kMountReserve) {
         static int s_noRoomLogged = 0;
         if (s_noRoomLogged++ < 8) {
-            coop_log::warn("coop_mod: [ARC] no room to load '{}' idx {} ({} KB wanted, {} KB free)"
-                           " - that part stays the game's own", name, index, want / 1024,
+            coop_log::warn("coop_mod: [ARC] no room for '{}' idx={} ({} KB wanted, {} KB free), using game part", name, index, want / 1024,
                 parent->getFreeSize() / 1024);
         }
         return nullptr;
@@ -399,7 +396,7 @@ J3DModelData* private_arc_build(JKRArchive* archive, const char* name, u32 index
     heap->adjustSize();
     if (!remember_part_heap(data, heap)) {
 
-        coop_log::warn("coop_mod: [ARC] {} parts loaded at once - not loading '{}' idx {}",
+        coop_log::warn("coop_mod: [ARC] {} parts loading, deferred '{}' idx={}",
             kPartHeapMax, name, index);
         heap->destroy();
         return nullptr;

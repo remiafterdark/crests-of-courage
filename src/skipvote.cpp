@@ -87,7 +87,7 @@ void begin_skip(dEvt_control_c* evt) {
     s_skipping = true;
     evt->mSkipTimer = -1;
     if (evt->mSkipFunc != nullptr && evt->mIsSkipFade) mDoGph_gInf_c::fadeOut(0.1f);
-    coop_log::info("coop_mod: [SKIP] everybody voted - skipping");
+    coop_log::info("coop_mod: [SKIP] all voted, skipping");
 }
 
 HookAction on_skipper(ModContext*, void* args, void* retval, void*) {
@@ -111,7 +111,7 @@ HookAction on_skipper(ModContext*, void* args, void* retval, void*) {
         evt->mSkipTimer = 0;
         announce();
         count_votes(voted, needed);
-        coop_log::info("coop_mod: [SKIP] we voted to skip ({}/{})", voted, needed);
+        coop_log::info("coop_mod: [SKIP] local vote ({}/{})", voted, needed);
         if (voted >= needed) {
             begin_skip(evt);
             return HOOK_CONTINUE;

@@ -19,6 +19,7 @@
 #include "d/d_bg_w.h"
 #include "d/d_stage.h"
 #include "d/d_kankyo.h"
+#include "d/d_shop_system.h"
 #include "f_op/f_op_actor_iter.h"
 #include "mods/service.hpp"
 #include "mods/svc/hook.hpp"
@@ -33,6 +34,8 @@
 DEFINE_HOOK(&daTbox_c::actionOpenWait, TboxOpenWaitHook);
 
 DEFINE_HOOK_SYMBOL("src/d/d_s_play.cpp#phase_1", int(void*), StoryStageLoadHook);
+
+DEFINE_HOOK(&dShopSystem_c::setSoldOut, ShopSoldOutHook);
 
 extern const SaveService* svc_save;
 
@@ -213,7 +216,17 @@ void refresh_local_switches() {
     fpcM_Search(collect_local_switch, nullptr);
 }
 
-uint8_t mem_local_mask(const char*, int byte) {
+bool dungeon_stage(const char* stage);
+
+const int kMemSwitchFirst = 0x08;
+const int kMemSwitchEnd = 0x18;
+
+bool overworld_switch_byte(const char* stage, int byte) {
+    return byte >= kMemSwitchFirst && byte < kMemSwitchEnd && !dungeon_stage(stage);
+}
+
+uint8_t mem_local_mask(const char* stage, int byte) {
+    if (overworld_switch_byte(stage, byte)) return 0xFF;
     uint8_t mask = 0;
     for (int i = 0; i < s_localSwCount; ++i) {
         const int sw = s_localSw[i].sw;
@@ -317,7 +330,7 @@ void send_sync_request(const char stage[8], int saveNo, int room) {
     req.saveNo = static_cast<int8_t>(saveNo);
     req.room = static_cast<int8_t>(room);
     coop_net_send(kMsgWorldSyncRequest, &req, sizeof(req));
-    coop_log::info("coop_mod: [WORLD] asking the other player for {:.8s} {}", stage,
+    coop_log::info("coop_mod: [WORLD] requesting {:.8s} {}", stage,
         room < 0 ? "stage memory" : "room bits");
 }
 
@@ -516,7 +529,7 @@ bool peer_on_stage(const char stage[8]) {
     return features_any_peer_on_stage(stage);
 }
 
-void ask_for_new_regions(dSv_info_c* info, const char stage[8], int saveNo) {
+void request_new_regions(dSv_info_c* info, const char stage[8], int saveNo) {
     if (!peer_on_stage(stage)) {
 
         s_askedStage = false;
@@ -559,7 +572,7 @@ void diff_visited(dSv_info_c* info) {
         }
         if (s_visitedShareDue) {
             s_visitedShareDue = false;
-            coop_log::info("coop_mod: [WORLD] shared {} explored map(s) with the other player",
+            coop_log::info("coop_mod: [WORLD] shared {} explored maps",
                 shared);
         }
         return;
@@ -600,7 +613,7 @@ void diff_light_drop(dSv_info_c* info) {
     set[4] = cur[4];
     send_delta(s_base, kRegionLightDrop, -1, 0, kLightDropSize, set, clr);
     std::memcpy(s_lightDrop.bytes, cur, kLightDropSize);
-    coop_log::info("coop_mod: [WORLD] tears of light now {}/{}/{}/{} (flags {:#04x})",
+    coop_log::info("coop_mod: [WORLD] tears {}/{}/{}/{} flags={:#04x}",
         cur[0], cur[1], cur[2], cur[3], cur[4]);
 }
 
@@ -642,8 +655,7 @@ void hold_status_b(dSv_info_c* info, const uint8_t* set) {
         any = true;
     }
     if (any) {
-        coop_log::info("coop_mod: [WORLD] transform/twilight flags {:#04x}/{:#04x} from another "
-                       "player - applied at our next stage load", s_statusBPending[0],
+        coop_log::info("coop_mod: [WORLD] transform/twilight flags {:#04x}/{:#04x} (remote), deferred to stage load", s_statusBPending[0],
             s_statusBPending[1]);
     }
 }
@@ -664,7 +676,7 @@ void diff_status_b(dSv_info_c* info) {
     }
     if (any) {
         send_delta(s_base, kRegionStatusB, -1, 0, kStatusBSize, set, clr);
-        coop_log::info("coop_mod: [WORLD] transform/twilight flags now {:#04x}/{:#04x}",
+        coop_log::info("coop_mod: [WORLD] transform/twilight flags {:#04x}/{:#04x}",
             cur[0], cur[1]);
     }
     std::memcpy(s_statusB.bytes, cur, kStatusBSize);
@@ -696,14 +708,13 @@ void scan() {
 
     if (local_mid_sequence()) {
         if (s_heldSequenceTicks == 0) {
-            coop_log::info("coop_mod: [WORLD] holding world state - our own sequence is running");
+            coop_log::info("coop_mod: [WORLD] holding world state during local sequence");
         }
         ++s_heldSequenceTicks;
         return;
     }
     if (s_heldSequenceTicks != 0) {
-        coop_log::info("coop_mod: [WORLD] sequence over after {} ticks - publishing what changed "
-                        "during it now", s_heldSequenceTicks);
+        coop_log::info("coop_mod: [WORLD] sequence over after {} ticks, publishing", s_heldSequenceTicks);
         s_heldSequenceTicks = 0;
     }
     char stage[8];
@@ -721,7 +732,7 @@ void scan() {
     const bool dungeon = coop_session(kSessDungeon, cfg_bool(s_dungeonVar, true));
     const bool story = coop_session(kSessStory, cfg_bool(s_storyVar, false));
     refresh_local_switches();
-    if (dungeon) ask_for_new_regions(info, stage, saveNo);
+    if (dungeon) request_new_regions(info, stage, saveNo);
 
     uint8_t* mem = mem_bytes(info->getMemory());
     if (dungeon) {
@@ -867,7 +878,7 @@ void* open_matching_chest(void* proc, void* data) {
             ai += std::snprintf(a + ai, sizeof(a) - ai, "%02x", oursBytes[i]);
             bi += std::snprintf(b + bi, sizeof(b) - bi, "%02x", theirs[i]);
         }
-        coop_log::info("coop_mod: [CHEST] pmf size={} ours(actionWait)={} theirs(current)={}",
+        coop_log::info("coop_mod: [CHEST] pmf size={} local(actionWait)={} remote(current)={}",
             static_cast<int>(sizeof(daTbox_actionFn)), a, b);
     }
 
@@ -901,7 +912,7 @@ void retry_pending_chests() {
     sweep.count = 0;
     fopAcM_Search(open_matching_chest, &sweep);
     if (sweep.count > 0) {
-        coop_log::info("coop_mod: [WORLD] {} chest(s) the other player emptied are shown open now",
+        coop_log::info("coop_mod: [WORLD] {} remotely emptied chests shown open",
             sweep.count);
     }
 }
@@ -1023,7 +1034,7 @@ void open_chests_from_bits(const uint8_t* newlySet) {
     sweep.count = 0;
     fopAcM_Search(open_matching_chest, &sweep);
     if (sweep.count > 0) {
-        coop_log::info("coop_mod: [WORLD] {} chest(s) the other player emptied are now shown open",
+        coop_log::info("coop_mod: [WORLD] {} remotely emptied chests shown open",
             sweep.count);
         return;
     }
@@ -1035,8 +1046,7 @@ void open_chests_from_bits(const uint8_t* newlySet) {
         at += std::snprintf(wanted + at, sizeof(wanted) - at, "%d ", no);
     }
     if (at == 0) std::snprintf(wanted, sizeof(wanted), "(none decoded)");
-    coop_log::warn("coop_mod: [CHEST] a treasure bit arrived and nothing matched it. "
-                    "raw={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} wanted={}",
+    coop_log::warn("coop_mod: [CHEST] treasure bit unmatched raw={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} wanted={}",
         newlySet[0], newlySet[1], newlySet[2], newlySet[3], newlySet[4], newlySet[5], newlySet[6],
         newlySet[7], wanted);
     ChestCensus census{0, 0};
@@ -1086,8 +1096,7 @@ void remove_collected_from_bits(const uint8_t* newlySet) {
     sweep.count = 0;
     fopAcM_Search(remove_matching_drop, &sweep);
     if (sweep.count > 0) {
-        coop_log::info("coop_mod: [WORLD] removed {} collectible(s) the other player already "
-                        "took", sweep.count);
+        coop_log::info("coop_mod: [WORLD] removed {} collectibles taken remotely", sweep.count);
     }
 }
 
@@ -1220,8 +1229,7 @@ void handle_digest(const MsgWorldDigest& msg, uint8_t from) {
 
     if (visited_hash(info) != msg.visitedHash || light_drop_hash(info) != msg.lightDropHash ||
         collect_hash(info) != msg.collectHash || status_b_hash(info) != msg.statusBHash) {
-        coop_log::info("coop_mod: [WORLD] global state differs (maps {:#010x}/{:#010x} tears "
-                        "{:#010x}/{:#010x} collect {:#010x}/{:#010x}) - republishing ours",
+        coop_log::info("coop_mod: [WORLD] global state mismatch maps {:#010x}/{:#010x} tears {:#010x}/{:#010x} collect {:#010x}/{:#010x}, republishing",
             visited_hash(info), msg.visitedHash, light_drop_hash(info), msg.lightDropHash,
             collect_hash(info), msg.collectHash);
         republish_globals(info);
@@ -1234,8 +1242,7 @@ void handle_digest(const MsgWorldDigest& msg, uint8_t from) {
             s_storyWarned = false;
         } else if (!s_storyWarned && ++s_storyDiffFor >= kStoryWarnDigests) {
             s_storyWarned = true;
-            coop_log::warn("coop_mod: [WORLD] story flags have differed for {} seconds "
-                            "({:#010x} vs {:#010x}) - share_story_progress is off",
+            coop_log::warn("coop_mod: [WORLD] story flags differ for {}s ({:#010x} vs {:#010x}), story sharing off",
                 kStoryWarnDigests * kDigestEveryTicks / 60, mine, msg.eventHash);
             features_toast("Story progress doesn't match",
                 "If you get stuck, the host can turn on \"Share story progress\".");
@@ -1268,7 +1275,7 @@ void handle_digest(const MsgWorldDigest& msg, uint8_t from) {
         }
         if (myZone != msg.zoneHash) {
             zoneDiffers = true;
-            coop_log::info("coop_mod: [WORLD] room {} does not match ({:#010x} vs {:#010x})", here,
+            coop_log::info("coop_mod: [WORLD] room {} mismatch {:#010x}/{:#010x}", here,
                 myZone, msg.zoneHash);
             send_sync_request(stage, saveNo, static_cast<int8_t>(here));
         }
@@ -1291,11 +1298,7 @@ void handle_digest(const MsgWorldDigest& msg, uint8_t from) {
     }
     (void)zoneDiffers;
 
-    coop_log::info("coop_mod: [WORLD] our copy of {:.8s} does not match theirs "
-                    "(memory {:#010x}/{:#010x} dungeon {:#010x}/{:#010x} temp {:#010x}/{:#010x} "
-                    "statusB {:#010x}/{:#010x} collect {:#010x}/{:#010x} "
-                    "lightDrop {:#010x}/{:#010x} event {:#010x}/{:#010x} "
-                    "| not repaired: visited {:#010x}/{:#010x}) - asking for theirs",
+    coop_log::info("coop_mod: [WORLD] {:.8s} mismatch memory {:#010x}/{:#010x} dungeon {:#010x}/{:#010x} temp {:#010x}/{:#010x} statusB {:#010x}/{:#010x} collect {:#010x}/{:#010x} lightDrop {:#010x}/{:#010x} event {:#010x}/{:#010x} | visited {:#010x}/{:#010x}, requesting",
         stage, mine, msg.memoryHash, myDan, msg.danHash, myTmp, msg.tmpHash,
         myStatusB, msg.statusBHash, myCollect, msg.collectHash,
         myLightDrop, msg.lightDropHash,
@@ -1345,7 +1348,7 @@ void answer_sync_request(const MsgWorldSyncRequest& req) {
                 send_full(stage, saveNo, kRegionEvent, static_cast<int8_t>(off / 32), shared, 32);
             }
         }
-        coop_log::info("coop_mod: [WORLD] answering stage-memory request for {:.8s}", stage);
+        coop_log::info("coop_mod: [WORLD] answering stage memory request {:.8s}", stage);
         return;
     }
     for (int i = 0; i < kZones; ++i) {
@@ -1410,9 +1413,11 @@ void handle_full(const MsgWorldFull& msg) {
         std::memcpy(memBefore, mem, kMemSize);
 
         const bool keyPending = baselineValid && mem[kKeyOffset] != s_base.mem[kKeyOffset];
-        const uint8_t ourKeys = mem[kKeyOffset];
-        merge_full(mem, baselineValid ? s_base.mem : nullptr, msg.data, kMemSize, true);
-        mem[kKeyOffset] = keyPending ? ourKeys : msg.data[kKeyOffset];
+        const uint8_t localKeys = mem[kKeyOffset];
+
+        merge_full(mem, baselineValid ? s_base.mem : nullptr, msg.data, kMemSize,
+            dungeon_stage(stage));
+        mem[kKeyOffset] = keyPending ? localKeys : msg.data[kKeyOffset];
         keep_mem_local(stage, mem, memBefore);
         if (baselineValid) keep_mem_local(stage, s_base.mem, memBefore);
         open_chests_from_bits(newlySet);
@@ -1479,8 +1484,7 @@ void handle_full(const MsgWorldFull& msg) {
         if (msg.size != 32 || off < 0 || off + 32 > kEventSize) return;
         const int added = story_hold(info, msg.data, off, 32);
         if (added > 0) {
-            coop_log::info("coop_mod: [STORY] {} flag(s) from their copy wait for our next stage "
-                           "({} waiting)", added, s_storyPendingBits);
+            coop_log::info("coop_mod: [STORY] {} remote flags deferred to stage load ({} waiting)", added, s_storyPendingBits);
         }
 
         if (baselineValid && s_base.haveEvent) {
@@ -1546,7 +1550,7 @@ void run_self_test() {
             break;
         }
         coop_log::warn(
-            "coop_mod: [WORLD-SELFTEST] *** DEBUG *** set memory switch {} and room {} zone switch {}",
+            "coop_mod: [WORLD-SELFTEST] set memory switch {} room {} zone switch {}",
             kSelfTestSwitch, room, kSelfTestZoneSwitch);
     }
 
@@ -1623,7 +1627,7 @@ void* collect_open_tbox2(void* proc, void* data) {
         msg.home[1] = actor->home.pos.y;
         msg.home[2] = actor->home.pos.z;
         coop_net_send(kMsgTbox2, &msg, sizeof(msg));
-        coop_log::info("coop_mod: [CHEST] told them about no-save chest {:#x}", key);
+        coop_log::info("coop_mod: [CHEST] sent no-save chest {:#x}", key);
         break;
     }
     return nullptr;
@@ -1667,7 +1671,7 @@ void open_tbox2_from_message(const MsgTbox2& msg) {
         chest->mpBck->setFrame(chest->mpBck->getEndFrame());
         chest->mpBck->setPlaySpeed(0.0f);
     }
-    coop_log::info("coop_mod: [CHEST] no-save chest {:#x} emptied in their game - closing ours",
+    coop_log::info("coop_mod: [CHEST] no-save chest {:#x} emptied remotely, closing",
         msg.key);
 }
 
@@ -1693,8 +1697,7 @@ HookAction on_stage_load_pre(ModContext*, void*, void*, void*) {
             cur[i] = static_cast<uint8_t>(cur[i] | s_statusBPending[i]);
             if (s_statusB.have) s_statusB.bytes[i] = static_cast<uint8_t>(s_statusB.bytes[i] | s_statusBPending[i]);
         }
-        coop_log::info("coop_mod: [WORLD] loading a stage - transform/twilight flags now "
-                       "{:#04x}/{:#04x}", cur[0], cur[1]);
+        coop_log::info("coop_mod: [WORLD] stage load, transform/twilight flags {:#04x}/{:#04x}", cur[0], cur[1]);
         std::memset(s_statusBPending, 0, sizeof(s_statusBPending));
     }
     if (s_storyPendingBits == 0) return HOOK_CONTINUE;
@@ -1704,8 +1707,7 @@ HookAction on_stage_load_pre(ModContext*, void*, void*, void*) {
 
         if (s_base.haveEvent) s_base.event[b] = static_cast<uint8_t>(s_base.event[b] | s_storyPending[b]);
     }
-    coop_log::info("coop_mod: [STORY] loading a stage - {} story flag(s) from the other players "
-                   "go in now, before it reads them", s_storyPendingBits);
+    coop_log::info("coop_mod: [STORY] stage load, applying {} remote flags", s_storyPendingBits);
     std::memset(s_storyPending, 0, sizeof(s_storyPending));
     s_storyPendingBits = 0;
     return HOOK_CONTINUE;
@@ -1713,12 +1715,69 @@ HookAction on_stage_load_pre(ModContext*, void*, void*, void*) {
 
 void forget_pending_story(ModContext*, uint32_t, void*) {
     if (s_storyPendingBits != 0) {
-        coop_log::info("coop_mod: [STORY] another file - dropping {} waiting flag(s)",
+        coop_log::info("coop_mod: [STORY] file changed, dropped {} pending flags",
             s_storyPendingBits);
     }
     std::memset(s_storyPending, 0, sizeof(s_storyPending));
     s_storyPendingBits = 0;
     std::memset(s_statusBPending, 0, sizeof(s_statusBPending));
+}
+
+}
+
+namespace {
+
+uint8_t s_shopSwBefore[kMemSwitchEnd - kMemSwitchFirst];
+bool s_shopSwArmed = false;
+
+HookAction on_shop_sold_out_pre(ModContext*, void*, void*, void*) {
+    s_shopSwArmed = daAlink_getAlinkActorClass() != nullptr;
+    if (s_shopSwArmed) {
+        std::memcpy(s_shopSwBefore, mem_bytes(dComIfGs_getSaveInfo()->getMemory()) + kMemSwitchFirst,
+            sizeof(s_shopSwBefore));
+    }
+    return HOOK_CONTINUE;
+}
+
+void on_shop_sold_out_post(ModContext*, void*, void*, void*) {
+    if (!s_shopSwArmed) return;
+    s_shopSwArmed = false;
+    if (!coop_net_connected() || !coop_session(kSessDungeon, cfg_bool(s_dungeonVar, true))) return;
+    char stage[8];
+    int saveNo = 0;
+    if (!current_stage(stage, saveNo)) return;
+    const uint8_t* now = mem_bytes(dComIfGs_getSaveInfo()->getMemory());
+    for (int b = kMemSwitchFirst; b < kMemSwitchEnd; ++b) {
+        const uint8_t added = static_cast<uint8_t>(now[b] & ~s_shopSwBefore[b - kMemSwitchFirst]);
+        if (added == 0 || !overworld_switch_byte(stage, b)) continue;
+        for (int bit = 0; bit < 8; ++bit) {
+            if ((added & (1 << bit)) == 0) continue;
+            const int off = b - kMemSwitchFirst;
+            MsgShopSoldOut msg{};
+            std::memcpy(msg.stage, stage, sizeof(msg.stage));
+            msg.saveNo = static_cast<int8_t>(saveNo);
+            msg.sw = static_cast<uint8_t>((off / 4) * 32 + (3 - off % 4) * 8 + bit);
+            coop_net_send(kMsgShopSoldOut, &msg, sizeof(msg));
+            coop_log::info("coop_mod: [SHOP] sold out stage={} sw={}", stage, msg.sw);
+        }
+    }
+}
+
+void apply_shop_sold_out(const MsgShopSoldOut& msg) {
+    if (!coop_session(kSessDungeon, cfg_bool(s_dungeonVar, true))) return;
+    if (msg.saveNo < 0 || msg.saveNo >= dSv_save_c::STAGE_MAX || msg.sw >= 0x80) return;
+    char name[9] = {};
+    std::memcpy(name, msg.stage, 8);
+    const int byte = kMemSwitchFirst + 4 * (msg.sw >> 5) + (3 - ((msg.sw & 31) >> 3));
+    if (!overworld_switch_byte(name, byte)) return;
+    dSv_info_c* info = dComIfGs_getSaveInfo();
+    char stage[8];
+    int saveNo = 0;
+    const bool sameSlot = current_stage(stage, saveNo) && saveNo == msg.saveNo;
+    uint8_t* target = sameSlot ? mem_bytes(info->getMemory())
+                               : mem_bytes(info->getSavedata().getSave(msg.saveNo));
+    target[byte] = static_cast<uint8_t>(target[byte] | (1 << (msg.sw & 7)));
+    coop_log::info("coop_mod: [SHOP] remote sold out stage={} sw={} live={}", name, msg.sw, sameSlot);
 }
 
 }
@@ -1761,12 +1820,15 @@ void world_register_vars() {
             static bool said[64] = {};
             if (!said[no]) {
                 said[no] = true;
-                coop_log::info("coop_mod: [CHEST] {} is already emptied - refusing to open it", no);
+                coop_log::info("coop_mod: [CHEST] {} already emptied, open refused", no);
             }
             if (retval != nullptr) *static_cast<int*>(retval) = 1;
             return HOOK_SKIP_ORIGINAL;
         });
     coop_log::info("coop_mod: [CHEST] open guard installed: {}", static_cast<int>(r));
+    const bool shopPre = mods::hook::add_pre<ShopSoldOutHook>(on_shop_sold_out_pre) == MOD_OK;
+    const bool shopPost = mods::hook::add_post<ShopSoldOutHook>(on_shop_sold_out_post) == MOD_OK;
+    coop_log::info("coop_mod: [SHOP] sold-out hook: {}", shopPre && shopPost ? "ok" : "failed");
 }
 
 ConfigVarHandle world_dungeon_var() {
@@ -1798,7 +1860,7 @@ void world_update() {
     }
 
     if (s_heldWorldCount > 0 && !local_mid_sequence()) {
-        coop_log::info("coop_mod: [WORLD] sequence over - applying {} held update(s)",
+        coop_log::info("coop_mod: [WORLD] sequence over, applying {} held updates",
             s_heldWorldCount);
         s_replayingWorld = true;
         for (int i = 0; i < s_heldWorldCount; ++i) {
@@ -1860,6 +1922,13 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
         answer_sync_request(req);
         return;
     }
+    if (type == kMsgShopSoldOut) {
+        if (size < sizeof(MsgShopSoldOut)) return;
+        MsgShopSoldOut msg;
+        std::memcpy(&msg, payload, sizeof(msg));
+        apply_shop_sold_out(msg);
+        return;
+    }
     if (type == kMsgTbox2) {
         if (size < sizeof(MsgTbox2)) return;
         MsgTbox2 msg;
@@ -1885,8 +1954,7 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
             h.size = static_cast<uint16_t>(size);
             std::memcpy(h.bytes, payload, size);
             if (s_heldWorldCount == 1) {
-                coop_log::info("coop_mod: [WORLD] holding their world state until our sequence "
-                               "ends");
+                coop_log::info("coop_mod: [WORLD] holding remote world state during local sequence");
             }
             return;
         }
@@ -1938,6 +2006,10 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
         uint8_t memBefore[kMemSize];
         std::memcpy(memBefore, target, kMemSize);
         apply_bytes(target, slotBaselineValid ? s_base.mem : nullptr, msg, kKeyOffset);
+
+        for (int b = kMemSwitchFirst; b < kMemSwitchEnd; ++b) {
+            if (overworld_switch_byte(msg.stage, b)) target[b] = memBefore[b];
+        }
         if (sameSlot) {
             keep_mem_local(stage, target, memBefore);
             if (slotBaselineValid) keep_mem_local(stage, s_base.mem, memBefore);
@@ -2056,8 +2128,7 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
         if (msg.offset + msg.size > kEventSize) return;
         const int added = story_hold(info, msg.set, msg.offset, msg.size);
         if (added > 0) {
-            coop_log::info("coop_mod: [STORY] {} new flag(s) from another player - applied at our "
-                           "next stage load ({} waiting)", added, s_storyPendingBits);
+            coop_log::info("coop_mod: [STORY] {} new remote flags, deferred to stage load ({} waiting)", added, s_storyPendingBits);
         }
         return;
     }

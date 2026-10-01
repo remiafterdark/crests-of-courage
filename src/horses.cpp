@@ -141,7 +141,7 @@ void horses_init() {
 
             return HOOK_SKIP_ORIGINAL;
         });
-    coop_log::info("coop_mod: [HORSE] one Epona per player is armed (off unless switched on)");
+    coop_log::info("coop_mod: [HORSE] per-player Epona armed (off by default)");
 }
 
 bool horses_spawn_for(uint8_t player, const cXyz& pos, int16_t angleY) {

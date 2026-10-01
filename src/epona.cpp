@@ -62,7 +62,7 @@ bool enabled() {
     return false;
 }
 
-bool player_on_our_stage(uint8_t playerId) {
+bool player_on_stage(uint8_t playerId) {
     if (playerId >= kCoopMaxPlayers) return false;
     const CoopPeer& peer = features_peer_of(playerId);
     const char* stage = dComIfGp_getStartStageName();
@@ -70,9 +70,9 @@ bool player_on_our_stage(uint8_t playerId) {
            std::strncmp(stage, peer.stage, 8) == 0;
 }
 
-bool any_peer_on_our_stage() {
+bool any_peer_on_stage() {
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
-        if (i != coop_net_local_id() && player_on_our_stage(static_cast<uint8_t>(i))) return true;
+        if (i != coop_net_local_id() && player_on_stage(static_cast<uint8_t>(i))) return true;
     }
     return false;
 }
@@ -270,13 +270,13 @@ void horse_update() {
 
         const int limit = state.ridden ? kHorseStaleTicks : kIdleStaleTicks;
 
-        if (++state.age > limit || !player_on_our_stage(static_cast<uint8_t>(i))) {
+        if (++state.age > limit || !player_on_stage(static_cast<uint8_t>(i))) {
             state = RemoteHorse{};
             horses_release(static_cast<uint8_t>(i));
         }
     }
 
-    if (any_peer_on_our_stage()) send_state(alink);
+    if (any_peer_on_stage()) send_state(alink);
     for (int i = 0; i < kCoopMaxPlayers; ++i) apply_one(static_cast<uint8_t>(i), alink);
     horses_update();
 

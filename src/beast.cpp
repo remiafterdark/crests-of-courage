@@ -272,7 +272,7 @@ bool arc_ready(int look) {
     if (ready < 0) {
         private_arc_release(arc);
         state = kArcFailed;
-        coop_log::warn("coop_mod: [BEAST] {} did not load - trying again shortly", arc);
+        coop_log::warn("coop_mod: [BEAST] {} not loaded, retrying", arc);
         return false;
     }
     state = kArcReady;
@@ -297,7 +297,7 @@ bool gold_build(Rig& rig) {
         s_goldShimmer = static_cast<J3DAnmTextureSRTKey*>(private_arc_load_anm(kGoldArc, "gw.btk"));
     }
     for (u16 j = 0; j < data->getJointNum(); ++j) data->getJointNodePointer(j)->setCallBack(pose_callback);
-    JKRHeap* heap = private_arc_heap_if_any();
+    JKRHeap* heap = private_arc_heap_peek();
     JKRHeap* previous = heap != nullptr ? heap->becomeCurrentHeap() : nullptr;
     if (s_goldGlow != nullptr) {
         rig.core = JKR_NEW mDoExt_brkAnm();
@@ -312,7 +312,7 @@ bool gold_build(Rig& rig) {
     rig.look = kLookGold;
     rig.used = true;
     dKy_tevstr_init(&rig.tev, 0, 0xFF);
-    coop_log::info("coop_mod: [BEAST] built a golden wolf ({} joints, glow {} shimmer {})",
+    coop_log::info("coop_mod: [BEAST] golden wolf built joints={} glow={} shimmer={}",
         data->getJointNum(), rig.core != nullptr, rig.skin != nullptr);
     return true;
 }
@@ -342,7 +342,7 @@ bool rig_build(Rig& rig, int look) {
         data->getJointNodePointer(j)->setCallBack(pose_callback);
     }
 
-    JKRHeap* heap = private_arc_heap_if_any();
+    JKRHeap* heap = private_arc_heap_peek();
     JKRHeap* previous = heap != nullptr ? heap->becomeCurrentHeap() : nullptr;
     if (s_coreAnm != nullptr) {
         rig.core = JKR_NEW mDoExt_brkAnm();
@@ -356,7 +356,7 @@ bool rig_build(Rig& rig, int look) {
     rig.model = model;
     rig.look = kLookBeast;
     rig.used = true;
-    coop_log::info("coop_mod: [BEAST] built a beast ({} joints, standing pose {}, core {} skin {})",
+    coop_log::info("coop_mod: [BEAST] beast built joints={} pose={} core={} skin={}",
         s_count, s_stanceAnm != nullptr, rig.core != nullptr, rig.skin != nullptr);
     return true;
 }
@@ -562,13 +562,13 @@ HookAction on_wolf_items_pre(ModContext*, void* args, void*, void*) {
     if (s_backJoint >= 0) {
         MtxP back = wolf->getAnmMtx(kWolfBack);
         cMtx_copy(back, s_backSaved);
-        Vec wolfTop, hisTop;
+        Vec wolfTop, standinTop;
         MTXMultVec(back, &wr->back, &wolfTop);
         const Vec local = {s_back.x * wr->scale, s_back.y * wr->scale, s_back.z * wr->scale};
-        MTXMultVec(s_local.rigid[s_backJoint], &local, &hisTop);
-        back[0][3] += hisTop.x - wolfTop.x;
-        back[1][3] += hisTop.y - wolfTop.y;
-        back[2][3] += hisTop.z - wolfTop.z;
+        MTXMultVec(s_local.rigid[s_backJoint], &local, &standinTop);
+        back[0][3] += standinTop.x - wolfTop.x;
+        back[1][3] += standinTop.y - wolfTop.y;
+        back[2][3] += standinTop.z - wolfTop.z;
         s_backSwapped = true;
     }
     if (s_seatJoint >= 0) {
@@ -630,7 +630,7 @@ void sweep_rigs() {
     for (int i = 1; i < kRigs; ++i) {
         Rig& rig = s_rigs[i];
         if (!rig.used || s_frame - rig.lastUsed < kRigIdleFrames) continue;
-        coop_log::info("coop_mod: [BEAST] player {} is not look {} any more (rig {})", rig.owner,
+        coop_log::info("coop_mod: [BEAST] player {} left look {} (rig {})", rig.owner,
             rig.look, i);
         rig_free(rig);
     }

@@ -249,6 +249,8 @@ void features_register_vars();
 void features_init();
 void features_update();
 void features_on_connected();
+
+void features_on_link_destroyed();
 void features_on_disconnected();
 void features_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t from);
 const CoopPeer& features_peer();
@@ -480,7 +482,7 @@ void colors_attach_puppet_model(J3DModel* model, uint8_t owner);
 void coop_crash_trail(const char* step);
 
 bool private_arc_request(const char* name);
-class JKRHeap* private_arc_heap_if_any();
+class JKRHeap* private_arc_heap_peek();
 int private_arc_poll(const char* name);
 void private_arc_release(const char* name);
 J3DModelData* private_arc_load(const char* name, const char* file);
@@ -517,7 +519,7 @@ struct CoopActorLayer {
 bool puppet_hook_torso_of(uint8_t playerId, cXyz* out);
 
 bool puppet_hook_joint_pos(uint8_t playerId, int joint, cXyz* out);
-bool projectiles_blast_is_ours(fopAc_ac_c* blast);
+bool projectiles_is_local_blast(fopAc_ac_c* blast);
 
 void fx_init();
 void fx_update();
@@ -543,10 +545,6 @@ ConfigVarHandle pvp_damage_var();
 ConfigVarHandle pvp_lock_on_var();
 
 void rival_init();
-
-void version_update();
-void version_remind();
-bool version_outdated();
 void rival_update();
 void rival_forget_all();
 bool rival_is(fopAc_ac_c* actor);
@@ -598,7 +596,7 @@ void spawns_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_
 
 bool spawns_replicates_procname(int16_t procName);
 bool spawns_is_replica(fopAc_ac_c* actor);
-bool enemies_carried_by_other(fopAc_ac_c* actor);
+bool enemies_remote_carried(fopAc_ac_c* actor);
 
 void enemies_note_boomerang_bomb();
 
@@ -616,7 +614,7 @@ ConfigVarHandle boss_wait_var();
 
 bool boss_is_supported_procname(short procName);
 
-bool boss_waiting_for_peer();
+bool boss_waiting();
 
 void boss_queue_overlay();
 
@@ -644,7 +642,7 @@ void checks_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_
 
 void features_check_found(uint8_t from, const char* check, uint8_t item);
 void checks_on_join_synced();
-std::vector<std::string> checks_debug_names_with(const char* prefix);
+std::vector<std::string> checks_debug_find(const char* prefix);
 
 void selftest_init();
 void selftest_update();
@@ -692,6 +690,8 @@ ConfigVarHandle joinsync_keep_consumables_var();
 void joinsync_update();
 void joinsync_on_connected();
 void joinsync_on_message(const uint8_t* payload, size_t size);
+void joinsync_on_want(uint8_t from);
+void joinsync_forget_player(uint8_t id);
 
 void joinsync_restore_backup(bool oldest);
 
@@ -708,7 +708,11 @@ void puppet_hook_release_player(uint8_t playerId);
 bool puppet_hook_player_active(uint8_t playerId);
 
 bool puppet_hook_sword_mtx(uint8_t playerId, float out[3][4], bool* master);
+
+bool puppet_hook_joint_mtx(uint8_t playerId, int joint, float out[3][4]);
 bool puppet_hook_pose_fresh(uint8_t playerId);
+
+bool puppet_hook_fx_pos(uint8_t playerId, float* x, float* y, float* z);
 bool puppet_hook_get_pose_of(uint8_t playerId, float* x, float* y, float* z, short* angleY,
     float* speedX, float* speedZ);
 bool puppet_hook_is_wolf_of(uint8_t playerId);

@@ -123,7 +123,7 @@ bool arc_ready(Body& b) {
     if (ready < 0) {
         private_arc_release(b.d.arc);
         b.arc = kArcFailed;
-        coop_log::warn("coop_mod: [{}] {} did not load - trying again shortly", b.d.tag, b.d.arc);
+        coop_log::warn("coop_mod: [{}] {} not loaded, retrying", b.d.tag, b.d.arc);
         return false;
     }
     b.arc = kArcReady;
@@ -145,7 +145,7 @@ int joint_named(J3DModelData* data, const char* name) {
     return -1;
 }
 
-void walk_him(Body& b, J3DJoint* joint, const Mtx parentWorld, int parent, Mtx* world, int& n) {
+void walk_standin(Body& b, J3DJoint* joint, const Mtx parentWorld, int parent, Mtx* world, int& n) {
     for (; joint != nullptr; joint = joint->getYounger()) {
         const int j = joint->getJntNo();
         if (j >= kMaxJoints) continue;
@@ -158,7 +158,7 @@ void walk_him(Body& b, J3DJoint* joint, const Mtx parentWorld, int parent, Mtx* 
         b.offset[j] = info.mTranslate;
         b.parent[j] = parent;
         b.order[n++] = j;
-        walk_him(b, joint->getChild(), world[j], j, world, n);
+        walk_standin(b, joint->getChild(), world[j], j, world, n);
     }
 }
 
@@ -180,7 +180,7 @@ void learn(Body& b, J3DModelData* data) {
     MTXIdentity(identity);
     Mtx world[kMaxJoints];
     int n = 0;
-    walk_him(b, data->getJointNodePointer(0), identity, -1, world, n);
+    walk_standin(b, data->getJointNodePointer(0), identity, -1, world, n);
     for (int j = 0; j < b.count; ++j) rotation_only(world[j], b.restWorld[j]);
     b.rootHeight = world[0][1][3] > 1.0f ? world[0][1][3] : 1.0f;
     for (int f = 0; f < 4; ++f) b.fingerJoint[f] = joint_named(data, b.d.fingers[f].name);
@@ -315,7 +315,7 @@ bool rig_build(Rig& rig, Body& b) {
     }
     J3DModelData* data = rig.model->getModelData();
     learn(b, data);
-    JKRHeap* heap = private_arc_heap_if_any();
+    JKRHeap* heap = private_arc_heap_peek();
     if (b.d.ghost != nullptr) {
         rig.ghost = posed_model(b, b.d.ghost);
 
@@ -323,7 +323,7 @@ bool rig_build(Rig& rig, Body& b) {
         rig.invReady = rig.ghost != nullptr && rig.inv.create(rig.ghost, 1) != 0;
         if (previous != nullptr) previous->becomeCurrentHeap();
         if (!rig.invReady) {
-            coop_log::warn("coop_mod: [{}] his ghost did not load", b.d.tag);
+            coop_log::warn("coop_mod: [{}] ghost not loaded", b.d.tag);
             rig_free(rig);
             return false;
         }
@@ -356,7 +356,7 @@ bool rig_build(Rig& rig, Body& b) {
     }
     rig.used = true;
     rig.blinkWait = 60 + std::rand() % 180;
-    coop_log::info("coop_mod: [{}] built one ({} joints, ghost {}, eyes {} blink {} core {})", b.d.tag,
+    coop_log::info("coop_mod: [{}] built joints={} ghost={} eyes={} blink={} core={}", b.d.tag,
         b.count, rig.invReady, rig.eyes != nullptr, rig.blink != nullptr, rig.core != nullptr);
     return true;
 }
@@ -427,7 +427,7 @@ void retarget(Rig& rig, J3DModel* link, const LinkRest& lr) {
     }
 }
 
-int his_joint_for(const Rig& rig, const LinkRest& lr, int l) {
+int standin_joint_for(const Rig& rig, const LinkRest& lr, int l) {
     for (int j = 0; j < rig.body->count; ++j) {
         if (lr.follow[j] == l) return j;
     }
@@ -596,7 +596,7 @@ bool build_sword() {
     s_swordModel = coop_create_model(s_swordData, 0x80000, 0x11000284);
     s_sheathModel = coop_create_model(s_sheathData, 0x80000, 0x11000284);
     s_swordFailed = s_swordModel == nullptr || s_sheathModel == nullptr;
-    coop_log::info("coop_mod: [GANON] his sword {}", s_swordFailed ? "did not load" : "is ready");
+    coop_log::info("coop_mod: [GANON] sword {}", s_swordFailed ? "did not load" : "is ready");
     return !s_swordFailed;
 }
 
@@ -620,7 +620,7 @@ J3DModelData* shade_weapon(const char* keep) {
         compensated = compensated && data->getJointNodePointer(j)->getScaleCompensate() != 0;
     }
     if (k < 0 || !compensated) {
-        coop_log::warn("coop_mod: [SHADE] his {} cannot be cut out (joint {}, compensated {})", keep, k,
+        coop_log::warn("coop_mod: [SHADE] {} not separable joint={} compensated={}", keep, k,
             compensated);
         private_arc_free_data(data);
         return nullptr;
@@ -691,7 +691,7 @@ bool build_shade_weapons() {
     if (s_shadeShield == nullptr) s_shadeShield = coop_create_model(s_shadeShieldData, 0x80000, 0x11000284);
     if (s_shadeSheath == nullptr) s_shadeSheath = coop_create_model(s_shadeSheathData, 0x80000, 0x11000284);
     s_shadeWeaponsFailed = s_shadeSword == nullptr || s_shadeShield == nullptr || s_shadeSheath == nullptr;
-    coop_log::info("coop_mod: [SHADE] his sword and shield {}",
+    coop_log::info("coop_mod: [SHADE] sword and shield {}",
         s_shadeWeaponsFailed ? "did not load" : "are ready");
     return !s_shadeWeaponsFailed;
 }
@@ -802,7 +802,7 @@ void hold_begin(Rig& rig, J3DModel* link, const LinkRest& lr, const int* joints,
         if (l < 0 || l >= lr.joints) continue;
         bool already = false;
         for (int i = 0; i < s_heldCount; ++i) already = already || s_held[i].link == l;
-        const int j = his_joint_for(rig, lr, l);
+        const int j = standin_joint_for(rig, lr, l);
         if (already || j < 0 || s_heldCount >= kHeldMax) continue;
         HeldSwap& h = s_held[s_heldCount++];
         h.link = l;
@@ -810,7 +810,7 @@ void hold_begin(Rig& rig, J3DModel* link, const LinkRest& lr, const int* joints,
         link->setAnmMtx(l, rig.rigid[j]);
     }
 
-    const int spine = pod >= 0 && pod < lr.joints ? his_joint_for(rig, lr, 2) : -1;
+    const int spine = pod >= 0 && pod < lr.joints ? standin_joint_for(rig, lr, 2) : -1;
     if (spine >= 0 && s_heldCount < kHeldMax) {
         const J3DTransformInfo& info =
             link->getModelData()->getJointNodePointer(static_cast<u16>(pod))->getTransformInfo();
@@ -1098,7 +1098,7 @@ void ganon_init() {
     const ModResult heldPost = mods::hook::add_post<GanonItemMatrixHook>(on_item_matrix_post);
     const ModResult shadow = mods::hook::add_pre<GanonShadowHook>(on_shadow_pre);
     const ModResult shadowPost = mods::hook::add_post<GanonShadowHook>(on_shadow_post);
-    coop_log::info("coop_mod: [GANON] body-draw hook: {}, held items: {}/{}, shadow: {}/{}",
+    coop_log::info("coop_mod: [GANON] hooks bodyDraw={} heldItems={}/{} shadow={}/{}",
         static_cast<int>(r), static_cast<int>(held), static_cast<int>(heldPost),
         static_cast<int>(shadow), static_cast<int>(shadowPost));
     beast_init();

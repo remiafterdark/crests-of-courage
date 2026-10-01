@@ -269,6 +269,8 @@ export class Room {
 
   pair(hostWs, hostInfo, joinWs, joinInfo) {
     if (hostInfo.hello.v !== joinInfo.hello.v) {
+
+      send(hostWs, { op: "joiner_version", v: String(joinInfo.hello.v) });
       return fail(joinWs, "version", String(hostInfo.hello.v));
     }
     const token = newToken();

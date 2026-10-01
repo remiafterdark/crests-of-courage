@@ -119,7 +119,7 @@ VoiceSet* load_set(const std::string& skin) {
     file.read(magic, sizeof(magic));
     file.read(reinterpret_cast<char*>(&count), sizeof(count));
     if (std::memcmp(magic, "COOPVOX3", 8) != 0 || count == 0 || count > 20000) {
-        coop_log::warn("coop_mod: [VOICE] '{}' voices.bin is not one of ours", skin);
+        coop_log::warn("coop_mod: [VOICE] '{}' voices.bin format unknown", skin);
         set->failed = true;
         return nullptr;
     }
@@ -316,7 +316,7 @@ void voices_update() {
     if (s_swapped != s_reported && (s_reported < 0 || s_swapped / 100 != s_reported / 100 ||
                                        (s_reported == 0 && s_swapped > 0))) {
         s_reported = s_swapped;
-        coop_log::info("coop_mod: [VOICE] {} sound(s) played in a player's own voice", s_swapped);
+        coop_log::info("coop_mod: [VOICE] {} sounds played with player voices", s_swapped);
     }
 }
 

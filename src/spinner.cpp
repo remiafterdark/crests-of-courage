@@ -14,7 +14,7 @@
 
 namespace {
 
-const f32 kTheirRadius = 40.0f;
+const f32 kRivalRadius = 40.0f;
 const f32 kMaxHeightGap = 60.0f;
 const int kCooldownTicks = 20;
 const int kHitsToFall = 3;
@@ -47,7 +47,7 @@ void spinner_after_player(daAlink_c* alink) {
         const f32 dx = mine->current.pos.x - x;
         const f32 dz = mine->current.pos.z - z;
         const f32 dist = std::sqrt(dx * dx + dz * dz);
-        const f32 reach = myRadius + kTheirRadius;
+        const f32 reach = myRadius + kRivalRadius;
         if (dist >= reach || dist < 0.01f) continue;
         s_cooldown[i] = kCooldownTicks;
 
@@ -55,7 +55,7 @@ void spinner_after_player(daAlink_c* alink) {
         const f32 nz = dz / dist;
         const f32 myClosing = -(mine->speedF * (cM_ssin(mine->current.angle.y) * nx +
                                                 cM_scos(mine->current.angle.y) * nz));
-        const f32 theirClosing = vx * nx + vz * nz;
+        const f32 peerClosing = vx * nx + vz * nz;
 
         const bool bladesOut = mine->reflectAccept();
         mine->setWallHit(cM_atan2s(nx, nz), 0);
@@ -63,7 +63,7 @@ void spinner_after_player(daAlink_c* alink) {
         mine->current.pos.x += nx * push;
         mine->current.pos.z += nz * push;
 
-        if (!pvp_active() || bladesOut || theirClosing + 1.0f < myClosing) continue;
+        if (!pvp_active() || bladesOut || peerClosing + 1.0f < myClosing) continue;
         if (++s_hitsTaken < kHitsToFall) continue;
         coop_log::info("coop_mod: [SPINNER] knocked off by player {}", static_cast<int>(id));
         mine->forceDelete();

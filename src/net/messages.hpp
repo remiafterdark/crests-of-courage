@@ -114,6 +114,15 @@ enum CoopMsgType : uint8_t {
     kMsgSnapWant = 69,
     kMsgSnapStream = 70,
     kMsgLogRequest = 71,
+    kMsgJoinSyncWant = 72,
+    kMsgShopSoldOut = 73,
+};
+
+struct MsgShopSoldOut {
+    char stage[8];
+    int8_t saveNo;
+    uint8_t sw;
+    uint8_t pad[2];
 };
 
 struct MsgSnapWant {

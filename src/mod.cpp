@@ -88,9 +88,6 @@ ConfigVarHandle g_roomServerVar = 0;
 ConfigVarHandle g_roomsVar = 0;
 ConfigVarHandle g_hostKeyVar = 0;
 ConfigVarHandle g_fakePlayersVar = 0;
-ConfigVarHandle g_clearTwilightVar = 0;
-ConfigVarHandle g_eponaFlagsVar = 0;
-ConfigVarHandle g_giveKitVar = 0;
 
 uint16_t g_fakeMask = 0;
 }
@@ -454,7 +451,7 @@ void handle_tcp_event(const mods::net::Event& event) {
             const int id = lowest_free_id();
             if (id < 0) {
 
-                coop_log::warn("coop_mod: session full ({} players) - turned away {}",
+                coop_log::warn("coop_mod: session full ({} players), refused {}",
                     kCoopMaxPlayers, event.endpoint);
                 mods::net::Socket extra = mods::net::adopt(event.accepted);
                 extra.close();
@@ -541,7 +538,7 @@ void on_backup_route_frame(uint8_t type, uint8_t from, const uint8_t* payload, s
         std::memcpy(&w, payload, sizeof(w));
         if (w.target == g_localId) {
             if (g_streamTo[from] != (w.want != 0)) {
-                coop_log::info("coop_mod: [NET] player {} {} - {} sending positions the backup way",
+                coop_log::info("coop_mod: [NET] player {} {}, {} backup position route",
                     from, w.want ? "gets none of our UDP positions" : "hears our UDP again",
                     w.want ? "also" : "stopped");
             }
@@ -855,7 +852,7 @@ bool handle_reliable_datagram(const mods::net::Event& event) {
         if (!online_accept_token(token)) return true;
         id = lowest_free_id();
         if (id < 0) {
-            coop_log::warn("coop_mod: session full ({} players) - turned away {}",
+            coop_log::warn("coop_mod: session full ({} players), refused {}",
                 kCoopMaxPlayers, from);
             PeerLink refused;
             refused.rel.start(h.conn, now);
@@ -922,7 +919,7 @@ void flush_udp_links() {
         };
         if (!g_isHost && !link.helloAcked) {
             if (now - link.createdMs > 8000) {
-                coop_log::warn("coop_mod: the host never answered our hello");
+                coop_log::warn("coop_mod: host did not answer hello");
                 const std::string why =
                     "Reached the host but could not finish connecting. Try again, or use "
                     "Tailscale.";
@@ -999,11 +996,11 @@ void reopen_udp_after_close(const char* why) {
     mods::net::BindOutcome outcome;
     g_udp = mods::net::open_datagram("udp://0.0.0.0:" + std::to_string(g_udpPort), &outcome);
     if (!g_udp) {
-        coop_log::warn("coop_mod: udp socket closed ({}) and could not be reopened on port {}", why,
+        coop_log::warn("coop_mod: udp socket closed ({}), reopen failed port={}", why,
             g_udpPort);
         g_statusText = "Lost the network socket. Disconnect and try again";
     } else if (s_inWindow <= 3) {
-        coop_log::warn("coop_mod: udp socket closed ({}) - reopened on {}", why, outcome.local);
+        coop_log::warn("coop_mod: udp socket closed ({}), reopened on {}", why, outcome.local);
     }
 }
 
@@ -1101,8 +1098,7 @@ void handle_udp_event(const mods::net::Event& event) {
         }
         if (id < 0) {
             if (g_snapUnknown++ % 600 == 0) {
-                coop_log::warn("coop_mod: [NET] a player's position from {} matches nobody we know "
-                               "(claims player {}) - dropped ({} so far)", event.endpoint,
+                coop_log::warn("coop_mod: [NET] position from {} claims unknown player {}, dropped (total {})", event.endpoint,
                     static_cast<int>(snapshot.playerId), g_snapUnknown);
             }
             return;
@@ -1143,9 +1139,7 @@ bool local_models_are_unsafe() {
         if (g_modelHoldTicks == 0 && g_swapDiagLogs < 24) {
             ++g_swapDiagLogs;
 
-            coop_log::info("coop_mod: [SWAPDIAG] local model swap detected: outfitChanged={} "
-                            "({} -> {}) formChanged={} (wolf={}) clothesTimer={} - holding model "
-                            "reads for {} ticks",
+            coop_log::info("coop_mod: [SWAPDIAG] local model swap outfitChanged={} ({} -> {}) formChanged={} (wolf={}) clothesTimer={}, holding reads {} ticks",
                 static_cast<int>(outfitChanged), g_lastLocalOutfit, outfitNow,
                 static_cast<int>(formChanged), wolfNow, timer, kModelHoldTicks);
         }
@@ -1158,7 +1152,7 @@ bool local_models_are_unsafe() {
     }
     if (--g_modelHoldTicks == 0 && g_swapDiagLogs < 24) {
         ++g_swapDiagLogs;
-        coop_log::info("coop_mod: [SWAPDIAG] hold expired - resuming local model reads");
+        coop_log::info("coop_mod: [SWAPDIAG] hold expired, resuming model reads");
     }
     return true;
 }
@@ -1219,83 +1213,11 @@ void drive_fake_players(const PlayerSnapshot& mine) {
         char name[16];
         std::snprintf(name, sizeof(name), "Bot %d", id);
 
-        const u16 theirLife = static_cast<u16>(std::max<int>(4, life - k * 4));
-        features_debug_fake_peer(static_cast<uint8_t>(id), true, name, at, theirLife, maxLife);
+        const u16 peerLife = static_cast<u16>(std::max<int>(4, life - k * 4));
+        features_debug_fake_peer(static_cast<uint8_t>(id), true, name, at, peerLife, maxLife);
         (void)alink;
         ++k;
     }
-}
-
-void apply_debug_clear_twilight() {
-    static bool s_done = false;
-    if (s_done || g_clearTwilightVar == 0 || !cfg_bool(g_clearTwilightVar, false)) return;
-    if (dComIfGs_getSaveInfo() == nullptr) return;
-    for (int lv = 0; lv < 3; ++lv) {
-        if (!dComIfGs_isDarkClearLV(lv)) dComIfGs_onDarkClearLV(lv);
-    }
-    if (daAlink_getAlinkActorClass() != nullptr) {
-        s_done = true;
-        coop_log::info("coop_mod: [DEBUG] twilight cleared in Faron, Eldin and Lanayru");
-    }
-}
-
-void apply_debug_epona_flags() {
-    static bool s_done = false;
-    if (s_done || g_eponaFlagsVar == 0 || !cfg_bool(g_eponaFlagsVar, false)) return;
-    if (dComIfGs_getSaveInfo() == nullptr) return;
-    static const u16 kFlags[] = {0x0601, 0x4720, 0x5E20};
-    for (u16 flag : kFlags) {
-        if (!dComIfGs_isEventBit(flag)) dComIfGs_onEventBit(flag);
-    }
-    if (daAlink_getAlinkActorClass() != nullptr) {
-        s_done = true;
-        coop_log::info("coop_mod: [DEBUG] Epona flags set");
-    }
-}
-
-void apply_debug_give_kit() {
-    static bool s_done = false;
-    if (s_done || g_giveKitVar == 0 || !cfg_bool(g_giveKitVar, false)) return;
-
-    static bool s_wearDone = false;
-    if (!s_wearDone && dComIfGs_getSaveInfo() != nullptr) {
-        dComIfGs_setCollectClothes(KOKIRI_CLOTHES_FLAG);
-        dComIfGs_setSelectEquipClothes(dItemNo_WEAR_KOKIRI_e);
-        if (daAlink_getAlinkActorClass() != nullptr) {
-            s_wearDone = true;
-            coop_log::info("coop_mod: [DEBUG] hero's clothes on");
-        }
-    }
-    if (daAlink_getAlinkActorClass() == nullptr || svc_item == nullptr) return;
-
-    static const int kKit[] = {dItemNo_COPY_ROD_e, dItemNo_BOMB_BAG_LV1_e, dItemNo_BOMB_BAG_LV1_e,
-        dItemNo_BOMB_BAG_LV1_e, dItemNo_KANTERA_e, dItemNo_BOW_e, dItemNo_ARROW_LV3_e,
-        dItemNo_BOOMERANG_e, dItemNo_HORSE_FLUTE_e, dItemNo_PACHINKO_e, dItemNo_HOOKSHOT_e,
-        dItemNo_W_HOOKSHOT_e, dItemNo_HVY_BOOTS_e, dItemNo_SPINNER_e, dItemNo_IRONBALL_e,
-        dItemNo_FISHING_ROD_1_e, dItemNo_HAWK_EYE_e, dItemNo_WALLET_LV3_e, dItemNo_EMPTY_BOTTLE_e,
-        dItemNo_EMPTY_BOTTLE_e, dItemNo_EMPTY_BOTTLE_e, dItemNo_EMPTY_BOTTLE_e, dItemNo_WEAR_ZORA_e,
-        dItemNo_ARMOR_e, dItemNo_MAGIC_LV1_e};
-    for (int item : kKit) {
-        svc_item->give_item(mod_ctx, nullptr, static_cast<uint8_t>(item), ITEM_GIVE_SILENT);
-    }
-
-    dComIfGs_setMaxLife(100);
-    dComIfGs_setLife(80);
-
-    dComIfGs_setCollectSword(COLLECT_ORDON_SWORD);
-    dComIfGs_setCollectSword(COLLECT_MASTER_SWORD);
-    dComIfGs_setCollectShield(COLLECT_ORDON_SHIELD);
-    dComIfGs_setCollectShield(COLLECT_HYLIAN_SHIELD);
-    dComIfGs_setSelectEquipSword(dItemNo_MASTER_SWORD_e);
-    dComIfGs_setSelectEquipShield(dItemNo_HYLIA_SHIELD_e);
-
-    static const u16 kHiddenSkills[] = {dSv_event_flag_c::F_0338, dSv_event_flag_c::F_0339,
-        dSv_event_flag_c::F_0340, dSv_event_flag_c::F_0341, dSv_event_flag_c::F_0342,
-        dSv_event_flag_c::F_0343, dSv_event_flag_c::F_0344};
-    for (u16 bit : kHiddenSkills) dComIfGs_onEventBit(bit);
-    s_done = true;
-    coop_log::info("coop_mod: [DEBUG] test kit given (every item, both armours, Shadow Crystal, 20 "
-                   "hearts, both swords, both shields, all seven hidden skills)");
 }
 
 dmg_rod_class* held_fishing_rod(daAlink_c* alink) {
@@ -1461,7 +1383,7 @@ void send_local_snapshot() {
             return ((a - b).abs() < 1.0f) ? 1 : 0;
         };
 
-        if (modelsUnsafe) {
+        if (modelsUnsafe || alink->checkNoResetFlg2(daPy_py_c::FLG2_STATUS_WINDOW_DRAW)) {
             snapshot.swordInHand = g_lastSwordInHand;
             snapshot.shieldInHand = g_lastShieldInHand;
         } else {
@@ -1897,6 +1819,8 @@ void send_local_snapshot() {
             snapshot.attached[i].joint = kPuppetHeldJointRoot;
             snapshot.attached[i].bckResIdx = 0xFFFF;
             snapshot.attached[i].frame = 0.0f;
+
+            snapshot.attached[i].scale = 1.0f;
             for (int e = 0; e < 12; ++e) {
                 snapshot.attached[i].mtx[e] = (e % 5 == 0) ? 1.0f : 0.0f;
             }
@@ -1921,8 +1845,37 @@ void send_local_snapshot() {
                 out.joint = kTransformEffectJoint;
                 out.bckResIdx = alink->mAnmHeap9.getIdx();
                 out.frame = alink->field_0x33dc;
+                out.scale = alink->mHeldItemModel->getBaseScale()->x;
                 for (int r = 0; r < 3; ++r) {
                     for (int c = 0; c < 4; ++c) out.mtx[r * 4 + c] = local[r][c];
+                }
+            }
+        }
+
+        if (!modelsUnsafe && wolfSlot < kPuppetAttachSlots && alink->mpLinkModel != nullptr &&
+            looks_like_live_data(alink->mpLinkModel))
+        {
+            fopAc_ac_c* gotItem = fopAcM_getItemEventPartner(alink);
+            const s16 gotName = gotItem != nullptr ? fopAcM_GetName(gotItem) : -1;
+            if (gotItem != nullptr && (gotName == kProcFieldItem || gotName == kProcDemoItem) &&
+                looks_like_live_data(gotItem))
+            {
+                auto* itemBase = static_cast<daItemBase_c*>(gotItem);
+                J3DModel* itemModel = itemBase->mpModel;
+                if (itemModel != nullptr && looks_like_live_data(itemModel)) {
+                    Mtx inv;
+                    Mtx local;
+                    mDoMtx_inverse(alink->mpLinkModel->getBaseTRMtx(), inv);
+                    mDoMtx_concat(inv, itemModel->getBaseTRMtx(), local);
+                    AttachedModelSnapshot& out = snapshot.attached[wolfSlot++];
+                    out.kind = kPuppetHeldGetItem;
+                    out.joint = kPuppetHeldJointRoot;
+                    out.bckResIdx = itemBase->getDisplayItemNo();
+                    out.frame = 0.0f;
+                    out.scale = itemModel->getBaseScale()->x;
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 4; ++c) out.mtx[r * 4 + c] = local[r][c];
+                    }
                 }
             }
         }
@@ -1976,6 +1929,27 @@ void send_local_snapshot() {
     snapshot.vfxWolfDig = 0;
     snapshot.vfxDigAngleX = 0;
     snapshot.vfxDigPos[0] = snapshot.vfxDigPos[1] = snapshot.vfxDigPos[2] = 0.0f;
+
+    snapshot.headRot[0] = snapshot.headRot[1] = snapshot.headRot[2] = 0;
+    snapshot.wolfNeck[0] = snapshot.wolfNeck[1] = 0;
+    if (alink != nullptr) {
+        snapshot.headRot[0] = alink->field_0x3124.x;
+        snapshot.headRot[1] = alink->field_0x3124.y;
+        snapshot.headRot[2] = alink->field_0x3124.z;
+        if (localIsWolf) {
+            snapshot.wolfNeck[0] = static_cast<int16_t>(alink->field_0x30d6 + alink->field_0x30b2);
+            snapshot.wolfNeck[1] = alink->field_0x30b0;
+        }
+    }
+
+    snapshot.tevTint = 0;
+    snapshot.tevTintOn = 0;
+    if (alink != nullptr && (alink->mProcID == daAlink_c::PROC_METAMORPHOSE ||
+                             alink->mProcID == daAlink_c::PROC_DUNGEON_WARP ||
+                             alink->mProcID == daAlink_c::PROC_DUNGEON_WARP_SCN_START)) {
+        snapshot.tevTint = alink->mProcVar3.field_0x300e;
+        snapshot.tevTintOn = 1;
+    }
 
     snapshot.warpOn = 0;
     snapshot.warpScroll = 0.0f;
@@ -2387,10 +2361,10 @@ void send_local_horse() {
     if (horseData == nullptr) return;
     const u16 joints = horseData->getJointNum();
     const int n = joints < kHorseJoints ? joints : kHorseJoints;
-    static bool s_saidJoints = false;
-    if (!s_saidJoints) {
-        s_saidJoints = true;
-        coop_log::info("coop_mod: [HORSE] our horse has {} joints (the datagram carries {})", joints,
+    static bool s_loggedJoints = false;
+    if (!s_loggedJoints) {
+        s_loggedJoints = true;
+        coop_log::info("coop_mod: [HORSE] local horse joints={} datagram={}", joints,
             kHorseJoints);
     }
     snap.jointCount = static_cast<uint8_t>(n);
@@ -2549,7 +2523,7 @@ void announce_local_pause() {
     msg.paused = paused ? 1 : 0;
     coop_net_send(kMsgPause, &msg, sizeof(msg));
     if (edge) {
-        coop_log::info("coop_mod: [PAUSE] we {}", paused ? "opened a menu - handing over"
+        coop_log::info("coop_mod: [PAUSE] local {}", paused ? "opened a menu - handing over"
                                                           : "closed the menu");
 
         if (!paused) enemies_on_local_unpause();
@@ -2595,7 +2569,7 @@ void coop_net_set_local_id(uint8_t playerId, uint8_t hostMaxPlayers) {
         return;
     }
     g_localId = playerId;
-    coop_log::info("coop_mod: we are player {} of up to {}", playerId, hostMaxPlayers);
+    coop_log::info("coop_mod: local player id {} of {}", playerId, hostMaxPlayers);
 }
 
 void coop_net_set_roster(uint16_t roster) {
@@ -2715,7 +2689,7 @@ void coop_online_failed(const std::string& why, const std::string& upnpFallback)
     if (g_isHost || g_peerConnected) return;
     if (!upnpFallback.empty()) {
 
-        coop_log::info("coop_mod: room punch failed - trying the host's own address {}",
+        coop_log::info("coop_mod: room punch failed, trying host address {}",
             upnpFallback);
 
         online_stop();
@@ -2794,12 +2768,12 @@ void coop_debug_spawn_puppet() {
 void coop_debug_force_transform() {
     daAlink_c* alink = daAlink_getAlinkActorClass();
     if (alink == nullptr) {
-        coop_log::info("coop_mod: transform requested but there is no player actor");
+        coop_log::info("coop_mod: transform requested without player actor");
         return;
     }
 
     if (alink->mEquipItem == dItemNo_IRONBALL_e) {
-        coop_log::info("coop_mod: transform refused - put the Ball and Chain away first");
+        coop_log::info("coop_mod: transform refused, Ball and Chain out");
         return;
     }
     const u16 before = alink->mProcID;
@@ -2814,7 +2788,7 @@ void coop_debug_give_midna() {
     dComIfGs_onEventBit(0xD04);
 
     dComIfGs_onTransformLV(3);
-    coop_log::info("coop_mod: [DEBUG] Midna flags set (riding + Shadow Crystal + real body)");
+    coop_log::info("coop_mod: [DEBUG] Midna flags set");
 }
 
 extern "C" {
@@ -2862,24 +2836,6 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     roomServerDesc.type = CONFIG_VAR_STRING;
     roomServerDesc.default_string = "";
     svc_config->register_var(mod_ctx, &roomServerDesc, &g_roomServerVar);
-
-    ConfigVarDesc twilightDesc = CONFIG_VAR_DESC_INIT;
-    twilightDesc.name = "debug_clear_twilight";
-    twilightDesc.type = CONFIG_VAR_BOOL;
-    twilightDesc.default_bool = false;
-    svc_config->register_var(mod_ctx, &twilightDesc, &g_clearTwilightVar);
-
-    ConfigVarDesc eponaDesc = CONFIG_VAR_DESC_INIT;
-    eponaDesc.name = "debug_epona_flags";
-    eponaDesc.type = CONFIG_VAR_BOOL;
-    eponaDesc.default_bool = false;
-    svc_config->register_var(mod_ctx, &eponaDesc, &g_eponaFlagsVar);
-
-    ConfigVarDesc kitDesc = CONFIG_VAR_DESC_INIT;
-    kitDesc.name = "debug_give_kit";
-    kitDesc.type = CONFIG_VAR_BOOL;
-    kitDesc.default_bool = false;
-    svc_config->register_var(mod_ctx, &kitDesc, &g_giveKitVar);
 
     ConfigVarDesc fakeDesc = CONFIG_VAR_DESC_INIT;
     fakeDesc.name = "debug_fake_players";
@@ -2981,8 +2937,7 @@ void update_backup_route(int i, bool expect) {
     if (want != g_wantStream[i]) {
         uint32_t in = 0, stale = 0, unknown = 0;
         coop_net_snapshot_counts(static_cast<uint8_t>(i), &in, &stale, &unknown);
-        coop_log::warn("coop_mod: [NET] {} player {} by UDP - {} (udp in={} old={} unknownAddr={} "
-                       "link={})", want ? "no positions from" : "positions back from", i,
+        coop_log::warn("coop_mod: [NET] {} player {} by UDP: {} (udp in={} old={} unknownAddr={} link={})", want ? "no positions from" : "positions back from", i,
                        want ? "asking for the backup route" : "backup route off", in, stale, unknown,
                        g_links[g_isHost ? i : kCoopHostId].viaUdp ? "room code" : "direct");
     }
@@ -3048,7 +3003,6 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     update_pings();
     announce_local_pause();
     features_update();
-    version_update();
     report_update();
     report_hint_update();
 
@@ -3056,9 +3010,6 @@ MOD_EXPORT ModResult mod_update(ModError*) {
     checks_update();
     selftest_update();
 
-    apply_debug_clear_twilight();
-    apply_debug_epona_flags();
-    apply_debug_give_kit();
     send_local_snapshot();
     send_local_midna();
     send_local_horse();

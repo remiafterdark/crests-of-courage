@@ -71,7 +71,6 @@ ModResult build_new_save_tab(
 }
 
 ModResult open_connect_window(GameModeNewSaveState* state, ModError* outError) {
-    version_remind();
     report_hint_arm();
     if (svc_ui == nullptr) {
 
@@ -123,10 +122,8 @@ const uint32_t kBlobVersion = 1;
 
 ModResult on_activated(void*, ModError*) {
     s_active = true;
-    version_remind();
     report_hint_arm();
-    coop_log::info("coop_mod: [MODE] co-op mode active - this file is its own, single-player saves"
-                   " are not touched");
+    coop_log::info("coop_mod: [MODE] co-op mode active (separate save file)");
     return MOD_OK;
 }
 
@@ -165,7 +162,7 @@ ModResult on_save_loaded_prompt(void* userData, ModError* outError) {
 
 void game_mode_init() {
     if (svc_game_mode == nullptr) {
-        coop_log::info("coop_mod: [MODE] no game mode service - co-op runs in the ordinary mode");
+        coop_log::info("coop_mod: [MODE] no game mode service, using default mode");
         return;
     }
     GameModeDesc desc = {};

@@ -246,7 +246,7 @@ void on_fmap_icons_post(ModContext*, void* args, void*, void*) {
         s_marks.push_back(m);
         if (!s_loggedFull) {
             s_loggedFull = true;
-            coop_log::info("coop_mod: [MAP] {} on the full map at ({:.0f}, {:.0f}) in region {}",
+            coop_log::info("coop_mod: [MAP] {} full map pos=({:.0f}, {:.0f}) region={}",
                 name_of(id), px, py, static_cast<int>(region));
         }
     }
@@ -292,7 +292,7 @@ void on_dmap_player_icon_post(ModContext*, void* args, void*, void*) {
         s_marks.push_back(m);
         if (!s_loggedDungeon) {
             s_loggedDungeon = true;
-            coop_log::info("coop_mod: [MAP] {} on the dungeon map at ({:.0f}, {:.0f}), floor {} ({})",
+            coop_log::info("coop_mod: [MAP] {} dungeon map pos=({:.0f}, {:.0f}) floor={} ({})",
                 name_of(id), x, y, static_cast<int>(floor), onFloor ? "this one" : "another");
         }
     }
@@ -442,7 +442,7 @@ void on_meter_map_draw_post(ModContext*, void* args, void*, void*) {
     const bool otherFloors = cfg_bool(s_otherFloorVar, true);
     daAlink_c* alink = daAlink_getAlinkActorClass();
     const int stay = dComIfGp_roomControl_getStayNo();
-    const s8 ourFloor = alink != nullptr ? dMapInfo_c::calcFloorNo(alink->current.pos.y, true, stay)
+    const s8 localFloor = alink != nullptr ? dMapInfo_c::calcFloorNo(alink->current.pos.y, true, stay)
                                          : static_cast<s8>(0);
     const f32 size = 9.0f * hud * static_cast<f32>(cfg_int(s_arrowSizeVar, 100)) / 100.0f;
     const f32 baseAlpha = static_cast<f32>(self->mMapAlpha) / 255.0f;
@@ -455,7 +455,7 @@ void on_meter_map_draw_post(ModContext*, void* args, void*, void*) {
         Spot s;
         if (!spot_of(id, &s) || !s.sameStage) continue;
         f32 alpha = baseAlpha;
-        if (dMapInfo_c::calcFloorNo(s.y, true, s.room) != ourFloor) {
+        if (dMapInfo_c::calcFloorNo(s.y, true, s.room) != localFloor) {
             if (!otherFloors) continue;
             alpha *= 0.45f;
         }
@@ -492,8 +492,7 @@ void on_meter_map_draw_post(ModContext*, void* args, void*, void*) {
         arrow(sx, sy, dx, dy, size, player_color(id, static_cast<u8>(255.0f * alpha)));
         if (!s_loggedMinimap) {
             s_loggedMinimap = true;
-            coop_log::info("coop_mod: [MAP] {} on the minimap at ({:.0f}, {:.0f}){} - minimap at "
-                           "({:.0f}, {:.0f}) {:.0f}x{:.0f}", name_of(id), sx, sy,
+            coop_log::info("coop_mod: [MAP] {} minimap pos=({:.0f}, {:.0f}){} view=({:.0f}, {:.0f}) {:.0f}x{:.0f}", name_of(id), sx, sy,
                 outside ? " (at the edge)" : "", left, top, w, h);
         }
     }

@@ -61,7 +61,7 @@ const f32 kWolfRadius = 45.0f;
 const f32 kWolfHeight = 90.0f;
 const u32 kHitGap = 10;
 
-const u32 kTheirInvincibleFrames = 10;
+const u32 kRivalInvincibleFrames = 10;
 const u32 kEndingBlowCooldown = 180;
 const u8 kPinReleaseFrames = 2;
 const u32 kHeadLockFrames = 60;
@@ -99,23 +99,23 @@ bool midpoint_of(u8 player, int a, int b, cXyz* out) {
     return true;
 }
 
-bool ours(fopAc_ac_c* hitter) {
+bool is_rival_hitter(fopAc_ac_c* hitter) {
     daAlink_c* alink = daAlink_getAlinkActorClass();
     if (hitter == nullptr) return false;
     if (hitter == alink) return true;
     if (projectiles_is_remote(hitter) || spawns_is_replica(hitter)) return false;
     if (fopAcM_GetGroup(hitter) == fopAc_ENEMY_e) return false;
 
-    if (enemies_carried_by_other(hitter)) return false;
+    if (enemies_remote_carried(hitter)) return false;
 
     if (fopAcM_GetName(hitter) == fpcNm_NBOMB_e && fopAcM_GetParam(hitter) == 0 &&
-        !projectiles_blast_is_ours(hitter)) {
+        !projectiles_is_local_blast(hitter)) {
         return false;
     }
     return true;
 }
 
-void send_to_them(u8 player, dCcD_GObjInf& at, u8 kind, const cXyz& from, bool blocked, u8 cut) {
+void send_to_rival(u8 player, dCcD_GObjInf& at, u8 kind, const cXyz& from, bool blocked, u8 cut) {
     MsgPvpHit msg{};
     msg.to = player;
     msg.kind = kind;
@@ -183,7 +183,7 @@ int daCoopRival_c::Execute() {
         fopAc_ac_c* hitter = mBody.GetTgHitAc();
         const bool clawshotAt = at != nullptr && (at->GetAtType() & AT_TYPE_HOOKSHOT) != 0;
 
-        if (at != nullptr && ours(hitter) && s_frame >= mNextHit && pvp && !(anchor && clawshotAt)) {
+        if (at != nullptr && is_rival_hitter(hitter) && s_frame >= mNextHit && pvp && !(anchor && clawshotAt)) {
             const bool clawshot = clawshotAt;
 
             cXyz from = (clawshot || hitter == nullptr) ? alink->current.pos
@@ -198,16 +198,16 @@ int daCoopRival_c::Execute() {
                 from.x -= cM_ssin(alink->shape_angle.y) * 300.0f;
                 from.z -= cM_scos(alink->shape_angle.y) * 300.0f;
             }
-            send_to_them(mPlayer, *at, clawshot ? kPvpPull : kPvpHit, from, blocked, cut);
+            send_to_rival(mPlayer, *at, clawshot ? kPvpPull : kPvpHit, from, blocked, cut);
             mNextHit = s_frame + kHitGap;
             if (!clawshot && !blocked && (at->GetAtType() & AT_TYPE_SHIELD_ATTACK) == 0) {
-                mInvulnUntil = s_frame + kTheirInvincibleFrames;
+                mInvulnUntil = s_frame + kRivalInvincibleFrames;
             }
 
             if ((at->GetAtType() & AT_TYPE_SHIELD_ATTACK) != 0 && !blocked) {
                 mHeadLockUntil = s_frame + kHeadLockFrames;
             }
-            coop_log::info("coop_mod: [PVP] we hit {}: type={:#x} atp={} spl={}{}{}", mPlayer,
+            coop_log::info("coop_mod: [PVP] local hit {}: type={:#x} atp={} spl={}{}{}", mPlayer,
                 at->GetAtType(), at->GetAtAtp(), static_cast<int>(at->GetAtSpl()),
                 clawshot ? " (clawshot)" : "", blocked ? " (on their shield)" : "");
         }
@@ -350,7 +350,7 @@ int daCoopRival_c::Execute() {
         attention_info.position.set(mid.x, top + 20.0f, mid.z);
     }
     if ((combat & kCombatDown) != 0 && s_frame % 60 == 0) {
-        coop_log::info("coop_mod: [PVP] {} down - body {} from ({:.0f},{:.0f},{:.0f}) to ({:.0f},{:.0f},{:.0f})",
+        coop_log::info("coop_mod: [PVP] {} down, body {} ({:.0f},{:.0f},{:.0f}) -> ({:.0f},{:.0f},{:.0f})",
             mPlayer, shaped ? "shaped" : "UPRIGHT (no joints)", from.x, from.y, from.z, to.x, to.y,
             to.z);
     }
@@ -400,7 +400,7 @@ void remove_rival(u8 player) {
 void rival_init() {
     for (int i = 0; i < kCoopMaxPlayers; ++i) s_rivalOf[i] = fpcM_ERROR_PROCESS_ID_e;
     if (svc_actor == nullptr) {
-        coop_log::warn("coop_mod: [PVP] no actor service - players cannot be targeted or hit");
+        coop_log::warn("coop_mod: [PVP] no actor service, players not targetable");
         return;
     }
     s_registered = svc_actor->register_actor(mod_ctx, &kProfile, &s_procName, &s_handle) == MOD_OK;
@@ -462,7 +462,7 @@ void rival_update() {
             if (rival != nullptr && alink->mCargoCarryAcKeep.getActor() == rival) {
                 fopAcM_cancelHookCarryNow(rival);
                 alink->procFallInit(1, 5.0f);
-                coop_log::info("coop_mod: [PVP] player {} let go of their Peahat - we drop", id);
+                coop_log::info("coop_mod: [PVP] player {} released Peahat, dropping", id);
             }
         }
         const bool want = here && (on || (can && anchor));

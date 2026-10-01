@@ -58,7 +58,6 @@ add_mod(coop_mod
              src/voices.cpp
              src/game_mode.cpp
              src/horses.cpp
-             src/version.cpp
              src/report.cpp
     MOD_JSON mod.json
 )

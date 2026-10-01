@@ -37,7 +37,8 @@
 
 extern const ConfigService* svc_config;
 extern const HostService* svc_host;
-extern const HttpService* svc_http;
+
+IMPORT_OPTIONAL_SERVICE(HttpService, svc_http);
 extern const UiService* svc_ui;
 
 namespace {
@@ -198,6 +199,16 @@ std::string session_summary() {
     s += "\nrandomizer: ";
     s += rando_active() ? "yes" : "no";
     s += "\nmemory: " + coop_mem_status();
+
+    s += "\nmodels:";
+    bool anyModel = false;
+    for (int slot = 0; slot < kSkinChoiceCount; ++slot) {
+        const std::string chosen = skins_local_slot(slot);
+        if (chosen.empty()) continue;
+        s += std::string(anyModel ? ", " : " ") + skins_slot_label(slot) + "=" + chosen;
+        anyModel = true;
+    }
+    if (!anyModel) s += " (all the game's own)";
     s += "\nplayers:";
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         const uint8_t id = static_cast<uint8_t>(i);
@@ -352,7 +363,7 @@ void on_report_sent(ModContext*, HttpRequestHandle, const HttpResult* r, void*) 
 
 void on_log_sent(ModContext*, HttpRequestHandle, const HttpResult* r, void*) {
     if (r == nullptr || r->error != HTTP_ERROR_NONE || r->status_code != 200) {
-        coop_log::warn("coop_mod: [REPORT] our log for another player's report was not sent");
+        coop_log::warn("coop_mod: [REPORT] log for peer report not sent");
     }
 }
 
@@ -368,8 +379,10 @@ void send_report() {
     std::string log = lastRun ? before + "\n" + now : now + "\n" + before;
 
     if (lastRun) log += "\n=== two runs before this one ===\n" + previous_log(2, 250u * 1024u);
-    if (lastRun) log += "\n=== crash trail, last lines ===\n" + crash_trail_tail();
-    if (lastRun) log += "\n=== dusklight's own log, the run before ===\n" + engine_log_before();
+
+    log += "\n=== crash trail, last lines ===\n" + crash_trail_tail();
+    log += "\n=== dusklight's own log, the run before ===\n" +
+           (lastRun ? engine_log_before() : engine_log_before(16u * 1024u));
     const std::string body = build_body("report", "", s_text, kWhen[s_when], log);
     if (!post(body, on_report_sent)) {
         s_status = "Couldn't send it - this build has no network access.";
@@ -444,7 +457,7 @@ void report_on_message(const uint8_t* payload, size_t size, uint8_t from) {
     const std::string asker = features_peer_of(from).name;
     const std::string body = build_body("log", code, "log for " + asker + "'s report", "", current_log());
     if (post(body, on_log_sent)) {
-        coop_log::info("coop_mod: [REPORT] sending our log for {}'s report {}", asker, code);
+        coop_log::info("coop_mod: [REPORT] sending log for {} report {}", asker, code);
     }
 }
 

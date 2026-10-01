@@ -154,7 +154,7 @@ bool build_screen() {
 
     if (group == nullptr || mgr == nullptr) {
         s_ours.failed = true;
-        coop_log::warn("coop_mod: [SQUAD] could not build the heart layout - squad health is off");
+        coop_log::warn("coop_mod: [SQUAD] heart layout build failed, squad health off");
         return false;
     }
 
@@ -181,7 +181,7 @@ bool build_screen() {
     }
     if (s_ours.bigHeart == nullptr) s_ours.failed = true;
     if (s_ours.failed) {
-        coop_log::warn("coop_mod: [SQUAD] the heart layout is missing panes - squad health is off");
+        coop_log::warn("coop_mod: [SQUAD] heart layout missing panes, squad health off");
         return false;
     }
 
@@ -697,10 +697,10 @@ void draw_squad() {
         s_fitStep = best;
     }
     const f32 k = baseK * kFitSteps[s_fitStep];
-    const f32 ourSlotH = slotH * k;
+    const f32 localSlotH = slotH * k;
 
-    const f32 gap = ourSlotH * 0.25f;
-    const f32 nameCell = ourSlotH * 0.8f;
+    const f32 gap = localSlotH * 0.25f;
+    const f32 nameCell = localSlotH * 0.8f;
 
     s_ours.heartMgr->setAlphaRate(alphaRate);
     const f32 scale = k;
@@ -780,10 +780,7 @@ void draw_squad() {
             J2DOrthoGraph* og = static_cast<J2DOrthoGraph*>(graf);
             const auto* o = og->getOrtho();
             const auto* b = og->getBounds();
-            coop_log::trace("coop_mod: [SQUAD-DIAG] ortho=({:.1f},{:.1f})-({:.1f},{:.1f}) port=({:.1f},{:.1f})-({:.1f},{:.1f}) "
-                            "realFirst top={:.1f} left={:.1f} bottom={:.1f} ours top={:.1f} left={:.1f} "
-                            "tx={:.1f} ty={:.1f} ps=({:.3f},{:.3f},{:.1f},{:.1f}) nameCell={:.1f} realGroupT=({:.1f},{:.1f}) "
-                            "realGroupBounds=({:.1f},{:.1f}) realS={:.3f}",
+            coop_log::trace("coop_mod: [SQUAD-DIAG] ortho=({:.1f},{:.1f})-({:.1f},{:.1f}) port=({:.1f},{:.1f})-({:.1f},{:.1f}) realFirst top={:.1f} left={:.1f} bottom={:.1f} local top={:.1f} left={:.1f} tx={:.1f} ty={:.1f} ps=({:.3f},{:.3f},{:.1f},{:.1f}) nameCell={:.1f} realGroupT=({:.1f},{:.1f}) realGroupBounds=({:.1f},{:.1f}) realS={:.3f}",
                 o->i.x, o->i.y, o->f.x, o->f.y, b->i.x, b->i.y, b->f.x, b->f.y,
                 pane_top(realFirst), pane_left(realFirst), pane_bottom(realFirst), heartsTopDrawn, heartsLeft,
                 tx, ty, ps.sx, ps.sy, ps.tx, ps.ty, nameCell, realGroup->getTranslateX(),
@@ -797,14 +794,14 @@ void draw_squad() {
         graf->setPort();
         graf->setup2D();
 
-        int theirHearts = m.maxLife / 5;
-        if (theirHearts < 1) theirHearts = 1;
-        if (theirHearts > kHeartSlots) theirHearts = kHeartSlots;
-        f32 ourBottom = pane_bottom(s_ours.parts[0]);
-        if (pane_bottom(s_ours.parts[theirHearts - 1]) > ourBottom) {
-            ourBottom = pane_bottom(s_ours.parts[theirHearts - 1]);
+        int peerHearts = m.maxLife / 5;
+        if (peerHearts < 1) peerHearts = 1;
+        if (peerHearts > kHeartSlots) peerHearts = kHeartSlots;
+        f32 localBottom = pane_bottom(s_ours.parts[0]);
+        if (pane_bottom(s_ours.parts[peerHearts - 1]) > localBottom) {
+            localBottom = pane_bottom(s_ours.parts[peerHearts - 1]);
         }
-        lineTop = ourBottom + gap;
+        lineTop = localBottom + gap;
         s_memberH[n] = lineTop - memberTop;
     }
 

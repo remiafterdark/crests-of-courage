@@ -184,7 +184,7 @@ void grass_update() {
     if (flower == nullptr) s_flowerPrimed = false;
     if (grass == nullptr && flower == nullptr) return;
 
-    const bool report = peer_on_our_stage();
+    const bool report = peer_shares_stage();
     if (grass != nullptr) scan(grass, report);
     if (flower != nullptr) scan_flowers(flower, report);
     if (report) flush();

@@ -530,8 +530,7 @@ void unpack_shipped_models() {
 
     std::ofstream(marker, std::ios::trunc) << stamp << "\n";
     coop_log::info(
-        "coop_mod: [SKIN] unpacked {} shipped model file(s) into {} ({} failed, {} leftover(s) "
-        "removed)",
+        "coop_mod: [SKIN] unpacked {} shipped files into {} (failed={} removed={})",
         written, dir.string(), failed, removed);
 }
 
@@ -864,12 +863,12 @@ J3DModelData* part_data(const char* name, int outfit, int part, bool forLink) {
     loaded.part = part;
     loaded.forLink = forLink;
 
-    loaded.data = forLink ? loadBmdDataForLink(file.c_str()) : nullptr;
+    loaded.data = forLink ? loadBmdDataForLink(file.c_str()) : loadBmdDataForPuppet(file.c_str());
     if (loaded.data == nullptr) loaded.data = loadBmdDataFromFile(file.c_str());
     loaded.failed = loaded.data == nullptr;
     s_loadedParts.push_back(loaded);
     if (loaded.failed) {
-        coop_log::warn("coop_mod: [SKIN] '{}' {} did not load - that part stays Link's own",
+        coop_log::warn("coop_mod: [SKIN] '{}' {} failed to load, using game part",
             skin->name, kPartFile[part]);
         return nullptr;
     }
@@ -938,7 +937,8 @@ J3DModelData* equipment_data(const char* name, const char* file, bool forLink) {
     LoadedCutscene loaded;
     loaded.skin = key;
     if (exists_ci(path, ec) && !ec) {
-        if (forLink) loaded.data = loadBmdDataForLink(path.string().c_str());
+        loaded.data = forLink ? loadBmdDataForLink(path.string().c_str())
+                              : loadBmdDataForPuppet(path.string().c_str());
         if (loaded.data == nullptr) loaded.data = loadBmdDataFromFile(path.string().c_str());
     }
     loaded.failed = loaded.data == nullptr;
@@ -1005,6 +1005,10 @@ J3DModelData* skins_local_aram_data(uint16_t index) {
 int skins_slot_for_equipment_file(const char* file) {
     if (file == nullptr) return kSkinChoiceEquipment;
     for (const EquipSlotFile& entry : kEquipSlotFiles) {
+        if (std::strcmp(entry.file, file) == 0) return entry.slot;
+    }
+
+    for (const AramFile& entry : kAramFiles) {
         if (std::strcmp(entry.file, file) == 0) return entry.slot;
     }
     return kSkinChoiceEquipment;

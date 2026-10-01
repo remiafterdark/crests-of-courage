@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -27,13 +28,8 @@ extern const ItemService* svc_item;
 extern const SaveService* svc_save;
 extern const HookService* svc_hook;
 
-#if defined(_WIN32)
-DEFINE_HOOK_SYMBOL("?item_check_resolve@mods@dusk@@YA?AUItemCheckResolution@@PEBDEPEAVfopAc_ac_c@@@Z",
-    ItemCheckResolution(const char*, uint8_t, fopAc_ac_c*), ChecksResolveHook);
-#else
-DEFINE_HOOK_SYMBOL("_ZN4dusk4mods18item_check_resolveEPKchP10fopAc_ac_c",
-    ItemCheckResolution(const char*, uint8_t, fopAc_ac_c*), ChecksResolveHook);
-#endif
+DEFINE_HOOK_SYMBOL("execItemGet", void(u8, u32, fopAc_ac_c*), ChecksGrantHook);
+DEFINE_HOOK_SYMBOL("getItemFunc", void(u8), ChecksItemFuncHook);
 
 namespace {
 
@@ -46,12 +42,6 @@ uint32_t s_tick = 0;
 uint32_t s_lastRoster = 0;
 int s_blocked = 0;
 
-using GiveTagFn = uint32_t (*)(const char*);
-using CancelFn = void (*)(uint32_t);
-GiveTagFn s_giveTag = nullptr;
-CancelFn s_cancel = nullptr;
-
-const uint8_t kConsolation = dItemNo_GREEN_RUPEE_e;
 const size_t kBlobMax = 48u * 1024u;
 
 void save_ledger() {
@@ -96,12 +86,6 @@ void on_new_save(ModContext*, uint32_t, void*) {
     save_ledger();
 }
 
-void forget_commit(const std::string& name) {
-    if (s_giveTag == nullptr || s_cancel == nullptr) return;
-    const uint32_t tag = s_giveTag(name.c_str());
-    if (tag != 0) s_cancel(tag);
-}
-
 void send_one(const std::string& name, uint8_t item) {
     MsgCheckTaken msg{};
     if (name.size() >= sizeof(msg.name)) return;
@@ -138,35 +122,122 @@ bool note(const std::string& name) {
     return true;
 }
 
+struct GrantPhoto {
+    uint8_t save[sizeof(dSv_save_c)];
+    uint8_t memory[sizeof(dSv_memory_c)];
+    uint8_t dan[sizeof(dSv_danBit_c)];
+    uint8_t counters[64];
+};
+GrantPhoto s_before;
+GrantPhoto s_after;
+bool s_inGrant = false;
+bool s_haveAfter = false;
+bool s_grantIsDuplicate = false;
+std::string s_grantName;
+
+std::unordered_map<std::string, uint8_t> s_collectedBy;
+
+uint8_t* counter_bytes(size_t* size) {
+    auto& info = g_dComIfG_gameInfo.play.mItemInfo;
+    auto* first = reinterpret_cast<uint8_t*>(&info.mItemLifeCount);
+    auto* last = reinterpret_cast<uint8_t*>(&info.mItemMaxBombNumCount2) + sizeof(s16);
+    *size = static_cast<size_t>(last - first);
+    return first;
+}
+
+void take_photo(GrantPhoto& photo) {
+    dSv_info_c* info = dComIfGs_getSaveInfo();
+    std::memcpy(photo.save, &info->getSavedata(), sizeof(photo.save));
+    std::memcpy(photo.memory, &info->getMemory(), sizeof(photo.memory));
+    std::memcpy(photo.dan, &info->getDan(), sizeof(photo.dan));
+    size_t n = 0;
+    const uint8_t* counters = counter_bytes(&n);
+    std::memcpy(photo.counters, counters, std::min(n, sizeof(photo.counters)));
+}
+
+void xor_restore(uint8_t* now, const uint8_t* before, const uint8_t* after, size_t size) {
+    for (size_t i = 0; i < size; ++i) now[i] = static_cast<uint8_t>(now[i] ^ (before[i] ^ after[i]));
+}
+
+void undo_grant() {
+    dSv_info_c* info = dComIfGs_getSaveInfo();
+    xor_restore(reinterpret_cast<uint8_t*>(&info->getSavedata()), s_before.save, s_after.save,
+        sizeof(s_before.save));
+    xor_restore(reinterpret_cast<uint8_t*>(&info->getMemory()), s_before.memory, s_after.memory,
+        sizeof(s_before.memory));
+    xor_restore(reinterpret_cast<uint8_t*>(&info->getDan()), s_before.dan, s_after.dan,
+        sizeof(s_before.dan));
+    size_t n = 0;
+    uint8_t* counters = counter_bytes(&n);
+    xor_restore(counters, s_before.counters, s_after.counters, std::min(n, sizeof(s_before.counters)));
+}
+
+HookAction on_grant_pre(ModContext*, void*, void*, void*) {
+    s_inGrant = dComIfGs_getSaveInfo() != nullptr;
+    s_haveAfter = false;
+    s_grantIsDuplicate = false;
+    s_grantName.clear();
+    if (s_inGrant) take_photo(s_before);
+    return HOOK_CONTINUE;
+}
+
+void on_item_func_post(ModContext*, void*, void*, void*) {
+    if (!s_inGrant || s_haveAfter) return;
+    take_photo(s_after);
+    s_haveAfter = true;
+}
+
+void on_grant_post(ModContext*, void* args, void*, void*) {
+    if (!s_inGrant) return;
+    s_inGrant = false;
+    if (!s_grantIsDuplicate || !s_haveAfter) return;
+    undo_grant();
+    const uint8_t item = mods::arg<u8>(args, 0);
+    if (++s_blocked <= 20) {
+        coop_log::info("coop_mod: [CHECKS] '{}' already collected by peer, item {:#x} revoked", s_grantName, item);
+    }
+
+    const auto by = s_collectedBy.find(s_grantName);
+    const std::string who = by != s_collectedBy.end() ? features_peer_name(by->second) : "";
+    features_toast("Already collected",
+        ((who.empty() ? std::string("Someone") : who) + " already got this one")
+            .c_str());
+}
+
+std::unordered_set<std::string> s_ownFreestanding;
+
 void on_give(ModContext*, const ItemGiveInfo* info, void*) {
     if (info == nullptr || info->check_name == nullptr || info->check_name[0] == '\0') return;
     if (info->origin != ITEM_GIVE_ORIGIN_GAME) return;
     const std::string name(info->check_name);
+
+    if (s_inGrant) {
+        s_grantName = name;
+
+        ItemCheckResolution r{};
+        const bool resolved = svc_item != nullptr && svc_item->resolve_check_full != nullptr &&
+                              svc_item->resolve_check_full(mod_ctx, name.c_str(), info->item, &r) ==
+                                  MOD_OK &&
+                              r.was_resolved;
+        s_grantIsDuplicate = resolved && s_ledger.count(name) != 0;
+
+        if (!s_haveAfter) {
+            take_photo(s_after);
+            s_haveAfter = true;
+        }
+        if (s_grantIsDuplicate) return;
+    }
+    if (name.rfind("freestanding:", 0) == 0) s_ownFreestanding.insert(name);
     if (!note(name)) return;
     save_ledger();
     if (coop_net_connected()) send_one(name, info->item);
     coop_log::info("coop_mod: [CHECKS] collected '{}'", name);
 }
 
-void on_resolve_post(ModContext*, void* args, void* retval, void*) {
-    if (retval == nullptr || s_ledger.empty()) return;
-    const char* name = mods::arg<const char*>(args, 0);
-    if (name == nullptr) return;
-    auto* result = static_cast<ItemCheckResolution*>(retval);
-    if (!result->was_resolved || result->item == kConsolation) return;
-    if (s_ledger.find(name) == s_ledger.end()) return;
-    result->item = kConsolation;
-    result->display_item = kConsolation;
-    if (++s_blocked <= 20) {
-        coop_log::info("coop_mod: [CHECKS] '{}' was already collected by another player - "
-                       "paying out a rupee instead", name);
-    }
-}
-
 fpc_ProcID s_removed[16] = {};
 int s_removedNext = 0;
 
-bool already_removed(fpc_ProcID id) {
+bool was_removed(fpc_ProcID id) {
     for (fpc_ProcID r : s_removed) {
         if (r == id) return true;
     }
@@ -183,7 +254,7 @@ void* find_taken(void* proc, void* data) {
     auto* sweep = static_cast<Sweep*>(data);
     auto* actor = static_cast<fopAc_ac_c*>(proc);
     if (actor == nullptr || sweep->count >= 16 || actor == sweep->mine) return nullptr;
-    if (already_removed(fopAcM_GetID(actor))) return nullptr;
+    if (was_removed(fopAcM_GetID(actor))) return nullptr;
     const s16 name = fopAcM_GetName(actor);
     if (name != fpcNm_ITEM_e && name != fpcNm_Obj_LifeContainer_e && name != fpcNm_Obj_SmallKey_e) {
         return nullptr;
@@ -208,6 +279,13 @@ void* find_taken(void* proc, void* data) {
         }
     }
 
+    if (name == fpcNm_ITEM_e) {
+        const char* stage = dComIfGp_getStartStageName();
+        if (stage != nullptr && s_ownFreestanding.count("freestanding:" + std::string(stage) + ":" +
+                                                        std::to_string(bit)) != 0) {
+            return nullptr;
+        }
+    }
     const bool taken = name == fpcNm_Obj_SmallKey_e ? dComIfGs_isTbox(bit) != 0
                                                     : fopAcM_isItem(actor, bit);
     if (taken) sweep->found[sweep->count++] = actor;
@@ -226,8 +304,7 @@ void sweep_taken_pickups() {
         s_removed[s_removedNext] = fopAcM_GetID(a);
         s_removedNext = (s_removedNext + 1) % 16;
         const s32 ok = fopAcM_delete(a);
-        coop_log::info("coop_mod: [CHECKS] removing a {:#x} somebody else already took (id {} "
-                       "param {:#x} at {:.0f},{:.0f},{:.0f} -> {})",
+        coop_log::info("coop_mod: [CHECKS] removing {:#x} taken by peer (id={} param={:#x} pos={:.0f},{:.0f},{:.0f} -> {})",
             static_cast<int>(fopAcM_GetName(a)), fopAcM_GetID(a), fopAcM_GetParam(a),
             a->current.pos.x, a->current.pos.y, a->current.pos.z, ok);
     }
@@ -240,20 +317,12 @@ void checks_init() {
     if (svc_save != nullptr) {
         svc_save->observe_saves(mod_ctx, on_new_save, on_save_loaded, nullptr, nullptr, nullptr);
     }
-    const bool hooked = mods::hook::add_post<ChecksResolveHook>(on_resolve_post) == MOD_OK;
-    if (svc_hook != nullptr) {
-        void* addr = nullptr;
-        if (svc_hook->resolve(mod_ctx, "dusk::mods::item_give_tag", &addr, nullptr) == MOD_OK) {
-            s_giveTag = reinterpret_cast<GiveTagFn>(addr);
-        }
-        addr = nullptr;
-        if (svc_hook->resolve(mod_ctx, "dusk::mods::item_check_cancel", &addr, nullptr) == MOD_OK) {
-            s_cancel = reinterpret_cast<CancelFn>(addr);
-        }
-    }
-    coop_log::info("coop_mod: [CHECKS] ledger {}, commit reset {}",
-        hooked ? "attached" : "FAILED - a check can pay out twice",
-        s_giveTag != nullptr && s_cancel != nullptr ? "found" : "missing");
+    const bool pre = mods::hook::add_pre<ChecksGrantHook>(on_grant_pre) == MOD_OK;
+    const bool post = mods::hook::add_post<ChecksGrantHook>(on_grant_post) == MOD_OK;
+    const bool func = mods::hook::add_post<ChecksItemFuncHook>(on_item_func_post) == MOD_OK;
+    coop_log::info("coop_mod: [CHECKS] ledger {}, item function {}",
+        pre && post ? "attached" : "FAILED - a check can pay out twice",
+        func ? "attached" : "not hookable - using the grant observer");
 }
 
 void checks_update() {
@@ -283,10 +352,10 @@ void checks_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_
         std::memcpy(&msg, payload, std::min(size, sizeof(msg)));
         const std::string name(msg.name, strnlen(msg.name, sizeof(msg.name)));
         s_fromPeers.insert(name);
+        s_collectedBy.emplace(name, from);
         if (note(name)) {
             ++added;
             last = name;
-            forget_commit(name);
 
             if (size >= sizeof(MsgCheckTaken)) features_check_found(from, name.c_str(), msg.item);
         }
@@ -299,11 +368,11 @@ void checks_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_
             const std::string name(reinterpret_cast<const char*>(payload + at), len);
             at += len;
             s_fromPeers.insert(name);
+            s_collectedBy.emplace(name, from);
             if (note(name)) {
                 ++added;
                 last = name;
-                forget_commit(name);
-            }
+                }
         }
     }
     if (added == 0) return;
@@ -311,7 +380,7 @@ void checks_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_
     if (added == 1) {
         coop_log::info("coop_mod: [CHECKS] another player collected '{}'", last);
     } else {
-        coop_log::info("coop_mod: [CHECKS] {} check(s) another player already collected", added);
+        coop_log::info("coop_mod: [CHECKS] {} checks collected by peers", added);
     }
 }
 
@@ -320,14 +389,14 @@ void checks_on_join_synced() {
     s_loaded = true;
     s_dirty = true;
     save_ledger();
-    coop_log::info("coop_mod: [CHECKS] took the host's world - {} collected check(s)", s_ledger.size());
+    coop_log::info("coop_mod: [CHECKS] host world taken, {} collected checks", s_ledger.size());
 }
 
 bool checks_collected(const char* name) {
     return name != nullptr && s_ledger.find(name) != s_ledger.end();
 }
 
-std::vector<std::string> checks_debug_names_with(const char* prefix) {
+std::vector<std::string> checks_debug_find(const char* prefix) {
     std::vector<std::string> out;
     for (const std::string& name : s_ledger) {
         if (name.rfind(prefix, 0) == 0) out.push_back(name);

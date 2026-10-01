@@ -124,10 +124,10 @@ class NotifyDlst : public dDlst_base_c {
 public:
     virtual void draw() {
         if (s_notes.empty()) return;
-        static bool s_saidDrawing = false;
-        if (!s_saidDrawing) {
-            s_saidDrawing = true;
-            coop_log::info("coop_mod: [NOTIFY] drawing our own ({} queued)", s_notes.size());
+        static bool s_loggedDrawing = false;
+        if (!s_loggedDrawing) {
+            s_loggedDrawing = true;
+            coop_log::info("coop_mod: [NOTIFY] drawing locally ({} queued)", s_notes.size());
         }
         JUTFont* font = mDoExt_getMesgFont();
         if (font == nullptr) return;
@@ -353,9 +353,9 @@ void coop_notify(NotifyKind kind, const std::string& title, const std::string& b
 
     if (cfg_bool(s_engineVar, false) ||
         (!s_drawHooked && daAlink_getAlinkActorClass() == nullptr)) {
-        static int s_saidEngine = 0;
-        if (s_saidEngine++ < 3) {
-            coop_log::info("coop_mod: [NOTIFY] '{}' to Dusklight's toast - {}", title,
+        static int s_loggedEngine = 0;
+        if (s_loggedEngine++ < 3) {
+            coop_log::info("coop_mod: [NOTIFY] '{}' to engine toast: {}", title,
                 cfg_bool(s_engineVar, false) ? "the setting asks for it" : "no file loaded");
         }
         engine_toast(title, body, ms);

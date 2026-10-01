@@ -39,7 +39,7 @@ bool s_applying = false;
 bool s_resync = true;
 
 uint32_t s_fullSince = 0;
-bool s_finishSaid = false;
+bool s_finishLogged = false;
 
 bool live() {
     return coop_net_connected() && daAlink_getAlinkActorClass() != nullptr &&
@@ -48,7 +48,7 @@ bool live() {
 
 void reset_stage() {
     s_fullSince = 0;
-    s_finishSaid = false;
+    s_finishLogged = false;
     for (TrackedBug& b : s_bugs) b = TrackedBug{};
     for (bool& t : s_tboxWas) t = false;
     s_lastCount = -1;
@@ -99,7 +99,7 @@ void send_kill(const TrackedBug& b) {
     msg.pos[1] = b.pos.y;
     msg.pos[2] = b.pos.z;
     coop_net_send(kMsgTwilightBug, &msg, sizeof(msg));
-    coop_log::info("coop_mod: [TWILIGHT] bug {} in room {} killed here - telling the others",
+    coop_log::info("coop_mod: [TWILIGHT] bug {} room={} killed, sent",
         static_cast<int>(b.swBit), static_cast<int>(b.room));
 }
 
@@ -169,7 +169,7 @@ void watch_tears() {
         msg.save = static_cast<uint8_t>(i);
         msg.count = static_cast<uint8_t>(count);
         coop_net_send(kMsgTearGot, &msg, sizeof(msg));
-        coop_log::info("coop_mod: [TWILIGHT] tear {} picked up here ({} in area {})", i, count,
+        coop_log::info("coop_mod: [TWILIGHT] tear {} picked up ({} in area {})", i, count,
             area);
         return;
     }
@@ -207,7 +207,7 @@ void on_bug_killed(const MsgTwilightBug& msg) {
     }
     if (!dComIfGs_isSwitch(msg.swBit, msg.room)) dComIfGs_onSwitch(msg.swBit, msg.room);
     s_applying = false;
-    coop_log::info("coop_mod: [TWILIGHT] bug {} in room {} was killed by somebody else",
+    coop_log::info("coop_mod: [TWILIGHT] bug {} room={} killed remotely",
         static_cast<int>(msg.swBit), static_cast<int>(msg.room));
 }
 
@@ -246,7 +246,7 @@ void on_tear_got(const MsgTearGot& msg) {
         s_lastCount = dComIfGs_getLightDropNum(static_cast<u8>(s_lastArea));
     }
     s_applying = false;
-    coop_log::info("coop_mod: [TWILIGHT] somebody picked up tear {} ({} in area {})",
+    coop_log::info("coop_mod: [TWILIGHT] tear {} picked up remotely ({} in area {})",
         static_cast<int>(msg.save), count, static_cast<int>(msg.area));
 }
 
@@ -277,18 +277,16 @@ void finish_twilight() {
     fopAcM_Search(find_vessel_tag, &find);
     if (find.found == nullptr) {
 
-        if (!s_finishSaid) {
-            s_finishSaid = true;
-            coop_log::info("coop_mod: [TWILIGHT] the vessel is full but this room has no way out "
-                           "of it - the next twilit stage will take us");
+        if (!s_finishLogged) {
+            s_finishLogged = true;
+            coop_log::info("coop_mod: [TWILIGHT] vessel full, no exit here, next twilit stage handles it");
         }
         return;
     }
     const int room = dComIfGp_roomControl_getStayNo();
     if (dComIfGs_isSwitch(find.found->field_0x5b5, room)) return;
     dComIfGs_onSwitch(find.found->field_0x5b5, room);
-    coop_log::info("coop_mod: [TWILIGHT] the vessel in area {} was filled by somebody else - "
-                   "warping to the spring (switch {})", area, static_cast<int>(find.found->field_0x5b5));
+    coop_log::info("coop_mod: [TWILIGHT] vessel area {} filled remotely, warping to spring (switch {})", area, static_cast<int>(find.found->field_0x5b5));
     features_toast("The Vessel of Light is full", "The twilight is lifting.");
 }
 

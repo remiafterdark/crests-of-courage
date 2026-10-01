@@ -42,7 +42,7 @@ CommitFn s_commit = nullptr;
 bool on() { return s_var != 0 && cfg_int(s_var, 0) != 0; }
 
 void result(int n, bool pass, const std::string& detail) {
-    coop_log::info("coop_mod: [SELFTEST] T{} {} - {}", n, pass ? "PASS" : "FAIL", detail);
+    coop_log::info("coop_mod: [SELFTEST] T{} {}: {}", n, pass ? "PASS" : "FAIL", detail);
 }
 
 bool test_resolver(ModContext*, const ItemCheckInfo* info, ItemCheckResolution* out, void*) {
@@ -102,7 +102,7 @@ void host_timeline(daAlink_c* alink) {
 void joiner_timeline(daAlink_c* alink) {
 
     if (!s_done[1]) {
-        const std::vector<std::string> got = checks_debug_names_with("coop_selftest:ledger:");
+        const std::vector<std::string> got = checks_debug_find("coop_selftest:ledger:");
         if (!got.empty()) {
             s_done[1] = true;
             ItemCheckResolution r{};
@@ -173,8 +173,7 @@ void selftest_init() {
             nullptr);
         s_commit = reinterpret_cast<CommitFn>(addr);
     }
-    coop_log::warn("coop_mod: *** SELFTEST ARMED *** (debug_selftest) - this instance will run "
-                   "the automated co-op checks");
+    coop_log::warn("coop_mod: [SELFTEST] armed (debug_selftest)");
 }
 
 void selftest_update() {

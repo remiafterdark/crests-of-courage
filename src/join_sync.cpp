@@ -92,7 +92,7 @@ void send_snapshot(uint8_t to) {
 
     coop_net_send_to(to, kMsgJoinSync, buffer.data(), buffer.size());
     s_hostSentTo[to] = true;
-    coop_log::info("coop_mod: [JOIN] sent our progress to player {} ({} bytes)", to, kSaveSize);
+    coop_log::info("coop_mod: [JOIN] sent progress to player {} ({} bytes)", to, kSaveSize);
 }
 
 const char kBackupMagic[4] = {'T', 'P', 'C', 'B'};
@@ -156,13 +156,12 @@ void live_save_blob(dSv_info_c* info, uint8_t* out) {
 
 void write_backup(dSv_info_c* info) {
     if (s_carryingJoinedWorld) {
-        coop_log::info("coop_mod: [BACKUP] not backing up - the game is still holding a world "
-                        "from an earlier join, not your own progress");
+        coop_log::info("coop_mod: [BACKUP] skipped, world is still from an earlier join");
         return;
     }
     std::filesystem::path dir;
     if (!backup_dir(dir)) {
-        coop_log::warn("coop_mod: [BACKUP] no data folder available - joining WITHOUT a backup");
+        coop_log::warn("coop_mod: [BACKUP] no data folder, joining without backup");
         return;
     }
     SaveBackupHeader header{};
@@ -326,8 +325,7 @@ void load_host_save(dSv_info_c* info, const uint8_t* blob) {
     s_session.active = features_reload_at_player(kCoopHostId);
     s_session.waitedTicks = 0;
     if (!s_session.active) {
-        coop_log::warn("coop_mod: [JOIN] could not tell where the host is - keeping our own gear "
-                       "and position this time");
+        coop_log::warn("coop_mod: [JOIN] host position unknown, keeping local gear and position");
     }
 }
 
@@ -337,7 +335,7 @@ void apply_pending_session() {
     if (info == nullptr) return;
     if (daAlink_getAlinkActorClass() != nullptr) {
         if (++s_session.waitedTicks >= kSessionGiveUpTicks) {
-            coop_log::warn("coop_mod: [JOIN] the load never happened - keeping our own gear");
+            coop_log::warn("coop_mod: [JOIN] load did not happen, keeping local gear");
             s_session = PendingSession{};
         }
         return;
@@ -368,7 +366,7 @@ void apply_snapshot() {
     if (!game_mode_is_coop()) {
         write_backup(info);
     } else {
-        coop_log::info("coop_mod: [JOIN] co-op save - taking the host's world without a backup");
+        coop_log::info("coop_mod: [JOIN] co-op save, taking host world without backup");
     }
     load_host_save(info, s_pending.data());
     checks_on_join_synced();
@@ -471,6 +469,19 @@ bool joinsync_ready_to_share() {
     return coop_net_is_host() || s_joinerApplied;
 }
 
+uint32_t s_wantTicks = 0;
+bool s_wantLogged = false;
+
+void joinsync_on_want(uint8_t from) {
+    if (!coop_net_is_host() || from >= kCoopMaxPlayers) return;
+    if (s_hostSentTo[from]) coop_log::info("coop_mod: [JOIN] player {} asked again, resending", from);
+    s_hostSentTo[from] = false;
+}
+
+void joinsync_forget_player(uint8_t id) {
+    if (id < kCoopMaxPlayers) s_hostSentTo[id] = false;
+}
+
 void joinsync_on_connected() {
     s_session = PendingSession{};
     for (int i = 0; i < kCoopMaxPlayers; ++i) s_hostSentTo[i] = false;
@@ -478,6 +489,8 @@ void joinsync_on_connected() {
     s_havePending = false;
     s_pending.clear();
     s_settledTicks = 0;
+    s_wantTicks = 0;
+    s_wantLogged = false;
 }
 
 void joinsync_update() {
@@ -495,6 +508,17 @@ void joinsync_update() {
         return;
     }
     if (s_havePending && !s_joinerApplied && in_gameplay_settled()) apply_snapshot();
+    if (s_joinerApplied || s_havePending || !in_gameplay_settled()) {
+        s_wantTicks = 0;
+        return;
+    }
+    if (++s_wantTicks % 300 != 0) return;
+    if (!s_wantLogged) {
+        s_wantLogged = true;
+        coop_log::warn("coop_mod: [JOIN] host world not received, requesting");
+    }
+    const uint8_t want = 1;
+    coop_net_send_to(kCoopHostId, kMsgJoinSyncWant, &want, sizeof(want));
 }
 
 void joinsync_on_message(const uint8_t* payload, size_t size) {
@@ -505,15 +529,15 @@ void joinsync_on_message(const uint8_t* payload, size_t size) {
     if (header.version != kJoinSyncVersion || header.size != kSaveSize ||
         size < sizeof(header) + kSaveSize)
     {
-        coop_log::warn("coop_mod: [JOIN] ignored a progress snapshot from a different build");
+        coop_log::warn("coop_mod: [JOIN] ignored snapshot from a different build");
         return;
     }
 
     if (false) {
-        coop_log::info("coop_mod: [JOIN] host progress received but copying is turned off");
+        coop_log::info("coop_mod: [JOIN] host progress received, copying disabled");
         return;
     }
     s_pending.assign(payload + sizeof(header), payload + sizeof(header) + kSaveSize);
     s_havePending = true;
-    coop_log::info("coop_mod: [JOIN] received the host's progress - applying once in game");
+    coop_log::info("coop_mod: [JOIN] host progress received, applying in game");
 }

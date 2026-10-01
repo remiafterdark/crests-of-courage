@@ -74,20 +74,20 @@ void start_pull(const MsgPvpHit& hit) {
     if (alink == nullptr) return;
     if (dComIfGp_event_runCheck() || alink->checkHorseRide() ||
         sumo_hides_equipment(coop_net_local_id())) {
-        coop_log::info("coop_mod: [PVP] clawshotted, but not pulled (event / horse / sumo)");
+        coop_log::info("coop_mod: [PVP] clawshot hit, pull blocked (event/horse/sumo)");
         return;
     }
     const cXyz from(hit.from[0], hit.from[1], hit.from[2]);
     cXyz toward(alink->current.pos.x - from.x, 0.0f, alink->current.pos.z - from.z);
     const f32 len = std::sqrt(toward.x * toward.x + toward.z * toward.z);
     if (len < kPullStopShort) {
-        coop_log::info("coop_mod: [PVP] clawshotted from {:.0f} away - already close", len);
+        coop_log::info("coop_mod: [PVP] clawshot hit at {:.0f}, already close", len);
         return;
     }
     s_pull.active = true;
     s_pull.to.set(from.x + toward.x / len * kPullStopShort, from.y, from.z + toward.z / len * kPullStopShort);
     s_pull.frames = 0;
-    coop_log::info("coop_mod: [PVP] clawshotted - pulled {:.0f} over", len - kPullStopShort);
+    coop_log::info("coop_mod: [PVP] clawshot pull {:.0f}", len - kPullStopShort);
 }
 
 u8 hit_se_for(const MsgPvpHit& hit) {
@@ -256,7 +256,7 @@ void apply_hit(const MsgPvpHit& hit) {
     } else if (atp > 0 || stun) {
         hit_spark(alink, from, 1, hit.atType);
     }
-    coop_log::info("coop_mod: [PVP] got hit: type={:#x} atp={} spl={} se={} cut={} dmg={}{}{}{}",
+    coop_log::info("coop_mod: [PVP] hit type={:#x} atp={} spl={} se={} cut={} dmg={}{}{}{}",
         hit.atType, atp, spl, hit_se_for(hit), hit.cut, stun || shield ? 0 : dmg,
         skill != nullptr ? " - " : "", skill != nullptr ? skill->name : "",
         stun ? " (stunned)" : shield ? " (on our shield)" : "");

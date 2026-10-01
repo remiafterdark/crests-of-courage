@@ -194,7 +194,7 @@ void apply(uint16_t mask) {
         s_applying = true;
         dComIfGs_onEventBit(label(k));
         s_applying = false;
-        coop_log::info("coop_mod: [SKILLS] another player finished {} {} - yours too",
+        coop_log::info("coop_mod: [SKILLS] peer finished {} {}, granted",
             k < kSkillCount ? "skill" : "howl", k < kSkillCount ? k + 1 : k - kSkillCount + 2);
     }
 }

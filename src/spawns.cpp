@@ -202,7 +202,7 @@ void write_actor_state(fopAc_ac_c* actor, s16 name, int16_t state) {
     }
 }
 
-bool param_assumes_a_grabber(s16 name, u32 param) {
+bool param_needs_grabber(s16 name, u32 param) {
     if (name != fpcNm_NBOMB_e) return false;
     switch (param) {
     case dBomb_c::PRM_BOMB_CARRY:
@@ -270,7 +270,9 @@ bool spawns_enabled() {
 }
 
 bool in_gameplay() {
-    return daAlink_getAlinkActorClass() != nullptr && !dComIfGp_event_runCheck() &&
+
+    daAlink_c* alink = daAlink_getAlinkActorClass();
+    return alink != nullptr && alink->mpLinkModel != nullptr && !dComIfGp_event_runCheck() &&
            !dComIfGp_isEnableNextStage();
 }
 
@@ -318,7 +320,7 @@ void on_local_spawn(fopAc_ac_c* actor, s16 procName, u32 param) {
     }
 }
 
-bool still_held(fopAc_ac_c* actor) {
+bool is_still_held(fopAc_ac_c* actor) {
 
     if (fopAcM_GetName(actor) == fpcNm_BOOMERANG_e && fopAcM_GetParam(actor) == 0) return true;
     if (fopAcM_checkCarryNow(actor) != 0) return true;
@@ -348,7 +350,7 @@ void announce(fpc_ProcID id, fopAc_ac_c* actor, s16 procName, u32 bornParam) {
 
     const u32 livePrm = fopAcM_GetParam(actor);
     if (!should_replicate(procName, bornParam, livePrm)) return;
-    msg.param = param_assumes_a_grabber(procName, livePrm)
+    msg.param = param_needs_grabber(procName, livePrm)
                     ? static_cast<uint32_t>(dBomb_c::PRM_BOMB_WAIT)
                     : livePrm;
     msg.pos[0] = actor->current.pos.x;
@@ -361,7 +363,7 @@ void announce(fpc_ProcID id, fopAc_ac_c* actor, s16 procName, u32 bornParam) {
     msg.state = read_actor_state(actor, procName);
     msg.kind = read_actor_kind(actor, procName);
     coop_net_send(kMsgActorSpawn, &msg, sizeof(msg));
-    coop_log::info("coop_mod: [SPAWN] ours netId={} name={:#x} let go of - telling the other player",
+    coop_log::info("coop_mod: [SPAWN] local netId={} name={:#x} released, sent",
         netId, static_cast<int>(procName));
 }
 
@@ -374,7 +376,7 @@ void promote_candidates() {
             c = Candidate{};
             continue;
         }
-        if (still_held(actor)) continue;
+        if (is_still_held(actor)) continue;
         announce(c.id, actor, c.procName, c.bornParam);
         c = Candidate{};
     }
@@ -387,7 +389,7 @@ HookAction on_fast_create_pre(ModContext*, void*, void*, void*) {
 void on_fast_create_post(ModContext*, void* args, void* retval, void*) {
     if (s_creatingReplica > 0) return;
 
-    if (!spawns_enabled() || !in_gameplay() || !peer_on_our_stage()) return;
+    if (!spawns_enabled() || !in_gameplay() || !peer_shares_stage()) return;
     const s16 procName = mods::arg<s16>(args, 0);
     if (!procname_is_replicated(procName)) return;
     auto* actor = *static_cast<fopAc_ac_c**>(retval);
@@ -406,7 +408,7 @@ void on_fast_create_post(ModContext*, void* args, void* retval, void*) {
     on_local_spawn(actor, procName, mods::arg<u32>(args, 1));
 }
 
-bool we_own_a_boomerang() {
+bool owns_boomerang() {
     for (int i = 0; i < kMaxSpawns; ++i) {
         if (s_owned[i].used && s_owned[i].procName == fpcNm_BOOMERANG_e) return true;
     }
@@ -442,7 +444,7 @@ void send_transforms() {
             MsgActorGone gone{};
             gone.netId = s_owned[i].netId;
             coop_net_send(kMsgActorGone, &gone, sizeof(gone));
-            coop_log::info("coop_mod: [SPAWN] ours netId={} is gone", s_owned[i].netId);
+            coop_log::info("coop_mod: [SPAWN] local netId={} gone", s_owned[i].netId);
             s_owned[i] = Owned{};
             continue;
         }
@@ -558,7 +560,7 @@ struct CatchScan {
     int attached;
 };
 
-bool already_ridden(fpc_ProcID id) {
+bool was_ridden(fpc_ProcID id) {
     for (const RiddenBomb& rb : s_ridden) {
         if (rb.used && rb.id == id) return true;
     }
@@ -573,7 +575,7 @@ void* attach_caught_bomb(void* proc, void* data) {
 
     if (spawns_is_replica(actor)) return nullptr;
     const fpc_ProcID id = fopAcM_GetID(actor);
-    if (already_ridden(id)) return nullptr;
+    if (was_ridden(id)) return nullptr;
 
     const f32 dx = actor->current.pos.x - scan->boomPos.x;
     const f32 dy = actor->current.pos.y - scan->boomPos.y;
@@ -593,8 +595,7 @@ void* attach_caught_bomb(void* proc, void* data) {
         if (rb.offsetY > 50.0f) rb.offsetY = 50.0f;
         rb.angle = cM_atan2s(dx, dz);
         ++scan->attached;
-        coop_log::info("coop_mod: [SPAWN-BOMB] their boomerang caught a Bombling - carrying the "
-                        "bomb ourselves (offsetXZ={:.0f} offsetY={:.0f})", rb.offsetXZ, rb.offsetY);
+        coop_log::info("coop_mod: [SPAWN-BOMB] remote boomerang caught Bombling, carrying bomb locally offsetXZ={:.0f} offsetY={:.0f}", rb.offsetXZ, rb.offsetY);
         return nullptr;
     }
     return nullptr;
@@ -659,14 +660,12 @@ void apply_replicas() {
             const bool exploding = prm == static_cast<u32>(dBomb_c::PRM_NORMAL_BOMB_EXPLODE) ||
                                    prm == static_cast<u32>(dBomb_c::PRM_WATER_BOMB_EXPLODE);
             if (fuse <= 0 && !exploding) {
-                coop_log::warn("coop_mod: [SPAWN-BOMB] netId={} has no fuse (param={}) - it will "
-                                "never explode and never free its slot", r.netId,
+                coop_log::warn("coop_mod: [SPAWN-BOMB] netId={} has no fuse param={}, will never free its slot", r.netId,
                     static_cast<int>(fopAcM_GetParam(actor)));
             }
         }
         if (s_tick - r.stamp > kReplicaStaleTicks) {
-            coop_log::warn("coop_mod: [SPAWN] replica netId={} name={:#x} outlived its owner's "
-                            "updates - deleting it rather than leaking the slot",
+            coop_log::warn("coop_mod: [SPAWN] replica netId={} name={:#x} owner stopped updating, deleted",
                 r.netId, static_cast<int>(r.procName));
             fopAcM_delete(actor);
             r = Replica{};
@@ -734,8 +733,7 @@ void apply_replicas() {
             const bool moving = actor->speedF != 0.0f || boom->field_0x957 != 0;
             const bool noGale = fopAcM_GetParam(actor) == 0;
             if (moving || noGale) {
-                coop_log::warn("coop_mod: [SPAWN-BOOM] netId={} INVARIANT BROKEN param={} "
-                                "speedF={:.1f} burst={} storedSpeed={:.1f} drift={:.0f}",
+                coop_log::warn("coop_mod: [SPAWN-BOOM] netId={} invariant broken param={} speedF={:.1f} burst={} storedSpeed={:.1f} drift={:.0f}",
                     r.netId, static_cast<int>(fopAcM_GetParam(actor)), actor->speedF,
                     static_cast<int>(boom->field_0x957), boom->field_0x988,
                     std::sqrt(dx * dx + dy * dy + dz * dz));
@@ -767,8 +765,7 @@ void run_self_test() {
         bomb = fopAcM_fastCreate(fpcNm_NBOMB_e, static_cast<u32>(dBomb_c::PRM_BOMB_WAIT), &at,
             fopAcM_GetRoomNo(alink), nullptr, nullptr, -1, nullptr, nullptr);
     }
-    coop_log::warn("coop_mod: [SPAWN-SELFTEST] *** DEBUG *** dropped ONE bomb at "
-                    "({:.0f},{:.0f},{:.0f}) -> {}",
+    coop_log::warn("coop_mod: [SPAWN-SELFTEST] dropped bomb at ({:.0f},{:.0f},{:.0f}) -> {}",
         at.x, at.y, at.z, bomb != nullptr ? "created" : "FAILED");
 }
 
@@ -821,7 +818,7 @@ void spawns_register_vars() {
 
 void spawns_init() {
     if (cfg_bool(s_noHookVar, false)) {
-        coop_log::warn("coop_mod: [SPAWN] *** DEBUG *** fastCreate hook NOT installed");
+        coop_log::warn("coop_mod: [SPAWN] fastCreate hook not installed");
         return;
     }
     const ModResult pre = mods::hook::add_pre<FastCreateHook>(on_fast_create_pre);
@@ -835,9 +832,7 @@ void spawns_init() {
     if (s_selfTestVar != 0) svc_config->get_int(mod_ctx, s_selfTestVar, &bombTicks);
     if (bombTicks != 0) {
         coop_log::warn(
-            "coop_mod: *** DEBUG SELF-TEST IS ARMED *** debug_spawn_bomb_ticks={} - this game will "
-            "drop a live bomb every {} ticks. Set it to 0 (or launch with play.ps1) unless you are "
-            "running the automated test.",
+            "coop_mod: [SPAWN-SELFTEST] armed debug_spawn_bomb_ticks={} interval={}",
             bombTicks, bombTicks);
     }
 }
@@ -867,7 +862,7 @@ void remove_boomerang_replicas() {
         auto* actor = static_cast<fopAc_ac_c*>(fopAcM_SearchByID(r.id));
         if (actor != nullptr) fopAcM_delete(actor);
         release_bombs_of(r.netId);
-        coop_log::info("coop_mod: [SPAWN] cutscene - removed their boomerang netId={}", r.netId);
+        coop_log::info("coop_mod: [SPAWN] cutscene, removed remote boomerang netId={}", r.netId);
         r = Replica{};
     }
 }
@@ -919,8 +914,7 @@ void dedupe_boomerang_catches() {
             if ((f.pos - bomb->current.pos).abs() < kCatchDupDist) duplicate = true;
         }
         if (duplicate) {
-            coop_log::info("coop_mod: [SPAWN-BOMB] second bomb from the same boomerang catch - "
-                            "removing it");
+            coop_log::info("coop_mod: [SPAWN-BOMB] duplicate bomb from same boomerang catch, removed");
             fopAcM_delete(bomb);
             continue;
         }
@@ -937,21 +931,21 @@ void dedupe_boomerang_catches() {
 void spawns_update() {
     ++s_tick;
     if (s_tick % 300 == 0) {
-        coop_log::info("coop_mod: [SPAWN] {} conn={} peerHere={} ours={} theirs={}",
+        coop_log::info("coop_mod: [SPAWN] {} conn={} peerHere={} local={} remote={}",
             coop_net_is_host() ? "host" : "joiner", coop_net_connected() ? 1 : 0,
-            peer_on_our_stage() ? 1 : 0, s_diagOwned, s_diagReplicas);
+            peer_shares_stage() ? 1 : 0, s_diagOwned, s_diagReplicas);
     }
 
     if (spawns_enabled() && dComIfGp_event_runCheck()) remove_boomerang_replicas();
     if (!spawns_enabled() || !in_gameplay()) {
         return;
     }
-    if (peer_on_our_stage()) dedupe_boomerang_catches();
+    if (peer_shares_stage()) dedupe_boomerang_catches();
     apply_replicas();
     promote_candidates();
     run_self_test();
 
-    if (s_tick % kSendEveryTicks == 0 || we_own_a_boomerang()) send_transforms();
+    if (s_tick % kSendEveryTicks == 0 || owns_boomerang()) send_transforms();
 }
 
 void spawns_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t from) {
@@ -965,14 +959,12 @@ void spawns_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_
         if (!should_replicate(msg.procName, msg.param, msg.param)) return;
         log_bomb_res_once();
         if (msg.procName == fpcNm_BOOMERANG_e && !alink_arc_resident()) {
-            coop_log::info("coop_mod: [SPAWN] refusing netId={} - a boomerang needs Link's archive "
-                           "and it is not resident here", msg.netId);
+            coop_log::info("coop_mod: [SPAWN] refused netId={}, boomerang needs Alink archive", msg.netId);
             return;
         }
         if (msg.procName == fpcNm_NBOMB_e && !bomb_model_available()) {
 
-            coop_log::info("coop_mod: [SPAWN] refusing netId={} - the bomb model is not resident "
-                            "here", msg.netId);
+            coop_log::info("coop_mod: [SPAWN] refused netId={}, bomb model not resident", msg.netId);
             return;
         }
         int slot = -1;
@@ -1014,7 +1006,7 @@ void spawns_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_
         s_replica[slot].angle = angle;
         s_replica[slot].stamp = s_tick;
         s_replica[slot].settling = kReplicaSettleTicks;
-        coop_log::info("coop_mod: [SPAWN] theirs netId={} name={:#x} created", msg.netId,
+        coop_log::info("coop_mod: [SPAWN] remote netId={} name={:#x} created", msg.netId,
             static_cast<int>(msg.procName));
         break;
     }
@@ -1075,10 +1067,10 @@ void spawns_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_
         auto* actor = static_cast<fopAc_ac_c*>(fopAcM_SearchByID(r->id));
         if (actor != nullptr && gone_removes_replica(r->procName)) {
             fopAcM_delete(actor);
-            coop_log::info("coop_mod: [SPAWN] theirs netId={} removed", msg.netId);
+            coop_log::info("coop_mod: [SPAWN] remote netId={} removed", msg.netId);
         } else {
 
-            coop_log::info("coop_mod: [SPAWN] theirs netId={} released to run itself out",
+            coop_log::info("coop_mod: [SPAWN] remote netId={} released",
                 msg.netId);
         }
         *r = Replica{};

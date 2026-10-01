@@ -787,7 +787,7 @@ void colors_init() {
     find_config_json();
     read_cosmetics_colors();
     if (svc_texture == nullptr) {
-        coop_log::warn("coop_mod: [COLORS] texture service unavailable - colors disabled");
+        coop_log::warn("coop_mod: [COLORS] texture service unavailable, colors off");
     }
 }
 
@@ -892,7 +892,7 @@ void colors_on_message(const uint8_t* payload, size_t size, uint8_t from) {
         if (m.model == nullptr || m.mine || m.owner != from) continue;
         for (int i = 0; i < m.count; ++i) m.tex[i].registered = false;
     }
-    coop_log::info("coop_mod: [COLORS] player {} sent their colors ({} slots)",
+    coop_log::info("coop_mod: [COLORS] player {} colors received ({} slots)",
         static_cast<int>(from), count);
 }
 
@@ -975,7 +975,7 @@ void colors_attach_model(J3DModel* model, bool mine, uint8_t owner = kCoopNoPlay
     for (u16 i = 0; i < matNum; ++i) {
         model->getMatPacket(i)->setTexture(reinterpret_cast<J3DTexture*>(slot->shadow));
     }
-    coop_log::info("coop_mod: [COLORS] puppet model {:p}: {} recolorable texture(s)",
+    coop_log::info("coop_mod: [COLORS] puppet model {:p}: {} recolorable textures",
         static_cast<void*>(model), slot->count);
 }
 

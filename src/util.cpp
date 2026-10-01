@@ -36,7 +36,7 @@ std::string cfg_string(ConfigVarHandle var, const char* fallback) {
     return buffer;
 }
 
-bool peer_on_our_stage() {
+bool peer_shares_stage() {
     return features_any_peer_on_stage(dComIfGp_getStartStageName());
 }
 

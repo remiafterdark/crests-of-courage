@@ -119,7 +119,7 @@ const OutfitFiles& outfit_files(u8 outfit) {
     return kOutfitFiles[outfit];
 }
 
-u8 detect_local_outfit_for_a_press() {
+u8 detect_local_outfit_change() {
     const u8 clothes = dComIfGs_getSelectEquipClothes();
     if (clothes == dItemNo_WEAR_CASUAL_e) return kPuppetOutfitCasual;
     if (clothes == dItemNo_WEAR_ZORA_e) return kPuppetOutfitZora;
@@ -274,6 +274,9 @@ struct Puppet {
     s16 digAngleX = 0;
     cXyz digPos;
     u8 warpOn = 0;
+    s16 tevTint = 0;
+    u8 tevTintOn = 0;
+    bool warpLogged = false;
     f32 warpScroll = 0.0f;
     f32 warpDissolve = 0.0f;
     u32 shadowKey = 0;
@@ -338,6 +341,8 @@ struct Puppet {
     s16 hat[9] = {};
     bool hatHeard = false;
     s16 magneRot[9] = {};
+    s16 headRot[3] = {};
+    s16 wolfNeck[2] = {};
     J3DModel* chainLinks[kChainLinkPool] = {};
     int chainLinksUsed = 0;
     J3DModel* rodSegModels[kRodSegments] = {};
@@ -398,7 +403,7 @@ void puppet_free_data_later(J3DModelData*& data) {
     if (s_pendingDataCount < kPendingFreeMax) {
         s_pendingData[s_pendingDataCount++] = data;
     } else {
-        coop_log::warn("coop_mod: [PUPPET] deferred-data queue full - leaking one on purpose");
+        coop_log::warn("coop_mod: [PUPPET] deferred-data queue full, leaking one");
     }
     data = nullptr;
 }
@@ -432,7 +437,7 @@ void puppet_free_later(J3DModel*& model) {
         s_pendingFree[s_pendingFreeCount++] = model;
     } else {
 
-        coop_log::warn("coop_mod: [PUPPET] deferred-free queue full - leaking one model on purpose");
+        coop_log::warn("coop_mod: [PUPPET] deferred-free queue full, leaking one model");
     }
     model = nullptr;
 }
@@ -568,7 +573,7 @@ bool puppet_ensure_old_frame(u16 jointNum) {
 mDoExt_bckAnm* get_or_load_puppet_anim(daAlink_c* alink, u16 resIdx);
 void sync_equipment_models();
 void release_outfit_item_data();
-bool local_in_hiding_event(daAlink_c* alink);
+bool local_hides_peers(daAlink_c* alink);
 bool puppet_hold_for_clothes_swap(daAlink_c* alink);
 void puppet_swap_finished();
 void puppet_swap_starting(daAlink_c* alink);
@@ -576,8 +581,14 @@ void puppet_shield_swap_one(daAlink_c* alink);
 void puppet_hold_for_shield_swap(daAlink_c* alink);
 
 void puppet_advance_frames(PuppetAnimHalf& half) {
+
+    const bool paused = coop_player_paused(s_pupId);
     for (int i = 0; i < kAnmSlots; ++i) {
         if (half.resIdx[i] == 0xFFFF) continue;
+        if (paused) {
+            half.frame[i] = half.targetFrame[i];
+            continue;
+        }
         half.frame[i] += half.rate[i];
         const f32 diff = half.targetFrame[i] - half.frame[i];
         if (diff > kFrameResyncThreshold || diff < -kFrameResyncThreshold) {
@@ -667,7 +678,7 @@ mDoExt_MtxCalcAnmBlendTblOld* puppet_build_blend(daAlink_c* alink, PuppetAnimHal
     }
     if (half.tbl == nullptr) {
         if (pup().oldFrame == nullptr) {
-            if (trace) coop_log::trace("coop_mod: [BLEND] no oldFrame - no table this frame");
+            if (trace) coop_log::trace("coop_mod: [BLEND] no oldFrame, no table");
             return nullptr;
         }
         half.tbl = JKR_NEW mDoExt_MtxCalcAnmBlendTblOld(pup().oldFrame, kAnmSlots, half.packs);
@@ -720,7 +731,7 @@ void release_midna_models() {
 
 }
 
-bool arc_in_use_elsewhere(const char* arc) {
+bool arc_is_shared(const char* arc) {
     if (arc == nullptr || arc[0] == '\0') return false;
     for (int i = 0; i < kMaxPuppets; ++i) {
         if (i == s_pupId) continue;
@@ -733,7 +744,7 @@ bool arc_in_use_elsewhere(const char* arc) {
 }
 
 void release_arc_share(const char* arc) {
-    if (arc_in_use_elsewhere(arc)) return;
+    if (arc_is_shared(arc)) return;
     unloadObjectArchive(arc);
 }
 
@@ -898,7 +909,7 @@ bool arc_names_match(const char* a, const char* b) {
 bool puppet_hold_for_clothes_swap(daAlink_c* alink) {
 
     const u8 localOutfit =
-        alink->checkWolf() ? kPuppetOutfitWolf : detect_local_outfit_for_a_press();
+        alink->checkWolf() ? kPuppetOutfitWolf : detect_local_outfit_change();
     const bool outfitChanged = s_lastLocalOutfitSeen != 0xFF && localOutfit != s_lastLocalOutfitSeen;
     s_lastLocalOutfitSeen = localOutfit;
     if (outfitChanged || alink->mClothesChangeWaitTimer != 0) {
@@ -943,7 +954,7 @@ void puppet_swap_finished() {
                 pup().pendingOutfit = pup().respawnOutfit;
                 pup().state = 1;
                 coop_log::info(
-                    "coop_mod: [SWAP] clothes swap finished - respawning puppet outfit={}",
+                    "coop_mod: [SWAP] clothes swap done, respawning puppet outfit={}",
                     pup().respawnOutfit);
             }
             pup().respawnPending = false;
@@ -955,16 +966,15 @@ void puppet_swap_starting(daAlink_c* alink) {
     if (!pup().arcSwapHold) {
         pup().arcSwapHold = true;
         const u8 outfit = (pup().state == 1) ? pup().pendingOutfit : pup().outfit;
-        const char* ourArc = outfit_files(outfit).arc;
+        const char* localArc = outfit_files(outfit).arc;
 
         const bool sharesHeap = model_data_in_heap(alink->mpArcHeap, pup().model) ||
                                 model_data_in_heap(alink->mpArcHeap, pup().faceModel) ||
                                 model_data_in_heap(alink->mpArcHeap, pup().hatModel) ||
                                 model_data_in_heap(alink->mpArcHeap, pup().handsModel);
-        const bool sharesName = arc_names_match(ourArc, alink->mArcName);
-        coop_log::info("coop_mod: [SWAP] clothes swap starting (timer={}) puppetState={} "
-                        "puppetArc='{}' playerArc='{}' sharesHeap={} sharesName={}",
-            alink->mClothesChangeWaitTimer, pup().state, ourArc,
+        const bool sharesName = arc_names_match(localArc, alink->mArcName);
+        coop_log::info("coop_mod: [SWAP] clothes swap start timer={} puppetState={} puppetArc='{}' playerArc='{}' sharesHeap={} sharesName={}",
+            alink->mClothesChangeWaitTimer, pup().state, localArc,
             (alink->mArcName != nullptr) ? alink->mArcName : "(null)",
             static_cast<int>(sharesHeap), static_cast<int>(sharesName));
 
@@ -973,8 +983,7 @@ void puppet_swap_starting(daAlink_c* alink) {
             pup().respawnPending = true;
 
             release_puppet();
-            coop_log::info("coop_mod: [SWAP] released puppet {} + archive claim ahead of "
-                            "mpArcHeap->freeAll()",
+            coop_log::info("coop_mod: [SWAP] released puppet {} and archive claim before freeAll",
                 static_cast<int>(s_pupId));
         }
     }
@@ -999,8 +1008,7 @@ void puppet_shield_swap_one(daAlink_c* alink) {
 
     const bool sharesHeap = model_data_in_heap(alink->mpShieldArcHeap, pup().shieldModel);
     const bool sharesName = arc_names_match(pup().shieldArc, alink->mShieldArcName);
-    coop_log::info("coop_mod: [SWAP] shield swap starting (timer={}) puppetShieldArc='{}' "
-                    "playerShieldArc='{}' sharesHeap={} sharesName={}",
+    coop_log::info("coop_mod: [SWAP] shield swap start timer={} puppetShieldArc='{}' playerShieldArc='{}' sharesHeap={} sharesName={}",
         alink->mShieldChangeWaitTimer, pup().shieldArc,
         (alink->mShieldArcName != nullptr) ? alink->mShieldArcName : "(null)",
         static_cast<int>(sharesHeap), static_cast<int>(sharesName));
@@ -1027,6 +1035,8 @@ struct MaterialGuard {
     bool touchedAlpha[kPuppetMaxMaterials];
 };
 
+bool s_puppetWarpDrawing = false;
+
 bool material_guard_begin(J3DModel* model, MaterialGuard& guard) {
     J3DModelData* data = (model != nullptr) ? model->getModelData() : nullptr;
     if (data == nullptr) return false;
@@ -1045,6 +1055,7 @@ bool material_guard_begin(J3DModel* model, MaterialGuard& guard) {
         guard.saved[i] = material->getMaterialAnm();
         material->setMaterialAnm(nullptr);
 
+        if (s_puppetWarpDrawing) continue;
         J3DTevBlock* tevBlock = material->getTevBlock();
         J3DTexGenBlock* texGenBlock = material->getTexGenBlock();
         if (tevBlock != nullptr && texGenBlock != nullptr) {
@@ -1168,7 +1179,7 @@ void force_alpha_always_pass(J3DModelData* modelData) {
     }
 }
 
-void force_warp_off_all_materials(J3DModelData* modelData) {
+void disable_warp_all_materials(J3DModelData* modelData) {
     if (modelData == nullptr) return;
     for (u16 i = 0; i < modelData->getMaterialNum(); ++i) {
         J3DMaterial* material = modelData->getMaterialNodePointer(i);
@@ -1189,7 +1200,7 @@ void force_warp_off_all_materials(J3DModelData* modelData) {
     }
 }
 
-void force_diff_recognizes_stage_count(J3DModel* model) {
+void enable_stage_count_diff(J3DModel* model) {
     if (model == nullptr) return;
     model->mDiffFlag |= J3DDiffFlag_KonstColor;
 }
@@ -1265,7 +1276,7 @@ void resolve_hat_tail_joints(J3DModelData* modelData) {
         for (int i = 0; i < s_dumpCount; ++i) seen = seen || s_dumped[i] == jointNum;
         if (!seen && s_dumpCount < 8) {
             s_dumped[s_dumpCount++] = jointNum;
-            coop_log::info("coop_mod: [HAT] a {} joint head:", jointNum);
+            coop_log::info("coop_mod: [HAT] {} joint head:", jointNum);
             for (u16 j = 0; j < jointNum && j < 20; ++j) {
                 const char* n = names->getName(j);
                 coop_log::info("coop_mod: [HAT]   {} = '{}'", j, n != nullptr ? n : "?");
@@ -1278,14 +1289,14 @@ void resolve_hat_tail_joints(J3DModelData* modelData) {
             kHatJoint6 = 6;
             kHatJoint7 = 7;
             kHatTailLen = jointNum - 6 < 4 ? jointNum - 6 : 4;
-            coop_log::info("coop_mod: [HAT] no tail matched on the hero's head - keeping 6 and 7");
+            coop_log::info("coop_mod: [HAT] no tail match, using joints 6/7");
         }
         return;
     }
     kHatJoint6 = bestStart;
     kHatJoint7 = bestStart + 1;
     kHatTailLen = bestLen < 4 ? bestLen : 4;
-    coop_log::info("coop_mod: [HAT] tail '{}' is {} segments from joint {} - swaying {} and {}",
+    coop_log::info("coop_mod: [HAT] tail '{}' len={} from joint {}, sway {}/{}",
         bestPrefix, bestLen, bestStart, kHatJoint6, kHatJoint7);
 }
 
@@ -1418,6 +1429,8 @@ void puppet_apply_wolf_feet(J3DModel* model, s16 shapeAngleY) {
 }
 
 const int kHumanFootCallbackJoint = 26;
+const int kHeadJoint = 4;
+const int kWolfNeckJoint = 3;
 const int kWolfFootCallbackJoint = 36;
 
 u32 s_poseCbSeen = 0;
@@ -1479,6 +1492,54 @@ int puppet_body_aim_callback(J3DJoint* joint, int param1) {
             puppet_apply_wolf_feet(pup().model, pup().angle.y);
         } else {
             puppet_apply_human_feet(pup().model, pup().angle.y);
+        }
+        return 1;
+    }
+
+    if (jointNo == kHeadJoint || (wolf && jointNo == kWolfNeckJoint)) {
+        s16 turn[3];
+        int axis[3];
+        if (jointNo == kHeadJoint) {
+            turn[0] = pup().headRot[0];
+            turn[1] = static_cast<s16>(-pup().headRot[1]);
+            turn[2] = pup().headRot[2];
+            axis[0] = 2; axis[1] = 1; axis[2] = 0;
+        } else {
+            turn[0] = pup().wolfNeck[0];
+            turn[1] = 0;
+            turn[2] = pup().wolfNeck[1];
+            axis[0] = 2; axis[1] = 0; axis[2] = 1;
+        }
+        if ((turn[0] != 0 || turn[1] != 0 || turn[2] != 0) && pup().oldFrame != nullptr) {
+            J3DTransformInfo* info = pup().oldFrame->getOldFrameTransInfo(jointNo);
+            Quaternion* quat = pup().oldFrame->getOldFrameQuaternion(jointNo);
+            if (info != nullptr && quat != nullptr) {
+                const Quaternion oldQuat = *quat;
+                Quaternion q = oldQuat;
+                const auto fold = [&](s16 angle, int onAxis) {
+                    if (angle == 0) return;
+                    Quaternion step;
+                    JMAEulerToQuat(onAxis == 0 ? angle : 0, onAxis == 1 ? angle : 0,
+                        onAxis == 2 ? angle : 0, &step);
+                    Quaternion out;
+                    mDoMtx_QuatConcat(&q, &step, &out);
+                    q = out;
+                };
+                fold(turn[1], axis[1]);
+                fold(turn[0], axis[0]);
+                fold(turn[2], axis[2]);
+                MtxP anm = pup().model->getAnmMtx(jointNo);
+                mDoMtx_stack_c::transS(info->mTranslate.x, info->mTranslate.y, info->mTranslate.z);
+                mDoMtx_stack_c::quatM(&oldQuat);
+                mDoMtx_stack_c::inverse();
+                cMtx_concat(anm, mDoMtx_stack_c::get(), J3DSys::mCurrentMtx);
+                MTXQuat(anm, &q);
+                anm[0][3] = info->mTranslate.x;
+                anm[1][3] = info->mTranslate.y;
+                anm[2][3] = info->mTranslate.z;
+                cMtx_concat(J3DSys::mCurrentMtx, anm, J3DSys::mCurrentMtx);
+                cMtx_copy(J3DSys::mCurrentMtx, anm);
+            }
         }
         return 1;
     }
@@ -1590,14 +1651,12 @@ u8* read_alanm_resource(u16 resIdx, u32 minSize, u32* o_bufSize) {
         buf = nullptr;
         if (bufSize >= kMaxAnmBufSize) {
             coop_log::warn(
-                "coop_mod: [DIAG-OVF] resIdx={} still not fitting at bufSize={} (readSize={}, "
-                "guardOk={}) - giving up on this resource",
+                "coop_mod: [DIAG-OVF] resIdx={} too big at bufSize={} readSize={} guardOk={}, skipped",
                 resIdx, bufSize, readSize, guardOkAfterRead ? 1 : 0);
             return nullptr;
         }
         const u32 grown = bufSize * 2u;
-        coop_log::info("coop_mod: [DIAG-OVF] resIdx={} truncated at bufSize={} (readSize={}), "
-            "retrying at {}", resIdx, bufSize, readSize, grown);
+        coop_log::info("coop_mod: [DIAG-OVF] resIdx={} truncated at bufSize={} readSize={}, retry at {}", resIdx, bufSize, readSize, grown);
         bufSize = grown;
     }
     *o_bufSize = bufSize;
@@ -1638,7 +1697,7 @@ J3DAnmTransform* other_arc_anim(u16 packed) {
     J3DAnmTransform* anm = static_cast<J3DAnmTransform*>(private_arc_load_anm_idx(name, anm_index(packed)));
     if (anm == nullptr) return nullptr;
     s_otherArcAnims[s_otherArcAnimCount++] = {packed, anm};
-    coop_log::info("coop_mod: [ANIM] {} #{} for other players", name, anm_index(packed));
+    coop_log::info("coop_mod: [ANIM] {} #{} for peers", name, anm_index(packed));
     return anm;
 }
 
@@ -1666,7 +1725,7 @@ mDoExt_bckAnm* get_or_load_puppet_anim(daAlink_c* alink, u16 resIdx) {
     if (alink == nullptr) return nullptr;
     if (lruIdx < 0) {
 
-        coop_log::warn("coop_mod: [ANIM] cache full this frame - resIdx={} not loaded", resIdx);
+        coop_log::warn("coop_mod: [ANIM] cache full, resIdx={} skipped", resIdx);
         return nullptr;
     }
     if (anm_is_other_arc(resIdx)) {
@@ -1695,8 +1754,7 @@ mDoExt_bckAnm* get_or_load_puppet_anim(daAlink_c* alink, u16 resIdx) {
     J3DAnmTransform* anm = static_cast<J3DAnmTransform*>(J3DAnmLoaderDataBase::load(buf));
 
     if (!guard_intact()) {
-        coop_log::warn("coop_mod: [DIAG-OVF] resIdx={} load() overran a complete buffer "
-            "(bufSize={}) - DROPPING", resIdx, bufSize);
+        coop_log::warn("coop_mod: [DIAG-OVF] resIdx={} load overran bufSize={}, dropped", resIdx, bufSize);
         JKRFreeToSysHeap(buf);
         return nullptr;
     }
@@ -1717,7 +1775,7 @@ mDoExt_bckAnm* get_or_load_puppet_anim(daAlink_c* alink, u16 resIdx) {
         reinterpret_cast<uintptr_t>(anm), vtbl);
     if (!vtbl_looks_like_code(vtbl)) {
 
-        coop_log::warn("coop_mod: [DIAG-DEAD] resIdx={} loaded a bad anim (vtbl0={:#x}) - dropping",
+        coop_log::warn("coop_mod: [DIAG-DEAD] resIdx={} bad anim vtbl0={:#x}, dropped",
             resIdx, vtbl);
         JKR_DELETE(bck);
         JKRFreeToSysHeap(buf);
@@ -1940,7 +1998,7 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
             keep_private_data_of(model);
             coop_free_model(model);
             model = skinModel;
-            coop_log::info("coop_mod: [SKIN] held item kind={} is their model's '{}'", kind,
+            coop_log::info("coop_mod: [SKIN] held item kind={} uses peer model '{}'", kind,
                 private_arc_file_name("Alink", res.bmdResIdx));
         }
         slot.data = model->getModelData();
@@ -1990,13 +2048,12 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
     J3DModelData* modelData = static_cast<J3DModelData*>(dRes_info_c::loaderBasicBmd(type, buf));
 
     if (!alanm_guard_intact(buf, bufSize)) {
-        coop_log::warn("coop_mod: [DIAG-OVF] item kind={} bmdResIdx={} loaderBasicBmd overran a "
-                        "complete buffer (bufSize={}) - DROPPING", kind, res.bmdResIdx, bufSize);
+        coop_log::warn("coop_mod: [DIAG-OVF] item kind={} bmdResIdx={} loader overran bufSize={}, dropped", kind, res.bmdResIdx, bufSize);
         JKRFreeToSysHeap(buf);
         return nullptr;
     }
     if (modelData == nullptr || modelData->getMaterialNum() == 0) {
-        coop_log::trace("coop_mod: [DIAG-ITEM] kind={} bmdResIdx={} produced no usable model data",
+        coop_log::trace("coop_mod: [DIAG-ITEM] kind={} bmdResIdx={} has no usable model data",
             kind, res.bmdResIdx);
         JKRFreeToSysHeap(buf);
         return nullptr;
@@ -2023,7 +2080,7 @@ J3DModelData* get_or_load_item_data(u8 kind, u16 wireIdx) {
                 slot.shared = true;
                 prep_equipment_model(skinModel);
                 coop_free_model(skinModel);
-                coop_log::info("coop_mod: [SKIN] held item kind={} is their model's '{}'", kind,
+                coop_log::info("coop_mod: [SKIN] held item kind={} uses peer model '{}'", kind,
                     skinFile);
                 return slot.data;
             }
@@ -2096,9 +2153,11 @@ J3DModel* get_slot_model(int slotIdx, u8 kind, u16 wireIdx) {
 
     J3DModelData* data = get_or_load_item_data(kind, wireIdx);
     if (data == nullptr) return nullptr;
-    J3DModel* model = coop_create_model(data, 0x80000, 0x11000284);
+
+    const u32 diffFlags = kind == kPuppetHeldGetItem ? (0x11000284u | 0x20000u | 0x1u) : 0x11000284u;
+    J3DModel* model = coop_create_model(data, 0x80000, diffFlags);
     if (model == nullptr) return nullptr;
-    force_diff_recognizes_stage_count(model);
+    enable_stage_count_diff(model);
     slot.kind = kind;
     slot.model = model;
     return model;
@@ -2133,7 +2192,7 @@ bool ensure_chain_link_data() {
 
     J3DModelData* data = static_cast<J3DModelData*>(dRes_info_c::loaderBasicBmd(type, buf));
     if (!alanm_guard_intact(buf, bufSize) || data == nullptr || data->getMaterialNum() == 0) {
-        coop_log::warn("coop_mod: [DIAG-CHAIN] chain link resource unusable - chains disabled");
+        coop_log::warn("coop_mod: [DIAG-CHAIN] chain link resource unusable, chains off");
         JKRFreeToSysHeap(buf);
         return false;
     }
@@ -2151,7 +2210,7 @@ bool draw_chain_link(MtxP mtx, f32 scale) {
     if (model == nullptr) {
         model = coop_create_model(s_chainLinkData, 0x80000, 0x11000284);
         if (model == nullptr) return false;
-        force_diff_recognizes_stage_count(model);
+        enable_stage_count_diff(model);
     }
     ++pup().chainLinksUsed;
     model->setBaseScale(cXyz(scale, scale, scale));
@@ -2216,7 +2275,7 @@ void draw_puppet_rod(const cXyz* pts, int count, bool uki) {
             pup().rodSegModels[i] = model;
         }
         pup().rodSegKind = kind;
-        coop_log::info("coop_mod: [DIAG-ROD] built {} shaft segments for the {} rod", kRodSegments,
+        coop_log::info("coop_mod: [DIAG-ROD] built {} shaft segments for {} rod", kRodSegments,
             uki ? "uki" : "lure");
     }
 
@@ -2465,6 +2524,14 @@ void render_get_item(J3DModel* model, const Mtx world, u8 item) {
         a.btk = item_anim_res<J3DAnmTextureSRTKey>(arc, dItem_data::getBtkName(item));
         a.brk = item_anim_res<J3DAnmTevRegKey>(arc, dItem_data::getBrkName(item));
         a.btp = item_anim_res<J3DAnmTexPattern>(arc, dItem_data::getBtpName(item));
+        static int s_logCount = 0;
+        if (s_logCount++ < 60) {
+            coop_log::info("coop_mod: [GETITEM] player {} item={:#x} arc='{}' tevFrm={} btpFrm={} brk={} btp={} btk={} data={:p}",
+                static_cast<int>(s_pupId), static_cast<int>(item), arc != nullptr ? arc : "?",
+                static_cast<int>(dItem_data::getTevFrm(item)),
+                static_cast<int>(dItem_data::getBtpFrm(item)), a.brk != nullptr, a.btp != nullptr,
+                a.btk != nullptr, static_cast<void*>(data));
+        }
     }
     if (data != nullptr && a.boundTo != data) {
         if (a.btk != nullptr) a.btk->searchUpdateMaterialID(data);
@@ -2746,14 +2813,13 @@ bool skin_fits_original(J3DModelData* mine, J3DModelData* theirs, const char* wh
     return skin_fits_counts(mine, theirs->getJointNum(), theirs->getMaterialNum(), what);
 }
 
-bool skin_fits_counts(J3DModelData* mine, u16 theirJoints, u16 theirMats, const char* what) {
+bool skin_fits_counts(J3DModelData* mine, u16 refJoints, u16 refMats, const char* what) {
     if (mine == nullptr) return false;
     const u16 myJoints = mine->getJointNum();
     const u16 myMats = mine->getMaterialNum();
-    if (myJoints == theirJoints && myMats == theirMats) return true;
-    coop_log::warn("coop_mod: [SKIN] '{}' does not fit the game's own (joints {}/{}, materials"
-                   " {}/{}) - using the game's",
-        what, myJoints, theirJoints, myMats, theirMats);
+    if (myJoints == refJoints && myMats == refMats) return true;
+    coop_log::warn("coop_mod: [SKIN] '{}' mismatch joints={}/{} mats={}/{}, using game model",
+        what, myJoints, refJoints, myMats, refMats);
     breadcrumb2("local: REFUSED mismatched part", what);
     return false;
 }
@@ -2761,7 +2827,7 @@ bool skin_fits_counts(J3DModelData* mine, u16 theirJoints, u16 theirMats, const 
 J3DModelData* guard_skin_data(J3DModelData* data, const char* what) {
     if (data == nullptr) return nullptr;
     if (skin_data_looks_sane(data)) return data;
-    coop_log::warn("coop_mod: [SKIN] '{}' did not look like a model - using the game's own", what);
+    coop_log::warn("coop_mod: [SKIN] '{}' not a valid model, using game model", what);
     breadcrumb2("local: REFUSED bad skin data", what);
     return nullptr;
 }
@@ -2862,7 +2928,7 @@ J3DModel* puppet_skin_equipment(const char* file, const cXyz& scale) {
 
     J3DModel* model = modelFromData(data, scale);
     if (model != nullptr) {
-        force_diff_recognizes_stage_count(model);
+        enable_stage_count_diff(model);
     }
     return model;
 }
@@ -2878,8 +2944,7 @@ bool remember_private_data(J3DModelData* data, const char* key, J3DModel* model)
     }
     static int s_fullLogged = 0;
     if (s_fullLogged++ < 4) {
-        coop_log::warn("coop_mod: [PUPPET] player {} already holds {} parts - not loading '{}' "
-                       "rather than leak it | [MEM] {}", static_cast<int>(s_pupId),
+        coop_log::warn("coop_mod: [PUPPET] player {} part limit {} reached, skipped '{}' | [MEM] {}", static_cast<int>(s_pupId),
             kPuppetMaxPrivateData, key, coop_mem_status());
     }
     return false;
@@ -2889,7 +2954,8 @@ J3DModel* private_part_model(const char* key, J3DModelData* (*load)(const char*,
     const char* arc, const char* file, u32 index) {
     J3DModelData* data = load(arc, file, index);
     if (data == nullptr) return nullptr;
-    J3DModel* model = coop_create_model(data, 0x80000, 0x11000284);
+
+    J3DModel* model = coop_create_model(data, 0x80000, coop_model_diff_flags());
     if (model == nullptr) {
         private_arc_free_data(data);
         return nullptr;
@@ -2986,7 +3052,7 @@ J3DModel* puppet_skin_part(int part, const cXyz& scale) {
     if (name == nullptr) return nullptr;
     J3DModel* model = skins_part_model(name, outfit, part, scale.x);
     if (model != nullptr) {
-        force_diff_recognizes_stage_count(model);
+        enable_stage_count_diff(model);
     }
     return model;
 }
@@ -3001,13 +3067,13 @@ void retry_missing_parts() {
     if (pup().faceModel == nullptr) {
         pup().faceModel = puppet_skin_part(kSkinPartFace, unitScale);
         if (pup().faceModel == nullptr) pup().faceModel = puppet_private_part(files.face, unitScale);
-        if (pup().faceModel != nullptr) force_diff_recognizes_stage_count(pup().faceModel);
+        if (pup().faceModel != nullptr) enable_stage_count_diff(pup().faceModel);
     }
     if (pup().hatModel == nullptr) {
         pup().hatModel = puppet_skin_part(kSkinPartHead, unitScale);
         if (pup().hatModel == nullptr) pup().hatModel = puppet_private_part(files.hat, unitScale);
         if (pup().hatModel != nullptr) {
-            force_diff_recognizes_stage_count(pup().hatModel);
+            enable_stage_count_diff(pup().hatModel);
             install_hat_tail_sway(pup().hatModel);
             colors_attach_puppet_model(pup().hatModel, s_pupId);
         }
@@ -3017,7 +3083,7 @@ void retry_missing_parts() {
         if (pup().handsModel == nullptr) {
             pup().handsModel = puppet_private_part(files.hands, unitScale);
         }
-        if (pup().handsModel != nullptr) force_diff_recognizes_stage_count(pup().handsModel);
+        if (pup().handsModel != nullptr) enable_stage_count_diff(pup().handsModel);
     }
 }
 
@@ -3039,7 +3105,7 @@ void load_puppet_parts(const OutfitFiles& files) {
     for (int i = 0; i < 2; ++i) {
         pup().bootModels[i] = puppet_private_part("al_bootsH.bmd", unitScale);
         if (pup().bootModels[i] != nullptr) {
-            force_diff_recognizes_stage_count(pup().bootModels[i]);
+            enable_stage_count_diff(pup().bootModels[i]);
         }
     }
     const bool doDiag = warp_diag_on();
@@ -3051,15 +3117,15 @@ void load_puppet_parts(const OutfitFiles& files) {
     }
 
     if (pup().faceModel != nullptr) {
-        force_diff_recognizes_stage_count(pup().faceModel);
+        enable_stage_count_diff(pup().faceModel);
     }
     if (pup().hatModel != nullptr) {
-        force_diff_recognizes_stage_count(pup().hatModel);
+        enable_stage_count_diff(pup().hatModel);
 
         install_hat_tail_sway(pup().hatModel);
     }
     if (pup().handsModel != nullptr) {
-        force_diff_recognizes_stage_count(pup().handsModel);
+        enable_stage_count_diff(pup().handsModel);
     }
     breadcrumb("build: face/hat/hands done");
     if (doDiag) {
@@ -3157,7 +3223,7 @@ void update_puppet_vfx(daAlink_c* alink) {
         return;
     }
 
-    if (local_in_hiding_event(alink)) {
+    if (local_hides_peers(alink)) {
         pup().vfxJumpLandSeen = pup().vfxJumpLand;
         pup().haveJumpLandBaseline = true;
         pup().vfxSpinApplied = kSpinVfxNone;
@@ -3505,15 +3571,24 @@ public:
 
 PuppetNametagDlst s_nametagDlst[kMaxPuppets];
 
-bool local_in_hiding_event(daAlink_c* alink) {
+bool local_hides_peers(daAlink_c* alink) {
     if (boss_local_demo_running()) return true;
     if (alink->checkEventRun() == FALSE) return false;
+    if (alink->mProcID == daAlink_c::PROC_METAMORPHOSE ||
+        alink->mProcID == daAlink_c::PROC_METAMORPHOSE_ONLY) {
+        return false;
+    }
+    if (dEvt_control_c* evt = dComIfGp_getEvent(); evt != nullptr && evt->getMode() == dEvt_mode_TALK_e) {
+        return false;
+    }
     return fopAcM_getTalkEventPartner(alink) == nullptr;
 }
 
 void queue_puppet_nametag(daAlink_c* alink) {
     s_nametagDlst[s_pupId].mVisible = false;
-    if (local_in_hiding_event(alink)) return;
+    if (local_hides_peers(alink)) return;
+
+    if (pup().warpOn) return;
     if (!s_nametagEnabled || pup().nametagName[0] == '\0' || pup().model == nullptr) return;
     cXyz head;
     J3DModelData* modelData = pup().model->getModelData();
@@ -3553,7 +3628,7 @@ bool rider_on_clock(cXyz* pos, csXyz* angle);
 daAlink_c* s_builtAgainstAlink = nullptr;
 void* s_builtAgainstArcHeap = nullptr;
 
-bool puppets_lost_their_link(daAlink_c* alink) {
+bool release_puppets_for_link(daAlink_c* alink) {
     void* const arcHeap = static_cast<void*>(alink->mpArcHeap);
     if (alink == s_builtAgainstAlink && arcHeap == s_builtAgainstArcHeap) return false;
     const bool hadLink = s_builtAgainstAlink != nullptr;
@@ -3566,8 +3641,7 @@ bool puppets_lost_their_link(daAlink_c* alink) {
     for (int i = 0; i < kMaxPuppets; ++i) {
         PuppetScope scope(static_cast<uint8_t>(i));
         if (pup().state == 0) continue;
-        coop_log::warn("coop_mod: [LINKSWAP] the player actor changed under player {}'s puppet "
-                        "(alink {} -> {}, arcHeap {} -> {}) - releasing",
+        coop_log::warn("coop_mod: [LINKSWAP] player actor changed under puppet {} (alink {} -> {}, arcHeap {} -> {}), releasing",
             i, static_cast<const void*>(was), static_cast<void*>(alink), wasHeap, arcHeap);
         release_puppet();
         released = true;
@@ -3592,7 +3666,7 @@ void report_unseen() {
         }
 
         daAlink_c* me = daAlink_getAlinkActorClass();
-        if (me != nullptr && local_in_hiding_event(me)) continue;
+        if (me != nullptr && local_hides_peers(me)) continue;
         const int room = q.peerRoom;
         const bool roomShown = !(room >= 0 && room < 64 && !dComIfGp_roomControl_checkRoomDisp(room));
         uint32_t in = 0, stale = 0, unknown = 0;
@@ -3627,7 +3701,7 @@ void on_alink_execute_puppet_post(ModContext*, void*, void*, void*) {
         return;
     }
 
-    if (puppets_lost_their_link(alink)) return;
+    if (release_puppets_for_link(alink)) return;
 
     for (int i = 0; i < kMaxPuppets; ++i) {
         if (i == coop_net_local_id()) continue;
@@ -3661,14 +3735,14 @@ void update_one_puppet(daAlink_c* alink) {
         !healWarping) {
         pup().pendingOutfit = pup().outfit;
         pup().state = 1;
-        coop_log::info("coop_mod: [PUPPET] player {} had no body and is here - rebuilding",
+        coop_log::info("coop_mod: [PUPPET] player {} here without body, rebuilding",
             static_cast<int>(s_pupId));
     }
 
     if (pup().state == 2 && pup().model == nullptr && !pup().skinDirty && s_puppetFrame % 120 == 0) {
-        static uint32_t s_noBodySaid = 0;
-        if (s_noBodySaid++ % 15 == 0) {
-            coop_log::warn("coop_mod: [PUPPET] player {} has no body - building it again | [MEM] {}",
+        static uint32_t s_noBodyLogged = 0;
+        if (s_noBodyLogged++ % 15 == 0) {
+            coop_log::warn("coop_mod: [PUPPET] player {} missing body, rebuilding | [MEM] {}",
                 static_cast<int>(s_pupId), coop_mem_status());
         }
         pup().skinDirty = true;
@@ -3761,10 +3835,9 @@ void update_one_puppet(daAlink_c* alink) {
 
             if (!private_arc_request(files.arc)) {
 
-                static uint32_t s_invisibleSaid = 0;
-                if (s_invisibleSaid++ % 300 == 0) {
-                    coop_log::warn("coop_mod: [PUPPET] no private '{}' yet - player {} is invisible "
-                                   "until it loads", files.arc, static_cast<int>(s_pupId));
+                static uint32_t s_invisibleLogged = 0;
+                if (s_invisibleLogged++ % 300 == 0) {
+                    coop_log::warn("coop_mod: [PUPPET] private '{}' not loaded, player {} hidden", files.arc, static_cast<int>(s_pupId));
                 }
                 pup().state = 0;
                 return;
@@ -3799,7 +3872,7 @@ void update_one_puppet(daAlink_c* alink) {
         if (pup().model != nullptr) {
             if (doDiag) log_warp_state("body BEFORE", pup().model->getModelData());
 
-            force_diff_recognizes_stage_count(pup().model);
+            enable_stage_count_diff(pup().model);
             if (doDiag) log_warp_state("body AFTER", pup().model->getModelData());
         }
         if (kAnimBisectMode != 2) {
@@ -3890,6 +3963,8 @@ void puppet_hook_on_network_snapshot(uint8_t playerId, float x, float y, float z
     pup().digAngleX = equipment.vfxDigAngleX;
     pup().digPos.set(equipment.vfxDigPos[0], equipment.vfxDigPos[1], equipment.vfxDigPos[2]);
     pup().warpOn = equipment.warpOn;
+    pup().tevTint = equipment.tevTint;
+    pup().tevTintOn = equipment.tevTintOn;
     pup().warpScroll = equipment.warpScroll;
     pup().warpDissolve = equipment.warpDissolve;
     pup().peerRoom = roomNo;
@@ -3917,6 +3992,8 @@ void puppet_hook_on_network_snapshot(uint8_t playerId, float x, float y, float z
     pup().combat = equipment.combat;
     for (int i = 0; i < 9; ++i) pup().hat[i] = equipment.hat[i];
     for (int i = 0; i < 9; ++i) pup().magneRot[i] = equipment.magneRot[i];
+    for (int i = 0; i < 3; ++i) pup().headRot[i] = equipment.headRot[i];
+    for (int i = 0; i < 2; ++i) pup().wolfNeck[i] = equipment.wolfNeck[i];
     pup().hatHeard = true;
     pup().bodyRotX = equipment.bodyRotX;
     pup().bodyRotY = equipment.bodyRotY;
@@ -4003,7 +4080,7 @@ int local_skin_outfit() {
     daAlink_c* alink = daAlink_getAlinkActorClass();
     if (alink == nullptr) return kSkinOutfitHero;
     if (alink->checkWolf()) return kSkinOutfitWolf;
-    switch (detect_local_outfit_for_a_press()) {
+    switch (detect_local_outfit_change()) {
     case kPuppetOutfitCasual: return kSkinOutfitOrdon;
     case kPuppetOutfitZora: return kSkinOutfitZora;
     case kPuppetOutfitMagicArmor: return kSkinOutfitMagic;
@@ -4092,14 +4169,14 @@ void local_equip_install(J3DModel** slot, LocalEquipSlot& rec) {
         J3DModel* built = modelFromData(original, cXyz(1.0f, 1.0f, 1.0f));
         if (built == nullptr) return;
 
-        force_diff_recognizes_stage_count(built);
+        enable_stage_count_diff(built);
         *slot = built;
         J3DModel* previous = rec.ours;
         rec.ours = built;
         rec.data = nullptr;
         rec.restored = true;
         puppet_free_later(previous);
-        coop_log::info("coop_mod: [EQUIP] '{}' put back to the game's own", rec.file);
+        coop_log::info("coop_mod: [EQUIP] '{}' restored to game model", rec.file);
         return;
     }
     rec.restored = false;
@@ -4108,7 +4185,7 @@ void local_equip_install(J3DModel** slot, LocalEquipSlot& rec) {
         if (rec.ours != nullptr && *slot != rec.ours) {
             J3DModelData* inSlot = (*slot != nullptr) ? (*slot)->getModelData() : nullptr;
             if (!skin_fits_original(want, inSlot, rec.file)) return;
-            models_fresh_for_game(want, rec.file);
+            models_reset_for_game(want, rec.file);
             *slot = rec.ours;
             breadcrumb2("local: put our held item back", rec.file);
         }
@@ -4118,7 +4195,7 @@ void local_equip_install(J3DModel** slot, LocalEquipSlot& rec) {
     J3DModelData* theirs = (*slot != nullptr) ? (*slot)->getModelData() : nullptr;
     if (!skin_fits_original(want, theirs, rec.file)) return;
 
-    models_fresh_for_game(want, rec.file);
+    models_reset_for_game(want, rec.file);
     J3DModel* built = modelFromData(want, cXyz(1.0f, 1.0f, 1.0f));
     if (built == nullptr) return;
     prep_equipment_model(built);
@@ -4172,7 +4249,7 @@ void local_skin_rebuild_link() {
     local_skin_rebuild_equipment(alink);
     if (alink->checkWolf()) {
 
-        coop_log::info("coop_mod: [SKIN] model change held until you are not a wolf");
+        coop_log::info("coop_mod: [SKIN] model change deferred until human");
         return;
     }
     alink->setClothesChange(0);
@@ -4303,6 +4380,18 @@ bool puppet_hook_get_pose_of(uint8_t playerId, float* x, float* y, float* z, sho
     return true;
 }
 
+bool puppet_hook_fx_pos(uint8_t playerId, float* x, float* y, float* z) {
+    if (playerId >= kMaxPuppets) return false;
+    const Puppet& q = s_puppetSlots[playerId];
+    const bool ready = q.state == 2 && q.model != nullptr;
+    const bool rebuilding = q.state == 1 && q.snapFrame != 0;
+    if (!ready && !rebuilding) return false;
+    if (x != nullptr) *x = q.pos.x;
+    if (y != nullptr) *y = q.pos.y;
+    if (z != nullptr) *z = q.pos.z;
+    return true;
+}
+
 bool puppet_hook_pose_fresh(uint8_t playerId) {
     if (!puppet_hook_player_active(playerId)) return false;
     const Puppet& q = s_puppetSlots[playerId];
@@ -4350,7 +4439,7 @@ void puppet_hook_trigger_spawn() {
                          (std::strcmp(stage, "F_SP102") == 0 || std::strcmp(stage, "title") == 0);
     const bool inEvent = dComIfGp_event_runCheck();
     if (onTitle || inEvent) {
-        coop_log::info("coop_mod: [DIAG] spawn button pressed but skipped: onTitle={} inEvent={}",
+        coop_log::info("coop_mod: [DIAG] spawn skipped onTitle={} inEvent={}",
             onTitle, static_cast<int>(inEvent));
         return;
     }
@@ -4363,11 +4452,10 @@ void puppet_hook_trigger_spawn() {
 
     pup().targetPos = pup().pos;
     pup().targetAngle = pup().angle;
-    pup().pendingOutfit = detect_local_outfit_for_a_press();
+    pup().pendingOutfit = detect_local_outfit_change();
     pup().state = 1;
     coop_log::info(
-        "coop_mod: [DIAG] spawn button pressed: player=({},{},{}) angleY={} outfit={} -> "
-        "puppetPos=({},{},{})",
+        "coop_mod: [DIAG] spawn player=({},{},{}) angleY={} outfit={} puppetPos=({},{},{})",
         alink->current.pos.x, alink->current.pos.y, alink->current.pos.z, alink->shape_angle.y,
         pup().pendingOutfit, pup().pos.x, pup().pos.y, pup().pos.z);
 }
@@ -4386,7 +4474,7 @@ void prep_equipment_model(J3DModel* model) {
 
     dRes_info_c::offWarpMaterial(modelData);
 
-    force_diff_recognizes_stage_count(model);
+    enable_stage_count_diff(model);
 }
 
 void sync_equipment_models() {
@@ -4408,12 +4496,12 @@ void sync_equipment_models() {
             if (pup().swordModel != nullptr) prep_equipment_model(pup().swordModel);
         }
         if (pup().swordModel != nullptr) {
-            coop_log::trace("coop_mod: [DIAG-SWORD] '{}' from the model's equipment folder", skinBmd);
+            coop_log::trace("coop_mod: [DIAG-SWORD] '{}' from model equipment", skinBmd);
         } else if (outfitBmd != nullptr && pup().state == 2) {
 
             pup().swordModel = puppet_private_part(outfitBmd, cXyz(1.0f, 1.0f, 1.0f));
             prep_equipment_model(pup().swordModel);
-            coop_log::trace("coop_mod: [DIAG-SWORD] wooden sword from outfit archive '{}'",
+            coop_log::trace("coop_mod: [DIAG-SWORD] wooden sword from outfit arc '{}'",
                 outfitBmd);
         } else if (idx >= 0) {
             pup().swordModel = puppet_private_part_idx("Alink", idx, cXyz(1.0f, 1.0f, 1.0f));
@@ -4522,7 +4610,7 @@ void sync_equipment_models() {
         if (pup().shieldModel != nullptr) {
             prep_equipment_model(pup().shieldModel);
             std::strncpy(pup().shieldArc, pup().wantShieldArc, sizeof(pup().shieldArc) - 1);
-            coop_log::trace("coop_mod: [DIAG-EQUIP] shield '{}' from the model's equipment folder",
+            coop_log::trace("coop_mod: [DIAG-EQUIP] shield '{}' from model equipment",
                 shieldFile);
         }
         if (pup().shieldModel == nullptr && arcReady) {
@@ -4530,12 +4618,11 @@ void sync_equipment_models() {
             pup().shieldModel = puppet_private_part_from(pup().wantShieldArc,
                 shield_file_for_arc(pup().wantShieldArc), cXyz(1.0f, 1.0f, 1.0f));
             if (pup().shieldModel == nullptr) {
-                static char s_saidArc[kMaxPuppets][16] = {};
-                if (std::strncmp(s_saidArc[s_pupId], pup().wantShieldArc, 15) != 0) {
-                    std::strncpy(s_saidArc[s_pupId], pup().wantShieldArc, 15);
+                static char s_loggedArc[kMaxPuppets][16] = {};
+                if (std::strncmp(s_loggedArc[s_pupId], pup().wantShieldArc, 15) != 0) {
+                    std::strncpy(s_loggedArc[s_pupId], pup().wantShieldArc, 15);
                     const char* file = shield_file_for_arc(pup().wantShieldArc);
-                    coop_log::warn("coop_mod: [EQUIP] player {}'s shield did not build from '{}' "
-                                   "(file {})", static_cast<int>(s_pupId), pup().wantShieldArc,
+                    coop_log::warn("coop_mod: [EQUIP] player {} shield build failed arc='{}' file={}", static_cast<int>(s_pupId), pup().wantShieldArc,
                         file != nullptr ? file : "unknown");
                 }
             }
@@ -4699,9 +4786,9 @@ void draw_puppet_equipment() {
         (localAlink != nullptr) && localAlink->mShieldChangeWaitTimer != 0;
 
     {
-        static uint32_t s_saidAt[kMaxPuppets] = {};
-        if (pup().wantShield && s_puppetFrame - s_saidAt[s_pupId] >= 600) {
-            s_saidAt[s_pupId] = s_puppetFrame;
+        static uint32_t s_loggedAt[kMaxPuppets] = {};
+        if (pup().wantShield && s_puppetFrame - s_loggedAt[s_pupId] >= 600) {
+            s_loggedAt[s_pupId] = s_puppetFrame;
             J3DModelData* body = pup().model != nullptr ? pup().model->getModelData() : nullptr;
             J3DModelData* sd = pup().shieldModel != nullptr ? pup().shieldModel->getModelData() : nullptr;
             int hidden = 0;
@@ -4729,7 +4816,7 @@ void draw_puppet_equipment() {
 
 bool s_bodyNotDrawn = false;
 
-void render_puppet_body_with_upper_split(J3DModel* model, const cXyz& pos, const csXyz& angle,
+void render_puppet_body(J3DModel* model, const cXyz& pos, const csXyz& angle,
     daAlink_c* alink) {
     if (model == nullptr) {
         static int s_nullReport = 0;
@@ -4841,9 +4928,27 @@ struct PuppetWarpScope {
     static constexpr int kMax = 128;
     Saved saved[kMax];
     int count = 0;
+    bool log = false;
 
     void apply(J3DModel* model) {
         if (model == nullptr) return;
+        const int before = count;
+        const char* srt = "no";
+        struct Say {
+            PuppetWarpScope& scope;
+            J3DModel* model;
+            int before;
+            const char*& srt;
+            ~Say() {
+                if (!scope.log) return;
+                J3DModelData* d = model->getModelData();
+                coop_log::info("coop_mod: [WARP-DIAG] model {:p} texgenFlag={} konstFlag={} mats={} "
+                               "prepared={} srt={}",
+                    static_cast<void*>(model), (model->mDiffFlag & J3DDiffFlag_TexGen) != 0,
+                    (model->mDiffFlag & J3DDiffFlag_KonstColor) != 0,
+                    d != nullptr ? d->getMaterialNum() : 0, scope.count - before, srt);
+            }
+        } say{*this, model, before, srt};
 
         if ((model->mDiffFlag & J3DDiffFlag_TexGen) == 0) return;
         J3DModelData* data = model->getModelData();
@@ -4881,9 +4986,11 @@ struct PuppetWarpScope {
         const u32 texGenNum = firstTexGen->getTexGenNum();
         if (texGenNum == 0 || firstTexGen->getTexMtx(texGenNum - 1) == nullptr) return;
         dRes_info_c::setWarpSRT(data, pup().pos, pup().warpScroll, pup().warpDissolve);
+        srt = "yes";
     }
 
     ~PuppetWarpScope() {
+        s_puppetWarpDrawing = false;
         for (int i = count - 1; i >= 0; --i) {
             J3DMaterial* material = saved[i].material;
             J3DTevBlock* tev = material->getTevBlock();
@@ -4960,12 +5067,11 @@ void on_kankyo_exe_post(ModContext*, void*, void*, void*) {
     }
 
     static int s_lastBest = -1;
-    static int s_sayIn = 0;
-    if (best != s_lastBest || --s_sayIn <= 0) {
+    static int s_logIn = 0;
+    if (best != s_lastBest || --s_logIn <= 0) {
         s_lastBest = best;
-        s_sayIn = 300;
-        coop_log::info("coop_mod: [LANTERN] player {}'s flame is lighting the room at "
-                        "({:.0f}, {:.0f}, {:.0f})",
+        s_logIn = 300;
+        coop_log::info("coop_mod: [LANTERN] player {} light at ({:.0f}, {:.0f}, {:.0f})",
             best, s_lanternFlame[best].pos.x, s_lanternFlame[best].pos.y,
             s_lanternFlame[best].pos.z);
     }
@@ -4981,7 +5087,7 @@ void on_alink_draw_puppet_post(ModContext*, void*, void*, void*) {
     if (alink == nullptr) return;
     ganon_draw_post(alink);
 
-    const bool localInCutscene = local_in_hiding_event(alink);
+    const bool localInCutscene = local_hides_peers(alink);
 
     for (int i = 0; i < kMaxPuppets; ++i) {
         if (i == coop_net_local_id()) continue;
@@ -5027,8 +5133,7 @@ void warm_puppet_warp(daAlink_c* alink) {
     if (++pup().warpWarmTicks < due) return;
 
     if (pup().warpWarmFrames == 0) {
-        coop_log::info("coop_mod: [WARP] warming the dissolve shader on player {}'s models - if "
-                        "this is the last line in the log, the FATAL is in that path",
+        coop_log::info("coop_mod: [WARP] warming dissolve shader for player {}",
             static_cast<int>(s_pupId));
     }
 
@@ -5067,8 +5172,7 @@ void warm_puppet_warp(daAlink_c* alink) {
 
     if (++pup().warpWarmFrames >= kWarpWarmFrames) {
         pup().warpWarmDone = true;
-        coop_log::info("coop_mod: [WARP] player {} warmed clean over {} frames - the dissolve "
-                        "path survived being exercised",
+        coop_log::info("coop_mod: [WARP] player {} warm done in {} frames",
             static_cast<int>(s_pupId), kWarpWarmFrames);
     }
 }
@@ -5089,8 +5193,7 @@ J3DModel* midna_model(int part, bool solid) {
             for (int i = 0; i < 4; ++i) {
                 if (pup().midnaSolid[i] == nullptr) {
                     pup().midnaSolidFailed = true;
-                    coop_log::warn("coop_mod: [MIDNA] could not build her solid '{}' from '{}' - "
-                                    "not drawing her solid form for player {}",
+                    coop_log::warn("coop_mod: [MIDNA] solid '{}' from '{}' failed, player {} solid form off",
                         kMidnaSolidFiles[i], arc, static_cast<int>(s_pupId));
                     break;
                 }
@@ -5110,8 +5213,7 @@ J3DModel* midna_model(int part, bool solid) {
         for (int i = 0; i < 5; ++i) {
             if (pup().midnaShadow[i] == nullptr) {
                 pup().midnaShadowFailed = true;
-                coop_log::warn("coop_mod: [MIDNA] could not build her shadow part {} (res {}) - "
-                                "not drawing her shadow form for player {}",
+                coop_log::warn("coop_mod: [MIDNA] shadow part {} (res {}) failed, player {} shadow form off",
                     i, kMidnaShadowRes[i], static_cast<int>(s_pupId));
                 break;
             }
@@ -5126,7 +5228,7 @@ J3DModel* midna_model(int part, bool solid) {
                     pup().midnaInvReady[i] = true;
                 } else {
                     pup().midnaShadowFailed = true;
-                    coop_log::warn("coop_mod: [MIDNA] invisible-model setup failed for part {}", i);
+                    coop_log::warn("coop_mod: [MIDNA] invisible-model setup failed part={}", i);
                     break;
                 }
             }
@@ -5480,9 +5582,9 @@ void draw_puppet_midna(daAlink_c* alink) {
 
         daMidna_c* mine = daPy_py_c::getMidnaActor();
         daAlink_c* me = daAlink_getAlinkActorClass();
-        const bool mineRiding = me != nullptr && mine != nullptr && me->checkWolf() &&
+        const bool selfRiding = me != nullptr && mine != nullptr && me->checkWolf() &&
                                 !mine->checkStateFlg0(daMidna_c::FLG0_WOLF_NO_POS);
-        if (mine != nullptr && me != nullptr && !mineRiding && mine->mpShadowModel != nullptr &&
+        if (mine != nullptr && me != nullptr && !selfRiding && mine->mpShadowModel != nullptr &&
             !mine->checkNoDrawState()) {
             MtxP m = mine->mpShadowModel->getBaseTRMtx();
             const f32 dx = m[0][3] - base[0][3];
@@ -5981,6 +6083,22 @@ struct PuppetHurtTint {
     }
 };
 
+struct PuppetTevTint {
+    dKy_tevstr_c* tev = nullptr;
+    GXColorS10 saved{};
+    void apply(daAlink_c* alink, const Puppet& q) {
+        if (q.tevTintOn == 0) return;
+        tev = &alink->tevStr;
+        saved = tev->TevColor;
+        tev->TevColor.r = q.tevTint;
+        tev->TevColor.g = q.tevTint;
+        tev->TevColor.b = q.tevTint;
+    }
+    ~PuppetTevTint() {
+        if (tev != nullptr) tev->TevColor = saved;
+    }
+};
+
 void draw_one_puppet(daAlink_c* alink) {
 
     if ((pup().combat & kSnapHidden) != 0) return;
@@ -5992,9 +6110,12 @@ void draw_one_puppet(daAlink_c* alink) {
 
     PuppetHurtTint hurt;
     hurt.apply(alink, pup(), s_puppetFrame);
+    PuppetTevTint transformTint;
+    transformTint.apply(alink, pup());
 
     PuppetWarpScope warp;
     if (pup().warpOn && features_puppet_warp_fx()) {
+        warp.log = !pup().warpLogged;
         warp.apply(pup().model);
         warp.apply(pup().faceModel);
         warp.apply(pup().hatModel);
@@ -6003,6 +6124,14 @@ void draw_one_puppet(daAlink_c* alink) {
         warp.apply(pup().swordModel);
         warp.apply(pup().sheathModel);
         warp.apply(pup().shieldModel);
+        s_puppetWarpDrawing = warp.count > 0;
+        if (!pup().warpLogged) {
+            pup().warpLogged = true;
+            coop_log::info("coop_mod: [WARP] player {} warping mats={} scroll={:.2f} dissolve={:.2f}",
+                static_cast<int>(s_pupId), warp.count, pup().warpScroll, pup().warpDissolve);
+        }
+    } else if (!pup().warpOn) {
+        pup().warpLogged = false;
     }
 
     PuppetGuard bodyGuard;
@@ -6027,6 +6156,8 @@ void draw_one_puppet(daAlink_c* alink) {
         };
         hook_joint(kUnderRootJoint);
         hook_joint(wolf ? kWolfFootCallbackJoint : kHumanFootCallbackJoint);
+        hook_joint(kHeadJoint);
+        if (wolf) hook_joint(kWolfNeckJoint);
         if (!wolf) {
             hook_joint(kUpperBodyRootJoint);
             hook_joint(kBackbone2Joint);
@@ -6042,7 +6173,7 @@ void draw_one_puppet(daAlink_c* alink) {
     const bool bodyHandsApplied =
         body_hand_shapes_apply(pup().model, pup().handL, pup().handR, bodyHands);
     s_bodyNotDrawn = asGanon || asBeast;
-    render_puppet_body_with_upper_split(pup().model, pup().pos, pup().angle, alink);
+    render_puppet_body(pup().model, pup().pos, pup().angle, alink);
     s_bodyNotDrawn = false;
     if (bodyHandsApplied) body_hand_shapes_restore(bodyHands);
     if (s_poseDiagLogs < 30 &&
@@ -6083,11 +6214,11 @@ void draw_one_puppet(daAlink_c* alink) {
     }
     if (pup().swordId == kPuppetSwordMaster && !outfit_files(pup().outfit).isWolf &&
         puppet_holds_ganondorf_sword()) {
-        J3DModel* hisSword = ganon_puppet_sword(s_pupId, false);
-        J3DModel* hisSheath = ganon_puppet_sword(s_pupId, true);
-        if (hisSword != nullptr && hisSheath != nullptr) {
-            pup().swordModel = hisSword;
-            if (pup().sheathId == kPuppetSheathMaster) pup().sheathModel = hisSheath;
+        J3DModel* standinSword = ganon_puppet_sword(s_pupId, false);
+        J3DModel* standinSheath = ganon_puppet_sword(s_pupId, true);
+        if (standinSword != nullptr && standinSheath != nullptr) {
+            pup().swordModel = standinSword;
+            if (pup().sheathId == kPuppetSheathMaster) pup().sheathModel = standinSheath;
         }
     }
 
@@ -6214,7 +6345,7 @@ void puppet_hook_init() {
             J3DModelData* mine = skins_local_aram_data(index);
             const char* file = skins_aram_file_for_index(index);
             if (mine == nullptr || !skin_fits_original(mine, *result, file)) return;
-            models_fresh_for_game(mine, file);
+            models_reset_for_game(mine, file);
             *result = mine;
             breadcrumb2("local: held item (first draw)", file);
         });
@@ -6231,7 +6362,7 @@ void puppet_hook_init() {
             J3DModelData* mine = skins_local_aram_data(index);
             const char* file = skins_aram_file_for_index(index);
             if (mine == nullptr || !skin_fits_counts(mine, joints, mats, file)) return HOOK_CONTINUE;
-            models_fresh_for_game(mine, file);
+            models_reset_for_game(mine, file);
             *result = mine;
             breadcrumb2("local: held item", file);
             return HOOK_SKIP_ORIGINAL;
@@ -6248,7 +6379,7 @@ void puppet_hook_init() {
             if (mine != nullptr &&
                 skin_fits_original(mine, static_cast<J3DModelData*>(*result), resName)) {
 
-                models_fresh_for_game(mine, resName);
+                models_reset_for_game(mine, resName);
                 *result = mine;
             }
         });
@@ -6262,7 +6393,7 @@ void puppet_hook_init() {
             if (mods::arg<int>(args, 1) != dRes_INDEX_WMDL_BMD_WL_e) return;
             J3DModelData* mine = skins_local_part_data(kSkinOutfitWolf, kSkinPartBody);
             if (mine != nullptr) {
-                models_fresh_for_game(mine, "wl.bmd");
+                models_reset_for_game(mine, "wl.bmd");
                 *result = mine;
             }
         });
@@ -6285,8 +6416,8 @@ void puppet_hook_init() {
             s_builtAgainstAlink = nullptr;
             s_builtAgainstArcHeap = nullptr;
             models_link_rebuilding();
-            coop_log::info("coop_mod: [LINKDTOR] player actor going away - released {} puppet(s) "
-                            "before its archives are deleted",
+            features_on_link_destroyed();
+            coop_log::info("coop_mod: [LINKDTOR] player actor destroyed, released {} puppet(s)",
                 released);
             return HOOK_CONTINUE;
         });
@@ -6305,5 +6436,18 @@ bool puppet_hook_sword_mtx(uint8_t playerId, float out[3][4], bool* master) {
         for (int c = 0; c < 4; ++c) out[r][c] = m[r][c];
     }
     if (master != nullptr) *master = pup().swordId == kPuppetSwordMaster;
+    return true;
+}
+
+bool puppet_hook_joint_mtx(uint8_t playerId, int joint, float out[3][4]) {
+    if (playerId >= kMaxPuppets || playerId == coop_net_local_id()) return false;
+    PuppetScope scope(playerId);
+    if (pup().state != 2 || pup().model == nullptr) return false;
+    J3DModelData* data = pup().model->getModelData();
+    if (data == nullptr || joint < 0 || joint >= data->getJointNum()) return false;
+    MtxP m = pup().model->getAnmMtx(joint);
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 4; ++c) out[r][c] = m[r][c];
+    }
     return true;
 }

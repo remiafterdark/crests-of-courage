@@ -216,7 +216,7 @@ std::string upnp_status() {
 
 void upnp_update() {
     if (s_renewTicks > 0 && --s_renewTicks == 0 && s_stage == Stage::Ready) {
-        coop_log::info("coop_mod: [UPNP] renewing the mapping before its lease runs out");
+        coop_log::info("coop_mod: [UPNP] renewing mapping");
         ask_for_mapping("TCP");
     }
     if (s_ticks > 0 && --s_ticks == 0) {

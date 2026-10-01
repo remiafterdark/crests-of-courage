@@ -109,7 +109,7 @@ bool segment_meets_body(const cXyz& a, const cXyz& b, const cXyz& feet, f32 radi
     return y >= feet.y - 10.0f && y <= feet.y + height;
 }
 
-void stop_remote_arrows_on_us(daAlink_c* alink) {
+void stop_remote_arrow_hits(daAlink_c* alink) {
     if (!pvp_active()) return;
     const bool wolf = alink->checkWolf() != 0;
     const f32 radius = wolf ? 45.0f : 35.0f;
@@ -143,7 +143,7 @@ void stop_remote_arrows_on_us(daAlink_c* alink) {
             arrow->speed.set(0.0f, 0.0f, 0.0f);
             arrow->field_0x93f = 1;
         }
-        coop_log::info("coop_mod: [PVP] their {} stopped on us",
+        coop_log::info("coop_mod: [PVP] remote {} stopped on local player",
             arrow->mArrowType == daArrow_c::ARROW_TYPE_SLING ? "pellet" : "arrow");
     }
 }
@@ -164,8 +164,8 @@ struct BlastSite {
 const int kBlastSites = 16;
 const u32 kBlastMemoryFrames = 90;
 const f32 kBlastReach = 300.0f;
-BlastSite s_ourBlasts[kBlastSites];
-int s_ourBlastNext = 0;
+BlastSite s_localBlasts[kBlastSites];
+int s_localBlastNext = 0;
 u32 s_frame = 0;
 
 void follow_bomb_arrows(const ArrowList& list) {
@@ -191,8 +191,8 @@ void follow_bomb_arrows(const ArrowList& list) {
     for (BombArrowSeen& b : s_bombArrows) {
         if (b.id == kNoId || b.seen) continue;
         if (b.ours) {
-            BlastSite& site = s_ourBlasts[s_ourBlastNext];
-            s_ourBlastNext = (s_ourBlastNext + 1) % kBlastSites;
+            BlastSite& site = s_localBlasts[s_localBlastNext];
+            s_localBlastNext = (s_localBlastNext + 1) % kBlastSites;
             site.pos = b.pos;
             site.frame = s_frame;
             site.used = true;
@@ -203,9 +203,9 @@ void follow_bomb_arrows(const ArrowList& list) {
 
 }
 
-bool projectiles_blast_is_ours(fopAc_ac_c* blast) {
+bool projectiles_is_local_blast(fopAc_ac_c* blast) {
     if (blast == nullptr) return false;
-    for (const BlastSite& site : s_ourBlasts) {
+    for (const BlastSite& site : s_localBlasts) {
         if (!site.used || s_frame - site.frame > kBlastMemoryFrames) continue;
         const f32 dx = blast->current.pos.x - site.pos.x, dy = blast->current.pos.y - site.pos.y,
                   dz = blast->current.pos.z - site.pos.z;
@@ -258,7 +258,7 @@ void projectiles_update() {
     }
 
     if (!coop_net_connected()) return;
-    stop_remote_arrows_on_us(alink);
+    stop_remote_arrow_hits(alink);
 
     ArrowList list{};
     fopAcM_Search(collect_arrows, &list);
@@ -298,7 +298,9 @@ void projectiles_on_message(const uint8_t* payload, size_t size) {
     MsgArrowShot shot;
     std::memcpy(&shot, payload, sizeof(shot));
     daAlink_c* alink = daAlink_getAlinkActorClass();
-    if (alink == nullptr || !peer_on_our_stage()) return;
+    if (alink == nullptr || !peer_shares_stage()) return;
+
+    if (alink->mpLinkModel == nullptr || dComIfGp_isEnableNextStage()) return;
     if (shot.type != daArrow_c::ARROW_TYPE_NORMAL && shot.type != daArrow_c::ARROW_TYPE_BOMB &&
         shot.type != daArrow_c::ARROW_TYPE_SLING)
     {
@@ -314,7 +316,7 @@ void projectiles_on_message(const uint8_t* payload, size_t size) {
             fopAcM_GetRoomNo(alink), &angle, nullptr, -1, nullptr, nullptr);
     }
     if (actor == nullptr) {
-        coop_log::warn("coop_mod: [ARROW] could not spawn their arrow (type {})", shot.type);
+        coop_log::warn("coop_mod: [ARROW] remote arrow spawn failed type={}", shot.type);
         return;
     }
     push_id(s_remote, s_remoteNext, fopAcM_GetID(actor));

@@ -202,6 +202,12 @@ struct PlayerSnapshot {
     int16_t hat[9];
 
     int16_t magneRot[9];
+
+    int16_t headRot[3];
+    int16_t wolfNeck[2];
+
+    int16_t tevTint;
+    uint8_t tevTintOn;
 };
 const float kMagneRotFixed = 8192.0f;
 
@@ -304,7 +310,8 @@ static_assert(sizeof(PlayerSnapshot) ==
         4 + 1 + 12 + 6 + 1 + 1 + (3 * 14) + (3 * 14) + 1 + 1 + 6 + 6 + 16 +
             16 + 16 + (kPuppetAttachSlots * 61) + 6 + 1 + 1 + 1 + 2 +
             (kPuppetChainPts * 3 * 4) + 1 + 12 + 24 + 2 + 1 + 2 + 12 + 1 + 4 + 4 +
-            4   + 1   + 18   + 18  ,
+            4   + 1   + 18   + 18   + 6   + 4   +
+            2   + 1  ,
     "PlayerSnapshot must stay tightly packed");
 
 static_assert(sizeof(MidnaSnapshot) != sizeof(PlayerSnapshot),

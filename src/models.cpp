@@ -26,6 +26,10 @@
 
 static const u32 kCoopDifferedDlistFlags = 0x11000284u | J3DDiffFlag_KonstColor | J3DDiffFlag_TexGen;
 
+u32 coop_model_diff_flags() {
+    return kCoopDifferedDlistFlags;
+}
+
 static const int kMaxClaimedArcs = 64;
 static char s_claimedArcNames[kMaxClaimedArcs][64];
 static int s_claimedArcCount = 0;
@@ -94,7 +98,7 @@ int loadObjectArchive(const char* arcName) {
     if (!haveClaimedRef(cleanName)) {
 
         if (claimTableFull()) {
-            coop_log::warn("coop_mod: [models] REFUSING to mount '{}' - {} archives already claimed",
+            coop_log::warn("coop_mod: [models] mount '{}' refused, {} archives claimed",
                 cleanName, s_claimedArcCount);
             return -1;
         }
@@ -127,7 +131,7 @@ int loadObjectArchive(const char* arcName) {
         return 0;
     }
     if (sync < 0) {
-        coop_log::warn("coop_mod: [models] FAILED to mount archive '{}' (syncObjectRes={})", cleanName, sync);
+        coop_log::warn("coop_mod: [models] mount '{}' failed (syncObjectRes={})", cleanName, sync);
         return -1;
     }
 
@@ -224,7 +228,7 @@ J3DModel* loadBmdFromArc(const char* arcName, const char* bmdName, cXyz scale) {
     if (model != nullptr) {
         model->setBaseScale(scale);
     } else {
-        coop_log::warn("coop_mod: [models] '{}': mDoExt_J3DModel__create returned null", bmdName);
+        coop_log::warn("coop_mod: [models] '{}': model create returned null", bmdName);
     }
     return model;
 }
@@ -271,15 +275,22 @@ DEFINE_HOOK(&dRes_info_c::offWarpMaterial, WarpOffHook);
 
 DEFINE_HOOK_SYMBOL("dRes_info_c::setWarpSRT", void(J3DModelData*, cXyz&, f32, f32), WarpSrtHook);
 
-HookAction skip_if_ours(ModContext*, void* args, void*, void*) {
+HookAction skip_if_loose(ModContext*, void* args, void*, void*) {
     return s_looseData.count(mods::arg<J3DModelData*>(args, 0)) != 0 ? HOOK_SKIP_ORIGINAL
                                                                      : HOOK_CONTINUE;
 }
 
+std::unordered_set<J3DModelData*> s_puppetWarpData;
+
+HookAction skip_switch_if_loose(ModContext* ctx, void* args, void* a, void* b) {
+    if (s_puppetWarpData.count(mods::arg<J3DModelData*>(args, 0)) != 0) return HOOK_SKIP_ORIGINAL;
+    return skip_if_loose(ctx, args, a, b);
+}
+
 void models_warp_guard_init() {
-    const bool on = mods::hook::add_pre<WarpOnHook>(skip_if_ours) == MOD_OK;
-    const bool off = mods::hook::add_pre<WarpOffHook>(skip_if_ours) == MOD_OK;
-    const bool srt = mods::hook::add_pre<WarpSrtHook>(skip_if_ours) == MOD_OK;
+    const bool on = mods::hook::add_pre<WarpOnHook>(skip_switch_if_loose) == MOD_OK;
+    const bool off = mods::hook::add_pre<WarpOffHook>(skip_switch_if_loose) == MOD_OK;
+    const bool srt = mods::hook::add_pre<WarpSrtHook>(skip_if_loose) == MOD_OK;
     coop_log::info("coop_mod: [models] warp guard {}", on && off && srt ? "attached" : "FAILED - "
         "warping in a custom model can crash");
 }
@@ -332,7 +343,7 @@ J3DModelData* loadBmdDataFromFile(const char* path) {
     J3DModelData* data = J3DModelLoaderDataBase::load(buffer, kBmwrLoadFlags);
     if (data == nullptr || data->getMaterialNum() == 0 || data->getShapeTable() == nullptr ||
         data->getShapeTable()->getShapeNum() == 0 || data->getMaterialNodePointer(0) == nullptr) {
-        coop_log::warn("coop_mod: [models] '{}' loaded but has no usable materials or shapes", path);
+        coop_log::warn("coop_mod: [models] '{}' has no usable materials or shapes", path);
         return nullptr;
     }
 
@@ -358,7 +369,7 @@ J3DModelData* loadBmdDataFromFile(const char* path) {
     return data;
 }
 
-void models_fresh_for_game(J3DModelData* data, const char* what) {
+void models_reset_for_game(J3DModelData* data, const char* what) {
     const auto it = s_fresh.find(data);
     if (it == s_fresh.end()) return;
     const FreshState& f = it->second;
@@ -392,11 +403,9 @@ void models_fresh_for_game(J3DModelData* data, const char* what) {
         if (f.hidden[i]) shape->hide(); else shape->show();
     }
     if (patterns + foreign + joints + shapes > 0) {
-        static int s_said = 0;
-        if (s_said++ < 40) {
-            coop_log::info("coop_mod: [SKIN-ANM] '{}' handed back as loaded - it still had {} texture "
-                           "pattern(s), {} of Link's animation slots, {} joint hook(s), {} part(s) "
-                           "hidden or shown", what != nullptr ? what : "?", patterns, foreign, joints,
+        static int s_logCount = 0;
+        if (s_logCount++ < 40) {
+            coop_log::info("coop_mod: [SKIN-ANM] '{}' reset: patterns={} anmSlots={} jointHooks={} shapes={}", what != nullptr ? what : "?", patterns, foreign, joints,
                 shapes);
         }
     }
@@ -413,7 +422,7 @@ void models_link_rebuilding() {
     s_worn.clear();
 }
 
-J3DModelData* loadBmdDataForLink(const char* path) {
+J3DModelData* load_bmd_with_warp(const char* path, const char* who) {
     if (path == nullptr) return nullptr;
     std::ifstream file(path_ci(path), std::ios::binary | std::ios::ate);
     if (!file) return nullptr;
@@ -433,12 +442,24 @@ J3DModelData* loadBmdDataForLink(const char* path) {
     J3DModelData* data = dRes_info_c::loaderBasicBmd('BMWR', buffer);
     if (previous != nullptr) previous->becomeCurrentHeap();
     if (data == nullptr || data->getMaterialNum() == 0 || data->getMaterialNodePointer(0) == nullptr) {
-        coop_log::warn("coop_mod: [models] '{}' did not load as Link's own - using the plain copy",
+        coop_log::warn("coop_mod: [models] '{}' warp load failed, using plain copy",
             path);
         return nullptr;
     }
-    coop_log::info("coop_mod: [models] loaded '{}' for you, with the warp material", path);
+    coop_log::info("coop_mod: [models] loaded '{}' for {} (warp material)", path, who);
     remember_own_anms(data);
+    return data;
+}
+
+J3DModelData* loadBmdDataForLink(const char* path) {
+    return load_bmd_with_warp(path, "you");
+}
+
+J3DModelData* loadBmdDataForPuppet(const char* path) {
+    J3DModelData* data = load_bmd_with_warp(path, "other players");
+    if (data == nullptr) return nullptr;
+    dRes_info_c::offWarpMaterial(data);
+    s_puppetWarpData.insert(data);
     return data;
 }
 
@@ -508,7 +529,7 @@ void renderModelAtMtx(J3DModel* model, MtxP mtx, mDoExt_bckAnm* bck) {
     mDoExt_modelUpdateDL(model);
 }
 
-JKRHeap* private_arc_heap_if_any();
+JKRHeap* private_arc_heap_peek();
 JKRHeap* private_arc_heap();
 std::string coop_mem_status();
 
@@ -538,8 +559,7 @@ J3DModel* coop_create_model(J3DModelData* data, u32 modelFlag, u32 differedDlist
     if (parent == nullptr || slot < 0 || parent->getFreeSize() < kModelHeapSize + kReserve) {
 
         if (s_modelHeapFallbacks++ < 4) {
-            coop_log::warn("coop_mod: [models] no room for a model heap ({}) - building it the "
-                           "old way | [MEM] {}", slot < 0 ? "table full" : "heap low",
+            coop_log::warn("coop_mod: [models] no room for model heap ({}), using fallback | [MEM] {}", slot < 0 ? "table full" : "heap low",
                 coop_mem_status());
         }
         return mDoExt_J3DModel__create(data, modelFlag, differedDlistFlag);
@@ -594,7 +614,7 @@ std::string coop_mem_status() {
     kb(mDoExt_getZeldaHeap(), zel, sizeof(zel));
     kb(mDoExt_getGameHeap(), game, sizeof(game));
     kb(mDoExt_getArchiveHeap(), arc, sizeof(arc));
-    kb(private_arc_heap_if_any(), ours, sizeof(ours));
+    kb(private_arc_heap_peek(), ours, sizeof(ours));
     kb(JKRHeap::getRootHeap(), root, sizeof(root));
     char buf[320];
     std::snprintf(buf, sizeof(buf),
@@ -629,7 +649,7 @@ void ensure_system_heap_capacity() {
                 newSysHeap->setName("ExpandedSysHeap");
                 JKRHeap::setSystemHeap(newSysHeap);
                 s_done = true;
-                coop_log::info("coop_mod: [models] expanded system heap to {} MB (prev free: {} KB)",
+                coop_log::info("coop_mod: [models] system heap expanded to {} MB (was {} KB free)",
                     targetSize / (1024 * 1024), sysHeap->getFreeSize() / 1024);
             }
         }
