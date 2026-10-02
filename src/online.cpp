@@ -251,6 +251,8 @@ struct PendingPeer {
     uint64_t startedMs = 0;
     uint64_t lastProbeMs = 0;
     bool accepted = false;
+    uint32_t reopensAtStart = 0;
+    bool droppedLoopback = false;
 };
 
 struct StunAsk {
@@ -384,6 +386,9 @@ void say_hello() {
     std::string hello = "{\"op\":\"hello\",\"v\":" + std::to_string(kCoopWireVersion) +
                         ",\"ep\":\"" + json_escape(s_mapped) + "\",\"port\":" +
                         std::to_string(s_localPort);
+    const std::string lan = coop_lan_address();
+    if (!lan.empty()) hello += ",\"lan\":\"" + lan + "\"";
+    coop_log::info("coop_mod: [ONLINE] local address {}", lan.empty() ? "unknown" : "known");
     if (s_host) {
         s_sentUpnp = upnp_external_address();
         hello += ",\"upnp\":\"" + json_escape(s_sentUpnp) + "\"";
@@ -489,6 +494,18 @@ void probe(PendingPeer& peer) {
     if (peer.lastProbeMs == 0) {
         coop_log::info("coop_mod: [ONLINE] +{}ms probing {} addresses{}", now - peer.startedMs,
             peer.candidates.size(), peer.heardFrom.empty() ? "" : " + " + peer.heardFrom);
+        peer.reopensAtStart = coop_udp_reopen_count();
+    }
+
+    if (!peer.droppedLoopback && coop_udp_reopen_count() - peer.reopensAtStart > 3) {
+        peer.droppedLoopback = true;
+        const size_t before = peer.candidates.size();
+        peer.candidates.erase(std::remove_if(peer.candidates.begin(), peer.candidates.end(),
+                                  [](const std::string& c) { return c.rfind("udp://127.", 0) == 0; }),
+            peer.candidates.end());
+        if (peer.candidates.size() != before) {
+            coop_log::info("coop_mod: [ONLINE] loopback address bounced, dropped");
+        }
     }
     peer.lastProbeMs = now;
     for (const std::string& to : peer.candidates) send_punch(to, peer.token, kPunchProbe);

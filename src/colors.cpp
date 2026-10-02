@@ -683,7 +683,7 @@ struct PuppetModelColors {
     PuppetTexture tex[kMaxPuppetTextures];
 };
 
-const int kMaxPuppetModels = kCoopMaxPlayers * 4 + 4;
+const int kMaxPuppetModels = kCoopMaxPlayers * 7 + 4;
 PuppetModelColors s_models[kMaxPuppetModels];
 
 SlotColor peer_color(uint8_t owner, int slot) {
@@ -896,7 +896,10 @@ void colors_on_message(const uint8_t* payload, size_t size, uint8_t from) {
         static_cast<int>(from), count);
 }
 
-void colors_attach_model(J3DModel* model, bool mine, uint8_t owner = kCoopNoPlayer) {
+const uint8_t kSlotNone = 0xFF;
+
+void colors_attach_model(J3DModel* model, bool mine, uint8_t owner = kCoopNoPlayer,
+    bool protectAll = false) {
     if (model == nullptr || svc_texture == nullptr) return;
     for (const PuppetModelColors& m : s_models) {
         if (m.model == model) return;
@@ -924,8 +927,11 @@ void colors_attach_model(J3DModel* model, bool mine, uint8_t owner = kCoopNoPlay
     m.owner = mine ? kCoopNoPlayer : owner;
     m.texNum = original->getNum();
     for (u16 i = 0; i < m.texNum && m.count < kMaxPuppetTextures; ++i) {
-        const int slotIndex = slot_for_texture(names->getName(i));
-        if (slotIndex < 0) continue;
+        int slotIndex = slot_for_texture(names->getName(i));
+        if (slotIndex < 0) {
+            if (!protectAll) continue;
+            slotIndex = kSlotNone;
+        }
         const ResTIMG* timg = original->getResTIMG(i);
         if (timg->indexTexture || timg->width == 0 || timg->height == 0) continue;
         PuppetTexture& t = m.tex[m.count++];
@@ -981,6 +987,10 @@ void colors_attach_model(J3DModel* model, bool mine, uint8_t owner = kCoopNoPlay
 
 void colors_attach_puppet_model(J3DModel* model, uint8_t owner) {
     colors_attach_model(model, false, owner);
+}
+
+void colors_protect_puppet_model(J3DModel* model, uint8_t owner) {
+    colors_attach_model(model, false, owner, true);
 }
 
 void colors_attach_local_model(J3DModel* model) {

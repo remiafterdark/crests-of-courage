@@ -42,6 +42,9 @@ function newToken() {
 const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 const isIpv4 = (s) => typeof s === "string" && IPV4.test(s);
 
+const isPrivateIpv4 = (s) =>
+  isIpv4(s) && (/^10\./.test(s) || /^192\.168\./.test(s) || /^172\.(1[6-9]|2\d|3[01])\./.test(s));
+
 function isEndpoint(s) {
   if (typeof s !== "string") return false;
   const at = s.lastIndexOf(":");
@@ -94,14 +97,16 @@ function fail(ws, why, detail) {
   }
 }
 
-function candidates(info, sameNet = false) {
+function candidates(info, sameNet = false, otherLan = "") {
   const out = [];
   const add = (ep) => {
     if (!out.includes(ep)) out.push(ep);
   };
+  const lan = sameNet && isPrivateIpv4(info.lan) && isPort(info.port);
+  if (lan) add(`${info.lan}:${info.port}`);
   if (isEndpoint(info.ep)) add(info.ep);
   if (isIpv4(info.ip) && isPort(info.port)) add(`${info.ip}:${info.port}`);
-  if (sameNet && isPort(info.port)) add(`127.0.0.1:${info.port}`);
+  if (sameNet && isPort(info.port) && (!lan || info.lan === otherLan)) add(`127.0.0.1:${info.port}`);
   return out;
 }
 
@@ -240,6 +245,7 @@ export class Room {
           ep: isEndpoint(msg.ep) ? msg.ep : "",
           port: isPort(msg.port) ? msg.port : 0,
           upnp: isEndpoint(msg.upnp) ? msg.upnp : "",
+          lan: isPrivateIpv4(msg.lan) ? msg.lan : "",
         };
         ws.serializeAttachment(me);
 
@@ -259,6 +265,7 @@ export class Room {
       v: Number(msg.v) || 0,
       ep: isEndpoint(msg.ep) ? msg.ep : "",
       port: isPort(msg.port) ? msg.port : 0,
+      lan: isPrivateIpv4(msg.lan) ? msg.lan : "",
     };
     ws.serializeAttachment(me);
     const host = this.host();
@@ -283,13 +290,13 @@ export class Room {
     send(hostWs, {
       op: "peer",
       token,
-      eps: candidates({ ...joinInfo.hello, ip: joinInfo.ip }, sameNet),
+      eps: candidates({ ...joinInfo.hello, ip: joinInfo.ip }, sameNet, hostInfo.hello.lan),
       sameNet,
     });
     send(joinWs, {
       op: "peer",
       token,
-      eps: candidates({ ...hostInfo.hello, ip: hostInfo.ip }, sameNet),
+      eps: candidates({ ...hostInfo.hello, ip: hostInfo.ip }, sameNet, joinInfo.hello.lan),
       upnp: hostInfo.hello.upnp,
       sameNet,
     });

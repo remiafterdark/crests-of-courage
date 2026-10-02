@@ -4495,6 +4495,10 @@ void prep_equipment_model(J3DModel* model) {
 }
 
 void sync_equipment_models() {
+
+    colors_protect_puppet_model(pup().swordModel, s_pupId);
+    colors_protect_puppet_model(pup().sheathModel, s_pupId);
+    colors_protect_puppet_model(pup().shieldModel, s_pupId);
     if (pup().wantSword != pup().swordId) {
         puppet_free_later(pup().swordModel);
 
@@ -4891,7 +4895,9 @@ void render_puppet_body(J3DModel* model, const cXyz& pos, const csXyz& angle,
 
     mDoMtx_stack_c::transS(pos.x, pos.y, pos.z);
 
-    if (pup().magneRot[0] != 0 || pup().magneRot[4] != 0 || pup().magneRot[8] != 0) {
+    bool onMagnet = false;
+    for (int i = 0; i < 9; ++i) onMagnet = onMagnet || pup().magneRot[i] != 0;
+    if (onMagnet) {
         Mtx magne;
         for (int r = 0; r < 3; ++r) {
             for (int c = 0; c < 3; ++c) magne[r][c] = pup().magneRot[r * 3 + c] / kMagneRotFixed;

@@ -447,6 +447,11 @@ ConfigVarHandle notify_max_var();
 ConfigVarHandle notify_engine_var();
 
 std::string coop_mem_status();
+void world_note_item_taken();
+bool world_story_stale_here();
+bool world_story_refresh_here();
+void enemies_room_rebuilt(int room);
+std::string world_state_dump();
 void squad_hud_queue();
 ConfigVarHandle squad_hud_enabled_var();
 ConfigVarHandle squad_hud_size_var();
@@ -478,6 +483,7 @@ ConfigVarHandle colors_slot_var(int slot);
 void colors_reset_mine();
 
 void colors_attach_puppet_model(J3DModel* model, uint8_t owner);
+void colors_protect_puppet_model(J3DModel* model, uint8_t owner);
 
 void coop_crash_trail(const char* step);
 
@@ -742,6 +748,8 @@ void upnp_release();
 void upnp_update();
 bool upnp_ready();
 
+uint32_t coop_udp_reopen_count();
+std::string coop_lan_address();
 std::string upnp_external_address();
 
 std::string upnp_status();

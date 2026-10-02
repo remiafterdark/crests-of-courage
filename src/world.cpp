@@ -20,6 +20,15 @@
 #include "d/d_stage.h"
 #include "d/d_kankyo.h"
 #include "d/d_shop_system.h"
+#include "d/actor/d_a_bg_obj.h"
+#include "d/actor/d_a_grass.h"
+#include "d/actor/d_a_suspend.h"
+#include "d/d_s_room.h"
+#include "f_op/f_op_scene_mng.h"
+#include "f_pc/f_pc_create_iter.h"
+#include "f_pc/f_pc_create_req.h"
+#include "f_pc/f_pc_create_tag.h"
+#include "f_pc/f_pc_manager.h"
 #include "f_op/f_op_actor_iter.h"
 #include "mods/service.hpp"
 #include "mods/svc/hook.hpp"
@@ -30,6 +39,8 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
+#include <string>
 
 DEFINE_HOOK(&daTbox_c::actionOpenWait, TboxOpenWaitHook);
 
@@ -222,6 +233,7 @@ const int kMemSwitchFirst = 0x08;
 const int kMemSwitchEnd = 0x18;
 
 bool overworld_switch_byte(const char* stage, int byte) {
+    if (coop_session(kSessStory, cfg_bool(s_storyVar, false))) return false;
     return byte >= kMemSwitchFirst && byte < kMemSwitchEnd && !dungeon_stage(stage);
 }
 
@@ -424,6 +436,14 @@ const StoryFlagInfo* story_flag_info(uint16_t flag) {
     }
     return nullptr;
 }
+
+struct StoryCompanion {
+    uint16_t flag;
+    uint16_t with;
+};
+const StoryCompanion kStoryCompanions[] = {
+#include "story_companions.inc"
+};
 
 const char* story_flag_name(uint16_t flag) {
     const StoryFlagInfo* info = story_flag_info(flag);
@@ -1731,8 +1751,33 @@ struct BundleTrack {
     uint8_t newEv[kEventSize] = {};
     uint8_t newSw[kMemSwitchEnd - kMemSwitchFirst] = {};
     bool open = false;
+
+    uint8_t keys = 0;
+    uint32_t keySpentTick = 0;
+    const char* lockWhy = "key lock";
+    uint8_t recentSw[kMemSwitchEnd - kMemSwitchFirst] = {};
+    uint32_t recentSwTick = 0;
 };
 BundleTrack s_bundle;
+const uint32_t kKeyLockTicks = 180;
+
+void send_save_switch(const char stage[8], int saveNo, int sw, const char* why) {
+    MsgShopSoldOut msg{};
+    std::memcpy(msg.stage, stage, sizeof(msg.stage));
+    msg.saveNo = static_cast<int8_t>(saveNo);
+    msg.sw = static_cast<uint8_t>(sw);
+    coop_net_send(kMsgShopSoldOut, &msg, sizeof(msg));
+    coop_log::info("coop_mod: [SWITCH] {} sw={} on, sent", why, sw);
+}
+
+void send_switch_bits(const char stage[8], int saveNo, const uint8_t* bits, const char* why) {
+    for (int i = 0; i < kMemSwitchEnd - kMemSwitchFirst; ++i) {
+        for (int bit = 0; bit < 8; ++bit) {
+            if ((bits[i] & (1u << bit)) == 0) continue;
+            send_save_switch(stage, saveNo, (i / 4) * 32 + (3 - i % 4) * 8 + bit, why);
+        }
+    }
+}
 
 struct PendingBundle {
     bool used = false;
@@ -1798,8 +1843,27 @@ void bundle_track() {
         s_bundle.saveNo = saveNo;
         std::memcpy(s_bundle.ev, ev, kEventSize);
         std::memcpy(s_bundle.sw, sw, sizeof(s_bundle.sw));
+        s_bundle.keys = mem_bytes(info->getMemory())[kKeyOffset];
+        s_bundle.keySpentTick = 0;
+        s_bundle.recentSwTick = 0;
         return;
     }
+    const bool overworld = !dungeon_stage(stage);
+    const uint8_t keys = mem_bytes(info->getMemory())[kKeyOffset];
+
+    if (s_bundle.keySpentTick != 0 && local_mid_sequence()) s_bundle.keySpentTick = s_tick != 0 ? s_tick : 1;
+    if (overworld && keys < s_bundle.keys) {
+        s_bundle.keySpentTick = s_tick != 0 ? s_tick : 1;
+        s_bundle.lockWhy = "key lock";
+
+        if (s_bundle.recentSwTick != 0 && s_tick - s_bundle.recentSwTick < kKeyLockTicks) {
+            send_switch_bits(stage, saveNo, s_bundle.recentSw, "key lock");
+        }
+        s_bundle.recentSwTick = 0;
+    }
+    s_bundle.keys = keys;
+    const bool keyJustSpent =
+        s_bundle.keySpentTick != 0 && s_tick - s_bundle.keySpentTick < kKeyLockTicks;
     bool fresh = false;
     for (int b = 0; b < kEventSize; ++b) {
         const uint8_t on = static_cast<uint8_t>(ev[b] & ~s_bundle.ev[b] & ~story_private(b));
@@ -1814,6 +1878,17 @@ void bundle_track() {
         if (on != 0 && overworld_switch_byte(stage, kMemSwitchFirst + i)) {
             s_bundle.newSw[i] = static_cast<uint8_t>(s_bundle.newSw[i] | on);
             fresh = true;
+            if (keyJustSpent) {
+                uint8_t one[kMemSwitchEnd - kMemSwitchFirst] = {};
+                one[i] = on;
+                send_switch_bits(stage, saveNo, one, s_bundle.lockWhy);
+            } else {
+                if (s_bundle.recentSwTick == 0 || s_tick - s_bundle.recentSwTick >= kKeyLockTicks) {
+                    std::memset(s_bundle.recentSw, 0, sizeof(s_bundle.recentSw));
+                }
+                s_bundle.recentSw[i] = static_cast<uint8_t>(s_bundle.recentSw[i] | on);
+                s_bundle.recentSwTick = s_tick != 0 ? s_tick : 1;
+            }
         }
         s_bundle.sw[i] = sw[i];
     }
@@ -1874,6 +1949,23 @@ void bundle_apply_ready() {
     }
 }
 
+void story_repair_companions(uint8_t* ev) {
+    for (const StoryCompanion& c : kStoryCompanions) {
+        const int a = c.flag >> 8;
+        const int b = c.with >> 8;
+        const uint8_t abit = static_cast<uint8_t>(c.flag & 0xFF);
+        const uint8_t bbit = static_cast<uint8_t>(c.with & 0xFF);
+
+        if ((story_private(a) & abit) != 0 || (story_private(b) & bbit) != 0) continue;
+        if ((ev[b] & bbit) == 0 || (ev[a] & abit) != 0) continue;
+        ev[a] = static_cast<uint8_t>(ev[a] | abit);
+        coop_log::info("coop_mod: [STORY] repair: {:#06x} {} set, it comes with {:#06x} {}", c.flag,
+            story_flag_name(c.flag), c.with, story_flag_name(c.with));
+    }
+}
+
+void story_apply_pending(dSv_info_c* info);
+
 HookAction on_stage_load_pre(ModContext*, void*, void*, void*) {
     dSv_info_c* info = dComIfGs_getSaveInfo();
     if (info == nullptr) return HOOK_CONTINUE;
@@ -1887,8 +1979,16 @@ HookAction on_stage_load_pre(ModContext*, void*, void*, void*) {
         coop_log::info("coop_mod: [WORLD] stage load, transform/twilight flags {:#04x}/{:#04x}", cur[0], cur[1]);
         std::memset(s_statusBPending, 0, sizeof(s_statusBPending));
     }
-    if (s_storyPendingBits == 0) return HOOK_CONTINUE;
+    story_apply_pending(info);
+    return HOOK_CONTINUE;
+}
+
+void story_apply_pending(dSv_info_c* info) {
     uint8_t* ev = info->getSavedata().getEvent().mEvent;
+    if (s_storyPendingBits == 0) {
+        story_repair_companions(ev);
+        return;
+    }
 
     for (int b = 0; b < kEventSize; ++b) {
         const uint8_t fresh = static_cast<uint8_t>(s_storyPending[b] & ~ev[b]);
@@ -1909,7 +2009,54 @@ HookAction on_stage_load_pre(ModContext*, void*, void*, void*) {
     coop_log::info("coop_mod: [STORY] stage load, applying {} remote flags", s_storyPendingBits);
     std::memset(s_storyPending, 0, sizeof(s_storyPending));
     s_storyPendingBits = 0;
-    return HOOK_CONTINUE;
+    story_repair_companions(ev);
+}
+
+struct RoomRebuild {
+    bool active = false;
+    uint32_t at = 0;
+    bool rooms[kRooms] = {};
+};
+RoomRebuild s_rebuild;
+
+room_of_scene_class* loaded_room_scene(int room) {
+    if (dComIfGp_roomControl_checkStatusFlag(room, 8)) return nullptr;
+    const fpc_ProcID id = dStage_roomControl_c::getStatusProcID(room);
+    if (id == fpcM_ERROR_PROCESS_ID_e) return nullptr;
+    auto* scene = static_cast<room_of_scene_class*>(fopScnM_SearchByID(id));
+    if (scene == nullptr || static_cast<int>(fopScnM_GetParam(scene)) != room) return nullptr;
+    if (scene->roomInfo == nullptr || scene->roomDt == nullptr) return nullptr;
+    return scene;
+}
+
+void* delete_room_object(void* proc, void*) {
+    if (fpcM_GetProfName(proc) != fpcNm_BG_e) fpcM_Delete(proc);
+    return nullptr;
+}
+
+void* creating_in_layer(void* tag, void* layerId) {
+    auto* request = static_cast<create_request*>(static_cast<create_tag*>(tag)->base.mpTagData);
+    return request->layer->layer_id == *static_cast<fpc_ProcID*>(layerId) ? request : nullptr;
+}
+
+bool room_is_creating(room_of_scene_class* scene) {
+    fpc_ProcID layer = fpcM_LayerID(scene);
+    return fpcCtIt_Judge(creating_in_layer, &layer) != nullptr;
+}
+
+void room_rebuild_update() {
+    if (!s_rebuild.active || static_cast<int32_t>(s_tick - s_rebuild.at) < 0) return;
+    s_rebuild.active = false;
+    for (int r = 0; r < kRooms; ++r) {
+        if (!s_rebuild.rooms[r]) continue;
+        s_rebuild.rooms[r] = false;
+        room_of_scene_class* scene = loaded_room_scene(r);
+        if (scene == nullptr) continue;
+        dStage_dt_c_roomReLoader(scene->roomInfo, scene->roomDt, r);
+        scene->field_0x1d5 = 1;
+        enemies_room_rebuilt(r);
+        coop_log::info("coop_mod: [STORY] room {} rebuilt on layer {}", r, dComIfG_play_c::getLayerNo(0));
+    }
 }
 
 void forget_pending_story(ModContext*, uint32_t, void*) {
@@ -1928,6 +2075,64 @@ void forget_pending_story(ModContext*, uint32_t, void*) {
 namespace {
 
 uint8_t s_shopSwBefore[kMemSwitchEnd - kMemSwitchFirst];
+
+char s_jumpStage[8] = {};
+int s_jumpSaveNo = -1;
+uint8_t s_jumpSeen[kMemSwitchEnd - kMemSwitchFirst] = {};
+uint8_t s_jumpKnown[kMemSwitchEnd - kMemSwitchFirst] = {};
+
+int switch_byte(int sw) {
+    return kMemSwitchFirst + 4 * (sw >> 5) + (3 - ((sw & 31) >> 3));
+}
+
+int watched_switch(fopAc_ac_c* actor) {
+    const s16 name = fopAcM_GetName(actor);
+    if (name == fpcNm_Tag_Wljump_e) return (fopAcM_GetParam(actor) >> 8) & 0xFF;
+    if (name == fpcNm_BG_OBJ_e) {
+        auto* bg = static_cast<daBgObj_c*>(actor);
+        if (bg->mSpecData.mSpecType != 0) return bg->field_0xccc & 0xFF;
+    }
+    return 0xFF;
+}
+
+void* watch_jump_tag(void* proc, void*) {
+    auto* actor = static_cast<fopAc_ac_c*>(proc);
+    if (actor == nullptr) return nullptr;
+    const int sw = watched_switch(actor);
+    if (sw >= 0x80) return nullptr;
+    const int i = switch_byte(sw) - kMemSwitchFirst;
+    const uint8_t bit = static_cast<uint8_t>(1u << (sw & 7));
+    const uint8_t* mem = mem_bytes(dComIfGs_getSaveInfo()->getMemory());
+    const bool on = (mem[switch_byte(sw)] & bit) != 0;
+    const bool seen = (s_jumpSeen[i] & bit) != 0;
+    const bool known = (s_jumpKnown[i] & bit) != 0;
+    s_jumpSeen[i] = static_cast<uint8_t>(s_jumpSeen[i] | bit);
+    if (on) s_jumpKnown[i] = static_cast<uint8_t>(s_jumpKnown[i] | bit);
+
+    if (!seen || !on || known) return nullptr;
+    MsgShopSoldOut msg{};
+    std::memcpy(msg.stage, s_jumpStage, sizeof(msg.stage));
+    msg.saveNo = static_cast<int8_t>(s_jumpSaveNo);
+    msg.sw = static_cast<uint8_t>(sw);
+    coop_net_send(kMsgShopSoldOut, &msg, sizeof(msg));
+    coop_log::info("coop_mod: [SWITCH] {} sw={} on, sent",
+        fopAcM_GetName(actor) == fpcNm_BG_OBJ_e ? "broken rock" : "jump spot", sw);
+    return nullptr;
+}
+
+void jump_switch_update() {
+    char stage[8];
+    int saveNo = -1;
+    if (dComIfGs_getSaveInfo() == nullptr || !current_stage(stage, saveNo)) return;
+    if (dungeon_stage(stage)) return;
+    if (saveNo != s_jumpSaveNo || std::memcmp(stage, s_jumpStage, 8) != 0) {
+        std::memcpy(s_jumpStage, stage, 8);
+        s_jumpSaveNo = saveNo;
+        std::memset(s_jumpSeen, 0, sizeof(s_jumpSeen));
+        std::memset(s_jumpKnown, 0, sizeof(s_jumpKnown));
+    }
+    fopAcM_Search(watch_jump_tag, nullptr);
+}
 bool s_shopSwArmed = false;
 
 HookAction on_shop_sold_out_pre(ModContext*, void*, void*, void*) {
@@ -1977,7 +2182,16 @@ void apply_shop_sold_out(const MsgShopSoldOut& msg) {
     uint8_t* target = sameSlot ? mem_bytes(info->getMemory())
                                : mem_bytes(info->getSavedata().getSave(msg.saveNo));
     target[byte] = static_cast<uint8_t>(target[byte] | (1 << (msg.sw & 7)));
-    coop_log::info("coop_mod: [SHOP] remote sold out stage={} sw={} live={}", name, msg.sw, sameSlot);
+
+    if (sameSlot && s_bundle.have && s_bundle.saveNo == saveNo) {
+        s_bundle.sw[byte - kMemSwitchFirst] =
+            static_cast<uint8_t>(s_bundle.sw[byte - kMemSwitchFirst] | (1 << (msg.sw & 7)));
+    }
+    if (sameSlot && s_jumpSaveNo == saveNo) {
+        s_jumpKnown[byte - kMemSwitchFirst] =
+            static_cast<uint8_t>(s_jumpKnown[byte - kMemSwitchFirst] | (1 << (msg.sw & 7)));
+    }
+    coop_log::info("coop_mod: [SWITCH] remote stage={} sw={} live={}", name, msg.sw, sameSlot);
 }
 
 }
@@ -2070,9 +2284,11 @@ void world_update() {
         s_replayingWorld = false;
         s_heldWorldCount = 0;
     }
+    room_rebuild_update();
     if (coop_session(kSessDungeon, cfg_bool(s_dungeonVar, true))) {
         bundle_track();
         if (s_tick % 30 == 0) bundle_apply_ready();
+        if (s_tick % 15 == 0) jump_switch_update();
     }
     if (s_tick % 10 == 0) scan();
     if (s_tick % 30 == 0 && daAlink_getAlinkActorClass() != nullptr) retry_pending_chests();
@@ -2102,6 +2318,139 @@ bool world_hold_story_flag(uint16_t flag) {
     s_storyPending[b] = static_cast<uint8_t>(s_storyPending[b] | bit);
     s_storyPendingBits += bit_count(static_cast<uint8_t>(bit & ~have));
     return true;
+}
+
+std::string world_state_dump() {
+    dSv_info_c* info = dComIfGs_getSaveInfo();
+    if (info == nullptr) return "(no save)\n";
+    static const char kHex[] = "0123456789abcdef";
+    const auto hex = [](const uint8_t* p, int n) {
+        std::string s;
+        s.reserve(static_cast<size_t>(n) * 2);
+        for (int i = 0; i < n; ++i) {
+            s += kHex[p[i] >> 4];
+            s += kHex[p[i] & 15];
+        }
+        return s;
+    };
+    std::string out;
+    char line[256];
+    char stage[8] = {};
+    int saveNo = -1;
+    const bool here = current_stage(stage, saveNo);
+    char name[9] = {};
+    std::memcpy(name, stage, 8);
+    std::snprintf(line, sizeof(line), "stage: %s slot %d room %d layer %d\n", here ? name : "-", saveNo,
+        here ? static_cast<int>(dComIfGp_roomControl_getStayNo()) : -1,
+        here ? dComIfG_play_c::getLayerNo(0) : -1);
+    out += line;
+    std::snprintf(line, sizeof(line), "time: hour %.2f date %d passing %d dark %d\n",
+        dComIfGs_getTime() / 15.0f, static_cast<int>(dComIfGs_getDate()),
+        here && dComIfGp_roomControl_getTimePass() ? 1 : 0, here && dKy_darkworld_check() ? 1 : 0);
+    out += line;
+    const uint8_t* statusB = status_b_flags(info);
+    std::snprintf(line, sizeof(line), "statusB: transform %02x darkclear %02x\n", statusB[0], statusB[1]);
+    out += line;
+    {
+        char horse[9] = {};
+        std::memcpy(horse, dComIfGs_getHorseRestartStageName(), 8);
+        const cXyz& hp = dComIfGs_getHorseRestartPos();
+        std::snprintf(line, sizeof(line), "horse: '%s' room %d at %.0f %.0f %.0f\n", horse,
+            static_cast<int>(dComIfGs_getHorseRestartRoomNo()), hp.x, hp.y, hp.z);
+        out += line;
+    }
+    out += "flags: " + hex(info->getSavedata().getEvent().mEvent, kEventSize) + "\n";
+    out += "tmp: " + hex(info->getTmp().mEvent, kEventSize) + "\n";
+    if (here) {
+        out += "mem: " + hex(mem_bytes(info->getMemory()), kMemSize) + "\n";
+        dSv_danBit_c& dan = info->getDan();
+        std::snprintf(line, sizeof(line), "dan: stage %d ", static_cast<int>(dan.mStageNo));
+        out += line;
+        out += hex(reinterpret_cast<uint8_t*>(&dan) + kDanOffset, kDanSize) + "\n";
+    }
+    for (int i = 0; i < dSv_save_c::STAGE_MAX; ++i) {
+        std::snprintf(line, sizeof(line), "slot %02d: ", i);
+        out += line;
+        out += hex(mem_bytes(info->getSavedata().getSave(i)), kMemSize) + "\n";
+    }
+    const auto& get = info->getSavedata().getPlayer().getGetItem();
+    out += "itembits: " + hex(reinterpret_cast<const uint8_t*>(get.mItemFlags), sizeof(get.mItemFlags)) + "\n";
+    {
+        uint8_t slots[24];
+        for (int i = 0; i < 24; ++i) slots[i] = dComIfGs_getItem(i, false);
+        out += "items: " + hex(slots, 24) + "\n";
+    }
+    std::snprintf(line, sizeof(line), "life %d/%d rupees %d poes %d\n", static_cast<int>(dComIfGs_getLife()),
+        static_cast<int>(dComIfGs_getMaxLife()), static_cast<int>(dComIfGs_getRupee()),
+        static_cast<int>(dComIfGs_getPohSpiritNum()));
+    out += line;
+    std::snprintf(line, sizeof(line), "story pending %d, bundles held %d\n", s_storyPendingBits,
+        static_cast<int>(std::count_if(std::begin(s_pendingBundles), std::end(s_pendingBundles),
+            [](const PendingBundle& p) { return p.used; })));
+    out += line;
+    return out;
+}
+
+bool world_story_stale_here() {
+    if (s_storyPendingBits == 0 || daAlink_getAlinkActorClass() == nullptr) return false;
+    dSv_info_c* info = dComIfGs_getSaveInfo();
+    const char* stage = dComIfGp_getStartStageName();
+    if (info == nullptr || stage == nullptr || dungeon_stage(stage) || dKy_darkworld_check()) return false;
+    const int room = dComIfGp_roomControl_getStayNo();
+    uint8_t* ev = info->getSavedata().getEvent().mEvent;
+
+    const int fixed = dComIfGp_getStartStageLayer();
+    const int now = dComIfG_play_c::getLayerNo_common(stage, room, fixed);
+    uint8_t kept[kEventSize];
+    std::memcpy(kept, ev, kEventSize);
+    for (int b = 0; b < kEventSize; ++b) ev[b] = static_cast<uint8_t>(ev[b] | s_storyPending[b]);
+    const int then = dComIfG_play_c::getLayerNo_common(stage, room, fixed);
+    std::memcpy(ev, kept, kEventSize);
+    return now != then;
+}
+
+bool world_story_refresh_here() {
+    dSv_info_c* info = dComIfGs_getSaveInfo();
+    if (info == nullptr || s_rebuild.active) return false;
+    int found = 0;
+    for (int r = 0; r < kRooms; ++r) {
+        room_of_scene_class* scene = loaded_room_scene(r);
+
+        if (scene == nullptr || scene->field_0x1d4 >= 0) continue;
+        if (room_is_creating(scene)) {
+            std::memset(s_rebuild.rooms, 0, sizeof(s_rebuild.rooms));
+            return true;
+        }
+        s_rebuild.rooms[r] = true;
+        ++found;
+    }
+    if (found == 0) return false;
+    story_apply_pending(info);
+    for (int r = 0; r < kRooms; ++r) {
+        if (!s_rebuild.rooms[r]) continue;
+        room_of_scene_class* scene = loaded_room_scene(r);
+        if (scene == nullptr) {
+            s_rebuild.rooms[r] = false;
+            continue;
+        }
+        fpcM_LyJudge(&scene->base, delete_room_object, nullptr);
+        daGrass_c::deleteRoomGrass(r);
+        daGrass_c::deleteRoomFlower(r);
+        daSus_c::reset(r);
+
+        dComIfGs_clearRoomSwitch(dComIfGp_roomControl_getZoneNo(r));
+        dComIfGs_clearRoomItem(dComIfGp_roomControl_getZoneNo(r));
+    }
+    s_rebuild.active = true;
+    s_rebuild.at = s_tick + 3;
+    coop_log::info("coop_mod: [STORY] rebuilding {} loaded room(s) for the story", found);
+    return true;
+}
+
+void world_note_item_taken() {
+    if (!coop_net_connected()) return;
+    s_bundle.keySpentTick = s_tick != 0 ? s_tick : 1;
+    s_bundle.lockWhy = "item lock";
 }
 
 void world_on_connected() {

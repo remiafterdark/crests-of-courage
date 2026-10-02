@@ -55,7 +55,7 @@ const auto s_start = std::chrono::steady_clock::now();
 std::filesystem::path log_dir() {
     const char* dir = nullptr;
     if (svc_host == nullptr || svc_host->data_dir(mod_ctx, &dir) != MOD_OK || dir == nullptr) return {};
-    return std::filesystem::path(dir);
+    return std::filesystem::u8path(dir);
 }
 
 std::string current_log() {
@@ -93,7 +93,7 @@ std::string engine_log_before(size_t keep = 48u * 1024u) {
     const std::filesystem::path logs = data.parent_path().parent_path() / "logs";
     std::vector<std::filesystem::path> runs;
     for (const auto& e : std::filesystem::directory_iterator(logs, ec)) {
-        const std::string name = e.path().filename().string();
+        const std::string name = path_text(e.path().filename());
         if (name.rfind("dusklight-", 0) == 0 && e.path().extension() == ".log") runs.push_back(e.path());
     }
     if (runs.size() < 2) return "(no engine log from that run)\n";
@@ -287,7 +287,9 @@ std::string build_body(const char* kind, const std::string& code, const std::str
     b += ",\"when\":\"" + json_escape(when) + "\"";
     b += ",\"text\":\"" + json_escape(text) + "\"";
     b += ",\"session\":\"" + json_escape(scrub_addresses(session_summary())) + "\"";
-    b += ",\"log\":\"" + json_escape(scrub_addresses(log)) + "\"";
+
+    const std::string state = "=== save state ===\n" + world_state_dump() + "=== end save state ===\n";
+    b += ",\"log\":\"" + json_escape(state + scrub_addresses(log)) + "\"";
     b += "}";
     return b;
 }

@@ -9,6 +9,7 @@
 #include "mods/svc/save.h"
 
 #include "d/actor/d_a_alink.h"
+#include "d/actor/d_a_e_po.h"
 #include "d/actor/d_a_obj_life_container.h"
 #include "d/actor/d_a_obj_smallkey.h"
 #include "d/d_a_item_static.h"
@@ -230,6 +231,7 @@ void on_give(ModContext*, const ItemGiveInfo* info, void*) {
     if (name.rfind("freestanding:", 0) == 0) s_ownFreestanding.insert(name);
     if (!note(name)) return;
     save_ledger();
+    world_note_item_taken();
     if (coop_net_connected()) send_one(name, info->item);
     coop_log::info("coop_mod: [CHECKS] collected '{}'", name);
 }
@@ -292,6 +294,42 @@ void* find_taken(void* proc, void* data) {
     return nullptr;
 }
 
+int poe_switch(fopAc_ac_c* actor) {
+    const s16 name = fopAcM_GetName(actor);
+    if (name == fpcNm_E_HP_e) return static_cast<int>((fopAcM_GetParam(actor) & 0xFF00) >> 8);
+    if (name == fpcNm_E_PO_e) return reinterpret_cast<e_po_class*>(actor)->BitSW;
+    return 0xFF;
+}
+
+void* find_taken_poe(void* proc, void* data) {
+    auto* actor = static_cast<fopAc_ac_c*>(proc);
+    if (actor == nullptr) return nullptr;
+    const int sw = poe_switch(actor);
+    const char* stage = dComIfGp_getStartStageName();
+    if (sw == 0xFF || stage == nullptr) return nullptr;
+    const std::string name = "poe:" + std::string(stage) + ":" + std::to_string(sw);
+    if (s_fromPeers.count(name) == 0) return nullptr;
+    auto* sweep = static_cast<Sweep*>(data);
+    if (sweep->count < static_cast<int>(sizeof(sweep->found) / sizeof(sweep->found[0]))) {
+        sweep->found[sweep->count++] = actor;
+    }
+    return nullptr;
+}
+
+void sweep_taken_poes() {
+    if (daAlink_getAlinkActorClass() == nullptr || dComIfGp_event_runCheck()) return;
+    Sweep sweep{};
+    fopAcM_Search(find_taken_poe, &sweep);
+    for (int i = 0; i < sweep.count; ++i) {
+        fopAc_ac_c* a = sweep.found[i];
+        const int sw = poe_switch(a);
+        fopAcM_onSwitch(a, sw);
+        fopAcM_createDisappear(a, &a->current.pos, 8, 3, 0xFF);
+        fopAcM_delete(a);
+        coop_log::info("coop_mod: [CHECKS] poe sw={} soul taken by peer, removed", sw);
+    }
+}
+
 void sweep_taken_pickups() {
     daAlink_c* alink = daAlink_getAlinkActorClass();
     if (alink == nullptr) return;
@@ -341,6 +379,7 @@ void checks_update() {
         if (coop_net_is_host()) send_all();
     }
     if (inGame && s_tick % 15 == 0) sweep_taken_pickups();
+    if (inGame && s_tick % 15 == 7) sweep_taken_poes();
     if (s_tick % 300 == 0) save_ledger();
 }
 

@@ -127,7 +127,7 @@ bool models_dir(std::filesystem::path& out) {
     if (svc_host == nullptr || !SERVICE_HAS(svc_host, HostService, data_dir)) return false;
     const char* dir = nullptr;
     if (svc_host->data_dir(mod_ctx, &dir) != MOD_OK || dir == nullptr) return false;
-    out = std::filesystem::path(dir) / "models";
+    out = std::filesystem::u8path(dir) / "models";
     std::error_code ec;
     std::filesystem::create_directories(out, ec);
     return !ec;
@@ -157,8 +157,8 @@ void read_about(const std::filesystem::path& dir, Skin& skin) {
 }
 
 bool scan_one(const std::filesystem::path& path, Skin& skin) {
-    skin.name = path.filename().string();
-    skin.path = path.string();
+    skin.name = path_text(path.filename());
+    skin.path = path_text(path);
     read_about(path, skin);
     if (skin.name.size() >= kSkinNameMax) skin.name.resize(kSkinNameMax - 1);
     bool any = false;
@@ -233,7 +233,7 @@ void rescan() {
     if (models_dir(dir)) scan_dir(dir, found);
     std::sort(s_skins.begin(), s_skins.end(),
         [](const Skin& a, const Skin& b) { return a.name < b.name; });
-    coop_log::info("coop_mod: [SKIN] {} model(s) in {}", s_skins.size(), dir.string());
+    coop_log::info("coop_mod: [SKIN] {} model(s) in {}", s_skins.size(), path_text(dir));
 }
 
 const Skin* find(const char* name) {
@@ -411,7 +411,7 @@ int clean_shipped_leftovers(const std::filesystem::path& dir,
     for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
         std::error_code tec;
         if (!entry.is_directory(tec)) continue;
-        const std::string folder = shipped_key(entry.path().filename().string());
+        const std::string folder = shipped_key(path_text(entry.path().filename()));
         if (std::find(folders.begin(), folders.end(), folder) == folders.end()) continue;
 
         std::vector<std::filesystem::path> stale;
@@ -423,7 +423,7 @@ int clean_shipped_leftovers(const std::filesystem::path& dir,
                 subdirs.push_back(it->path());
                 continue;
             }
-            const std::string name = it->path().filename().string();
+            const std::string name = path_text(it->path().filename());
 
             if (name.empty() || name[0] == '.') continue;
             std::error_code rec;
@@ -438,7 +438,7 @@ int clean_shipped_leftovers(const std::filesystem::path& dir,
             std::error_code rec;
             if (std::filesystem::remove(path, rec)) {
                 ++removed;
-                coop_log::info("coop_mod: [SKIN] removed leftover '{}'", path.string());
+                coop_log::info("coop_mod: [SKIN] removed leftover '{}'", path_text(path));
             }
         }
 
@@ -531,7 +531,7 @@ void unpack_shipped_models() {
     std::ofstream(marker, std::ios::trunc) << stamp << "\n";
     coop_log::info(
         "coop_mod: [SKIN] unpacked {} shipped files into {} (failed={} removed={})",
-        written, dir.string(), failed, removed);
+        written, path_text(dir), failed, removed);
 }
 
 void skins_refresh() {
@@ -595,7 +595,7 @@ void skins_equipment_list(int index, std::vector<std::string>& has,
     missing.clear();
     if (!s_scanned) rescan();
     if (index < 0 || index >= static_cast<int>(s_skins.size())) return;
-    const std::filesystem::path dir = std::filesystem::path(s_skins[index].path) / "equipment";
+    const std::filesystem::path dir = std::filesystem::u8path(s_skins[index].path) / "equipment";
     std::error_code ec;
     const bool haveDir = is_directory_ci(dir, ec) && !ec;
 
@@ -621,7 +621,7 @@ void skins_equipment_list(int index, std::vector<std::string>& has,
         for (const auto& entry : std::filesystem::directory_iterator(path_ci(dir), ec)) {
             if (ec) break;
             if (!entry.is_regular_file()) continue;
-            const std::string name = entry.path().filename().string();
+            const std::string name = path_text(entry.path().filename());
             bool named = false;
             for (const EquipName& known : kEquipNames) {
                 if (name == known.file) named = true;
@@ -651,7 +651,7 @@ void skins_outfit_list(int index, std::vector<std::string>& out) {
 std::string skins_equipment_text(int index) {
     if (!s_scanned) rescan();
     if (index < 0 || index >= static_cast<int>(s_skins.size())) return "";
-    const std::filesystem::path dir = std::filesystem::path(s_skins[index].path) / "equipment";
+    const std::filesystem::path dir = std::filesystem::u8path(s_skins[index].path) / "equipment";
     std::error_code ec;
     if (!is_directory_ci(dir, ec) || ec) return "";
     std::string out;
@@ -659,7 +659,7 @@ std::string skins_equipment_text(int index) {
     for (const auto& entry : std::filesystem::directory_iterator(path_ci(dir), ec)) {
         if (ec) break;
         if (!entry.is_regular_file()) continue;
-        const std::string name = entry.path().filename().string();
+        const std::string name = path_text(entry.path().filename());
         const char* label = nullptr;
         for (const EquipName& known : kEquipNames) {
             if (name == known.file) label = known.label;
@@ -718,20 +718,23 @@ void skins_open_folder() {
     const std::string dir = skins_folder_path();
     if (dir.empty()) return;
 #if defined(_WIN32)
-    const std::string command = "explorer \"" + dir + "\"";
+
+    const std::wstring wide = L"explorer \"" + std::filesystem::u8path(dir).wstring() + L"\"";
+    _wsystem(wide.c_str());
 #elif defined(__APPLE__)
     const std::string command = "open \"" + dir + "\"";
+    std::system(command.c_str());
 #else
     const std::string command = "xdg-open \"" + dir + "\" &";
-#endif
     std::system(command.c_str());
+#endif
 #endif
 }
 
 std::string skins_folder_path() {
     std::filesystem::path dir;
     if (!models_dir(dir)) return "";
-    return dir.string();
+    return path_text(dir);
 }
 
 ConfigVarHandle skins_files_var() {
@@ -854,9 +857,9 @@ J3DModelData* part_data(const char* name, int outfit, int part, bool forLink) {
     }
 
     const std::filesystem::path dir = kOutfitDir[outfit][0] == '\0'
-                                          ? std::filesystem::path(skin->path)
-                                          : std::filesystem::path(skin->path) / kOutfitDir[outfit];
-    const std::string file = (dir / kPartFile[part]).string();
+                                          ? std::filesystem::u8path(skin->path)
+                                          : std::filesystem::u8path(skin->path) / kOutfitDir[outfit];
+    const std::string file = path_text((dir / kPartFile[part]));
     LoadedPart loaded;
     loaded.skin = skin->name;
     loaded.outfit = outfit;
@@ -891,13 +894,13 @@ J3DModelData* skins_local_cutscene_data(const char* file) {
         return loaded.failed ? nullptr : loaded.data;
     }
     const std::filesystem::path path =
-        std::filesystem::path(skin->path) / "cutscene" / file;
+        std::filesystem::u8path(skin->path) / "cutscene" / file;
     std::error_code ec;
     LoadedCutscene loaded;
     loaded.skin = skin->name;
     loaded.file = file;
     if (exists_ci(path, ec) && !ec) {
-        loaded.data = loadBmdDataFromFile(path.string().c_str());
+        loaded.data = loadBmdDataFromFile(path_text(path).c_str());
     }
     loaded.failed = loaded.data == nullptr;
     s_loadedCutscenes.push_back(loaded);
@@ -932,14 +935,14 @@ J3DModelData* equipment_data(const char* name, const char* file, bool forLink) {
         if (loaded.skin != key) continue;
         return loaded.failed ? nullptr : loaded.data;
     }
-    std::filesystem::path path = std::filesystem::path(skin->path) / "equipment" / file;
+    std::filesystem::path path = std::filesystem::u8path(skin->path) / "equipment" / file;
     std::error_code ec;
     LoadedCutscene loaded;
     loaded.skin = key;
     if (exists_ci(path, ec) && !ec) {
-        loaded.data = forLink ? loadBmdDataForLink(path.string().c_str())
-                              : loadBmdDataForPuppet(path.string().c_str());
-        if (loaded.data == nullptr) loaded.data = loadBmdDataFromFile(path.string().c_str());
+        loaded.data = forLink ? loadBmdDataForLink(path_text(path).c_str())
+                              : loadBmdDataForPuppet(path_text(path).c_str());
+        if (loaded.data == nullptr) loaded.data = loadBmdDataFromFile(path_text(path).c_str());
     }
     loaded.failed = loaded.data == nullptr;
     s_loadedCutscenes.push_back(loaded);

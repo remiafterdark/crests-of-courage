@@ -155,7 +155,7 @@ cPhs_Step daCoopRival_c::create() {
 }
 
 int daCoopRival_c::Delete() {
-    this->~daCoopRival_c();
+    if (fopAcM_CheckCondition(this, fopAcCnd_INIT_e)) this->~daCoopRival_c();
     return 1;
 }
 

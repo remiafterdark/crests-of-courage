@@ -99,7 +99,7 @@ std::filesystem::path seeds_dir() {
     if (svc_host == nullptr || svc_host->data_dir(mod_ctx, &dir) != MOD_OK || dir == nullptr) {
         return {};
     }
-    return std::filesystem::path(dir).parent_path() / kRandoModId / "seeds";
+    return std::filesystem::u8path(dir).parent_path() / kRandoModId / "seeds";
 }
 
 bool safe_hash(const std::string& hash) {
@@ -136,7 +136,7 @@ void write_seed(const std::string& hash, const std::vector<uint8_t>& data) {
         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
         out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
         if (!out) {
-            coop_log::warn("coop_mod: [RANDO] could not write the host's seed to {}", dir.string());
+            coop_log::warn("coop_mod: [RANDO] could not write the host's seed to {}", path_text(dir));
             return;
         }
     }
@@ -182,7 +182,7 @@ std::filesystem::path user_dir() {
     if (svc_host == nullptr || svc_host->data_dir(mod_ctx, &dir) != MOD_OK || dir == nullptr) {
         return {};
     }
-    return std::filesystem::path(dir).parent_path().parent_path();
+    return std::filesystem::u8path(dir).parent_path().parent_path();
 }
 
 std::filesystem::path find_sidecar() {
@@ -201,7 +201,7 @@ std::filesystem::path find_sidecar() {
         }
         const std::filesystem::path& p = it->path();
         if (it->is_directory(ec)) {
-            const std::string name = p.filename().string();
+            const std::string name = path_text(p.filename());
 
             if (name == "mods" || name == "mod_data" || name == "logs" || name == "texture_dumps" ||
                 name == "texture_replacements") {
@@ -209,8 +209,8 @@ std::filesystem::path find_sidecar() {
             }
             continue;
         }
-        if (p.filename().string() != want) continue;
-        if (p.parent_path().string().find(".mods") == std::string::npos) continue;
+        if (path_text(p.filename()) != want) continue;
+        if (path_text(p.parent_path()).find(".mods") == std::string::npos) continue;
         const auto when = std::filesystem::last_write_time(p, ec);
         if (ec) continue;
         if (best.empty() || when > bestTime) {
@@ -276,7 +276,7 @@ void read_local_seed() {
         s_sidecarSearchTick = s_tick == 0 ? 1 : s_tick;
         s_sidecar = find_sidecar();
         if (s_sidecar.empty()) return;
-        coop_log::info("coop_mod: [RANDO] the randomizer's save data is {}", s_sidecar.string());
+        coop_log::info("coop_mod: [RANDO] the randomizer's save data is {}", path_text(s_sidecar));
     }
     const std::string hash = seed_from_sidecar(s_sidecar, s_slot);
     if (hash.empty() || !safe_hash(hash) || hash == s_localSeed) return;
@@ -345,7 +345,7 @@ void match_local_seed() {
         if (score > bestScore) {
             second = bestScore;
             bestScore = score;
-            best = entry.path().filename().string();
+            best = path_text(entry.path().filename());
         } else if (score > second) {
             second = score;
         }
@@ -365,7 +365,14 @@ void on_save_event(ModContext*, uint32_t slot, void*) {
     s_slot = static_cast<int>(slot);
     s_localSeed.clear();
     s_matchTried = false;
-    read_local_seed();
+
+    try {
+        read_local_seed();
+    } catch (const std::exception& e) {
+        coop_log::warn("coop_mod: [RANDO] seed read failed: {}", e.what());
+    } catch (...) {
+        coop_log::warn("coop_mod: [RANDO] seed read failed");
+    }
 }
 
 void on_new_save(ModContext*, uint32_t slot, void*) {
@@ -837,7 +844,7 @@ std::string rando_debug_any_seed() {
     for (const auto& entry : std::filesystem::directory_iterator(seeds_dir(), ec)) {
         if (!entry.is_directory()) continue;
         std::error_code fec;
-        if (std::filesystem::exists(entry.path() / "seed.dat", fec)) return entry.path().filename().string();
+        if (std::filesystem::exists(entry.path() / "seed.dat", fec)) return path_text(entry.path().filename());
     }
     return "";
 }

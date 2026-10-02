@@ -11,6 +11,15 @@ bool cfg_bool(ConfigVarHandle var, bool fallback);
 int64_t cfg_int(ConfigVarHandle var, int64_t fallback);
 std::string cfg_string(ConfigVarHandle var, const char* fallback);
 
+inline std::string path_text(const std::filesystem::path& p) {
+    try {
+        const auto u = p.u8string();
+        return std::string(u.begin(), u.end());
+    } catch (...) {
+        return "?";
+    }
+}
+
 bool peer_shares_stage();
 
 int8_t safe_reverb(int room);

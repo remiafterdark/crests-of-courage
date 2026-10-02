@@ -59,8 +59,13 @@ add_mod(coop_mod
              src/game_mode.cpp
              src/horses.cpp
              src/report.cpp
+             src/lan.cpp
     MOD_JSON mod.json
 )
+
+if (WIN32)
+    target_link_libraries(coop_mod PRIVATE ws2_32)
+endif ()
 
 if (APPLE)
     add_custom_command(TARGET coop_mod POST_BUILD

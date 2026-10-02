@@ -298,7 +298,7 @@ void models_warp_guard_init() {
 J3DModelData* loadBmdDataFromFile(const char* path) {
     if (path == nullptr) return nullptr;
 
-    std::ifstream file(path_ci(path), std::ios::binary | std::ios::ate);
+    std::ifstream file(path_ci(std::filesystem::u8path(path)), std::ios::binary | std::ios::ate);
     if (!file) {
         coop_log::warn("coop_mod: [models] cannot open '{}'", path);
         return nullptr;
@@ -424,7 +424,7 @@ void models_link_rebuilding() {
 
 J3DModelData* load_bmd_with_warp(const char* path, const char* who) {
     if (path == nullptr) return nullptr;
-    std::ifstream file(path_ci(path), std::ios::binary | std::ios::ate);
+    std::ifstream file(path_ci(std::filesystem::u8path(path)), std::ios::binary | std::ios::ate);
     if (!file) return nullptr;
     const std::streamoff size = file.tellg();
     if (size <= 64 || size > 64 * 1024 * 1024) return nullptr;

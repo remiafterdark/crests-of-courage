@@ -475,6 +475,11 @@ struct MsgBottle {
 
 struct MsgTime {
     float time;
+    uint16_t date;
+    int8_t room;
+    int8_t layer;
+    char stage[8];
+    uint32_t age;
 };
 
 struct MsgSoundEntry {
@@ -597,7 +602,7 @@ struct MsgWorldDigest {
 
     uint8_t storyRules;
 };
-const uint8_t kStoryRules = 3;
+const uint8_t kStoryRules = 5;
 
 struct MsgDeathLink {
     char name[kCoopNameMax];
@@ -662,6 +667,9 @@ struct MsgObjectPush {
     uint32_t key;
     int8_t room;
     uint8_t dir;
+
+    int8_t gridX;
+    int8_t gridZ;
 };
 
 struct MsgObjectMove {

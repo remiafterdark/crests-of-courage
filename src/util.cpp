@@ -58,12 +58,12 @@ std::filesystem::path path_ci(const std::filesystem::path& p) {
             cur = next;
             continue;
         }
-        std::string want = part.string();
+        std::string want = path_text(part);
         for (char& c : want) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         bool found = false;
         const std::filesystem::path dir = cur.empty() ? std::filesystem::path(".") : cur;
         for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-            std::string have = entry.path().filename().string();
+            std::string have = path_text(entry.path().filename());
             for (char& c : have) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             if (have == want) {
                 cur = entry.path();

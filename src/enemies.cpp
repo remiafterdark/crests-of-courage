@@ -78,6 +78,8 @@
 #include "d/actor/d_a_e_gs.h"
 #include "d/actor/d_a_e_hb.h"
 #include "d/actor/d_a_e_hp.h"
+#include "d/actor/d_a_npc_ks.h"
+#include "d/actor/d_a_obj_bemos.h"
 #include "d/actor/d_a_e_hz.h"
 #include "d/actor/d_a_e_hzelda.h"
 #include "d/actor/d_a_e_is.h"
@@ -307,8 +309,12 @@ bool is_ice_block(fopAc_ac_c* actor) {
     return actor != nullptr && fopAcM_GetName(actor) == fpcNm_Obj_IceBlock_e;
 }
 
+bool is_beamos(fopAc_ac_c* actor) {
+    return actor != nullptr && fopAcM_GetName(actor) == fpcNm_Obj_Bemos_e;
+}
+
 bool keyed_by_param(fopAc_ac_c* actor) {
-    return is_ice_block(actor);
+    return is_ice_block(actor) || is_beamos(actor);
 }
 
 struct BirthRecord {
@@ -1850,7 +1856,7 @@ void send_state(EnemyList& list) {
 bool is_downed_alive(fopAc_ac_c* actor) {
     if (actor == nullptr) return false;
     const s16 name = fopAcM_GetName(actor);
-    return name == fpcNm_E_S1_e || name == fpcNm_E_HP_e;
+    return name == fpcNm_E_S1_e || name == fpcNm_E_HP_e || name == fpcNm_E_PO_e;
 }
 
 void send_gone(int8_t room, uint32_t key) {
@@ -3415,7 +3421,44 @@ void push_go_quiet(int8_t room, uint32_t key) {
 }
 
 bool is_pushable_block(fopAc_ac_c* actor) {
-    return is_ice_block(actor);
+    return is_ice_block(actor) || is_beamos(actor);
+}
+
+const int kBeamosWait = 0;
+const int kBeamosWalk = 1;
+const int kBeamosDead = 3;
+
+struct BeamosStep {
+    uint32_t key = 0;
+    int8_t room = 0;
+    int8_t x = 0;
+    int8_t z = 0;
+    uint8_t dir = 0;
+};
+BeamosStep s_beamosSteps[8];
+int s_beamosStepNext = 0;
+
+bool beamos_step_known(int8_t room, uint32_t key, int x, int z, int dir) {
+    for (const BeamosStep& s : s_beamosSteps) {
+        if (s.key == key && s.room == room) return s.x == x && s.z == z && s.dir == dir;
+    }
+    return false;
+}
+
+void beamos_step_note(int8_t room, uint32_t key, int x, int z, int dir) {
+    BeamosStep* slot = nullptr;
+    for (BeamosStep& s : s_beamosSteps) {
+        if (s.key == key && s.room == room) slot = &s;
+    }
+    if (slot == nullptr) {
+        slot = &s_beamosSteps[s_beamosStepNext];
+        s_beamosStepNext = (s_beamosStepNext + 1) % 8;
+    }
+    slot->key = key;
+    slot->room = room;
+    slot->x = static_cast<int8_t>(x);
+    slot->z = static_cast<int8_t>(z);
+    slot->dir = static_cast<uint8_t>(dir);
 }
 
 struct PendingPush {
@@ -3441,6 +3484,21 @@ void apply_pending_pushes() {
 
         fopAc_ac_c* actor = find_local_breakable(list, msg.room, msg.key);
         if (!is_pushable_block(actor)) continue;
+        if (is_beamos(actor)) {
+
+            auto* bm = static_cast<daObjBm_c*>(actor);
+            if (bm->mActionTypeIdx != 1 || bm->mModeProcIdx == kBeamosDead) continue;
+            bm->field_0x10b0 = msg.gridX;
+            bm->field_0x10b4 = msg.gridZ;
+            bm->field_0x10bc = msg.dir;
+            bm->field_0x10cc = 13;
+            bm->field_0x10b8 = 2520.6155f;
+            fopAcM_SetSpeedF(actor, 0.0f);
+            bm->mModeProcIdx = kBeamosWalk;
+            beamos_step_note(msg.room, msg.key, msg.gridX, msg.gridZ, msg.dir);
+            ++s_pushesApplied;
+            continue;
+        }
         auto* block = static_cast<daObjIceBlk_c*>(actor);
         for (int d = 0; d < 4; ++d) {
             block->mCounter[d] = (d == msg.dir) ? 1 : 0;
@@ -3458,6 +3516,24 @@ void capture_block_pushes(BreakableList& list) {
         if (!is_pushable_block(actor)) continue;
         const int8_t room = list.rooms[i];
         const uint32_t key = list.keys[i];
+        if (is_beamos(actor)) {
+
+            auto* bm = static_cast<daObjBm_c*>(actor);
+            if (bm->mActionTypeIdx != 1 || bm->mModeProcIdx != kBeamosWalk) continue;
+            const int dir = bm->field_0x10bc;
+            if (dir < 0 || dir > 3) continue;
+            if (beamos_step_known(room, key, bm->field_0x10b0, bm->field_0x10b4, dir)) continue;
+            beamos_step_note(room, key, bm->field_0x10b0, bm->field_0x10b4, dir);
+            MsgObjectPush step{};
+            step.key = key;
+            step.room = room;
+            step.dir = static_cast<uint8_t>(dir);
+            step.gridX = static_cast<int8_t>(bm->field_0x10b0);
+            step.gridZ = static_cast<int8_t>(bm->field_0x10b4);
+            coop_net_send(kMsgObjectPush, &step, sizeof(step));
+            ++s_pushesSent;
+            continue;
+        }
         if (push_is_quiet(room, key)) continue;
 
         auto* block = static_cast<daObjIceBlk_c*>(actor);
@@ -5622,6 +5698,58 @@ void apply_pending_cages() {
     }
 }
 
+void* settle_beamos(void* proc, void*) {
+    auto* actor = static_cast<fopAc_ac_c*>(proc);
+    if (actor == nullptr || fopAcM_GetName(actor) != fpcNm_Obj_Bemos_e) return nullptr;
+    auto* bm = static_cast<daObjBm_c*>(actor);
+    if (bm->mpBgW == nullptr) return nullptr;
+    const u8 dead = bm->getSwNo2();
+    const u8 moved = bm->getSwNo3();
+    const bool isDead = dead != 0xFF && fopAcM_isSwitch(actor, dead);
+    if (!isDead) return nullptr;
+    const bool wasEnemy = bm->mActionTypeIdx == 0;
+    const bool needsMove = bm->getMoveType() == 0 && moved != 0xFF && fopAcM_isSwitch(actor, moved) &&
+                           bm->field_0x10b4 != 4;
+    if (!wasEnemy && !needsMove) return nullptr;
+    if (wasEnemy) {
+        bm->mShowFlag = 0;
+        if (bm->getMoveType() != 1 && bm->mBmfOffBck != nullptr) {
+            bm->mBmfOffBck->setFrame(bm->mBmfOffBck->getEndFrame());
+        }
+    }
+    bm->initActionObjBemos();
+    coop_log::info("coop_mod: [OBJ] beamos room={} settled dead={} moved={}",
+        static_cast<int>(fopAcM_GetRoomNo(actor)), wasEnemy ? 1 : 0, needsMove ? 1 : 0);
+    return nullptr;
+}
+
+void settle_beamoses() {
+    if (s_tick % 15 != 0 || !coop_net_connected() || daAlink_getAlinkActorClass() == nullptr) return;
+    if (dComIfGp_event_runCheck()) return;
+    fpcM_Search(settle_beamos, nullptr);
+}
+
+void* log_monkey(void* proc, void*) {
+    auto* actor = static_cast<fopAc_ac_c*>(proc);
+    if (actor == nullptr || fopAcM_GetName(actor) != fpcNm_NPC_KS_e) return nullptr;
+    auto* ks = reinterpret_cast<npc_ks_class*>(actor);
+    const int sw = static_cast<int>((fopAcM_GetParam(actor) & 0xFF000000) >> 24);
+    coop_log::info("coop_mod: [MONKEY] room={} set={} sw={}({}) trb={}({}) action={} mode={} pos=({:.0f},{:.0f},{:.0f})",
+        static_cast<int>(fopAcM_GetRoomNo(actor)), static_cast<int>(ks->set_id), sw,
+        sw != 0xFF && dComIfGs_isSwitch(sw, fopAcM_GetRoomNo(actor)) ? 1 : 0, ks->bitTRB,
+        ks->bitTRB >= 0 && ks->bitTRB < 64 && dComIfGs_isTbox(ks->bitTRB) ? 1 : 0,
+        static_cast<int>(ks->action), static_cast<int>(ks->mode), actor->current.pos.x,
+        actor->current.pos.y, actor->current.pos.z);
+    return nullptr;
+}
+
+void log_monkeys() {
+    const char* stage = dComIfGp_getStartStageName();
+    if (stage == nullptr || std::strcmp(stage, "D_MN05") != 0) return;
+    if (daAlink_getAlinkActorClass() == nullptr || s_tick % 1200 != 0) return;
+    fpcM_Search(log_monkey, nullptr);
+}
+
 void reset_cages() {
     for (CageSeen& c : s_cageSeen) c = CageSeen{};
     for (PendingCage& p : s_pendingCage) p = PendingCage{};
@@ -5721,6 +5849,8 @@ void enemies_note_boomerang_bomb() {
 }
 
 void enemies_update() {
+    log_monkeys();
+    settle_beamoses();
     process_pending_catches();
     ++s_tick;
     watch_arrivals();
@@ -6094,4 +6224,10 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
     default:
         break;
     }
+}
+
+void enemies_room_rebuilt(int room) {
+    if (room < 0 || room >= kRooms) return;
+    s_settledRoom[room] = false;
+    forget_placed_enemies_in(room);
 }

@@ -15,7 +15,9 @@
 #include "Z2AudioLib/Z2AudioMgr.h"
 #include "Z2AudioLib/Z2LinkMgr.h"
 #include "Z2AudioLib/Z2SeMgr.h"
+#include "m_Do/m_Do_controller_pad.h"
 #include "d/actor/d_a_alink.h"
+#include "d/actor/d_a_horse.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_kankyo.h"
 #include "d/d_meter2_info.h"
@@ -386,6 +388,7 @@ bool on_title_screen() {
 }
 
 void relay_item(uint8_t item) {
+    world_note_item_taken();
     MsgItem msg{item};
     coop_net_send(kMsgItem, &msg, sizeof(msg));
     coop_log::info("coop_mod: [INV] relayed item {:#x}", item);
@@ -1055,6 +1058,8 @@ const u16 kSharedStoryFlags[] = {
     dSv_event_flag_c::F_0361,
     dSv_event_flag_c::F_0354,
 
+    dSv_event_flag_c::M_071,
+    dSv_event_flag_c::F_0250,
 };
 static_assert(sizeof(kSharedStoryFlags) / sizeof(kSharedStoryFlags[0]) <= 32, "MsgSharedStory is 32 bits");
 
@@ -1069,6 +1074,11 @@ uint32_t shared_story_bits() {
 
 bool story_flag_applies_now(u16 flag) {
     if (flag == dSv_event_flag_c::M_023 && !dComIfGs_isDarkClearLV(0)) return false;
+
+    if ((flag == dSv_event_flag_c::M_071 || flag == dSv_event_flag_c::F_0250) &&
+        !dComIfGs_isTransformLV(3)) {
+        return false;
+    }
     return true;
 }
 
@@ -1114,6 +1124,68 @@ bool in_ordon(const char* stage) {
            std::strcmp(stage, "F_SP00") == 0 || std::strcmp(stage, "R_SP01") == 0;
 }
 
+bool teleport_in_progress();
+
+void catch_up_story() {
+    static uint32_t s_calm = 0;
+    static uint32_t s_lastAt = 0;
+    daAlink_c* alink = daAlink_getAlinkActorClass();
+    bool forced = false;
+    if (alink == nullptr || !coop_net_connected() || coop_on_title_screen() ||
+        dComIfGp_event_runCheck() || dComIfGp_isEnableNextStage() || teleport_in_progress() ||
+        alink->mClothesChangeWaitTimer != 0 || (!forced && !world_story_stale_here())) {
+        s_calm = 0;
+        return;
+    }
+    if (!forced) {
+        if (++s_calm < 3 || (s_lastAt != 0 && s_invTick - s_lastAt < 600)) return;
+    }
+    s_calm = 0;
+    s_lastAt = s_invTick != 0 ? s_invTick : 1;
+
+    if (alink->checkRideOn() || alink->getGrabActorID() != fpcM_ERROR_PROCESS_ID_e ||
+        dComIfG_Bgsp().ChkMoveBG(alink->mLinkAcch.m_gnd)) {
+        s_lastAt = 0;
+        return;
+    }
+
+    if (!world_story_refresh_here() || world_story_stale_here()) s_lastAt = 0;
+}
+
+void place_epona_after_rescue() {
+    static bool s_known = false;
+    static bool s_had = false;
+    static bool s_owed = false;
+    daAlink_c* alink = daAlink_getAlinkActorClass();
+    if (alink == nullptr || !coop_net_connected() || coop_on_title_screen()) {
+        s_known = false;
+        s_owed = false;
+        return;
+    }
+    const bool has = dComIfGs_isEventBit(dSv_event_flag_c::M_023) != 0;
+    if (!s_known) {
+        s_known = true;
+        s_had = has;
+        return;
+    }
+    if (has && !s_had) s_owed = true;
+    s_had = has;
+    if (!s_owed || dComIfGp_event_runCheck()) return;
+    if (alink->checkHorseRide()) {
+        s_owed = false;
+        return;
+    }
+    auto* horse = static_cast<daHorse_c*>(dComIfGp_getHorseActor());
+    if (horse == nullptr) return;
+    s_owed = false;
+    cXyz pos = alink->current.pos;
+    pos.x += 150.0f;
+    dComIfGs_setHorseRestart(dComIfGp_getStartStageName(), pos, alink->shape_angle.y,
+        fopAcM_GetRoomNo(alink));
+    horse->setHorsePosAndAngle(&pos, alink->shape_angle.y);
+    coop_log::info("coop_mod: [HORSE] M_023 from a peer, horse placed at ({:.0f},{:.0f},{:.0f})", pos.x, pos.y, pos.z);
+}
+
 void repair_midna_shadows() {
     if (daAlink_getAlinkActorClass() == nullptr || dComIfGp_event_runCheck()) return;
     const char* stage = dComIfGp_getStartStageName();
@@ -1138,10 +1210,12 @@ void log_state() {
     std::strncpy(s_lastStage, stage, 8);
     s_lastRoom = room;
     const int layer = dComIfG_play_c::getLayerNo_common(stage, room, dComIfGp_getStartStageLayer());
-    coop_log::info("coop_mod: [STATE] {:.8} room {} layer {} | {} twilight={} | sword {:#04x} shield "
+
+    coop_log::info("coop_mod: [STATE] {:.8} room {} layer {} hour {:.1f} | {} twilight={} | sword {:#04x} shield "
                    "{:#04x} ({}) clothes {:#04x} | hearts {}/{} | {} | midna M_009={} M_067={} "
                    "F_0800={} M_017={}",
-        stage, room, layer, alink->checkWolf() ? "wolf" : "human", dKy_darkworld_check() ? 1 : 0,
+        stage, room, layer, dComIfGs_getTime() / 15.0f, alink->checkWolf() ? "wolf" : "human",
+        dKy_darkworld_check() ? 1 : 0,
         dComIfGs_getSelectEquipSword(), dComIfGs_getSelectEquipShield(),
         alink->mShieldArcName != nullptr ? alink->mShieldArcName : "-",
         dComIfGs_getSelectEquipClothes(), dComIfGs_getLife(), dComIfGs_getMaxLife(),
@@ -1280,6 +1354,10 @@ struct PendingTeleport {
     int reloads = 0;
 };
 PendingTeleport s_teleport;
+
+bool teleport_in_progress() {
+    return s_teleport.active;
+}
 
 const uint32_t kTeleportTimeoutTicks = 60 * 30;
 const uint32_t kTeleportSettleTicks = 45;
@@ -1426,27 +1504,75 @@ void update_pending_teleport() {
     }
 }
 
+struct ClockPlace {
+    char stage[8] = {};
+    int8_t room = -1;
+    int8_t layer = -1;
+};
+ClockPlace s_clockPlace;
+uint32_t s_clockSince = 0;
+
+bool local_clock_trusted() {
+    if (!in_gameplay() || dKy_darkworld_check() || g_env_light.using_time_control_tag != 0) return false;
+    stage_stag_info_class* stag = dComIfGp_getStageStagInfo();
+    return stag != nullptr && static_cast<s8>(dStage_stagInfo_GetTimeH(stag)) < 0;
+}
+
+void track_clock_place() {
+    if (!in_gameplay()) {
+        s_clockPlace = ClockPlace{};
+        return;
+    }
+    const char* stage = dComIfGp_getStartStageName();
+    if (stage == nullptr) return;
+    ClockPlace now;
+    std::strncpy(now.stage, stage, sizeof(now.stage));
+    now.room = static_cast<int8_t>(dComIfGp_roomControl_getStayNo());
+    now.layer = static_cast<int8_t>(
+        dComIfG_play_c::getLayerNo_common(stage, now.room, dComIfGp_getStartStageLayer()));
+    if (std::memcmp(now.stage, s_clockPlace.stage, sizeof(now.stage)) != 0 ||
+        now.room != s_clockPlace.room || now.layer != s_clockPlace.layer) {
+        s_clockPlace = now;
+        s_clockSince = s_invTick;
+    }
+}
+
 void send_time() {
+    if (!local_clock_trusted() || s_clockPlace.room < 0) return;
     MsgTime msg{};
     msg.time = dComIfGs_getTime();
+    msg.date = dComIfGs_getDate();
+    std::memcpy(msg.stage, s_clockPlace.stage, sizeof(msg.stage));
+    msg.room = s_clockPlace.room;
+    msg.layer = s_clockPlace.layer;
+    msg.age = s_invTick - s_clockSince;
     coop_net_send(kMsgTime, &msg, sizeof(msg));
 }
 
-void on_time(const uint8_t* payload, size_t size) {
-    if (size < sizeof(MsgTime) || coop_net_is_host()) return;
-    if (!coop_session(kSessTime, cfg_bool(s_vars.syncTime, true)) || !in_gameplay()) return;
+void on_time(const uint8_t* payload, size_t size, uint8_t from) {
+    if (size < sizeof(MsgTime)) return;
+    if (!coop_session(kSessTime, cfg_bool(s_vars.syncTime, true))) return;
+    if (!local_clock_trusted() || dComIfGp_event_runCheck() || s_clockPlace.room < 0) return;
     MsgTime msg;
     std::memcpy(&msg, payload, sizeof(msg));
-    if (!std::isfinite(msg.time) || msg.time < 0.0f) return;
+    if (!std::isfinite(msg.time) || msg.time < 0.0f || msg.time >= 360.0f) return;
+
+    if (std::memcmp(msg.stage, s_clockPlace.stage, sizeof(msg.stage)) != 0 ||
+        msg.room != s_clockPlace.room || msg.layer != s_clockPlace.layer) {
+        return;
+    }
+
+    const uint32_t ours = s_invTick - s_clockSince;
+    const bool first = msg.age > ours + 30 ||
+                       (msg.age + 30 >= ours && msg.age <= ours + 30 && from < coop_net_local_id());
+    if (!first) return;
     const f32 local = dComIfGs_getTime();
     f32 diff = msg.time - local;
-    if (msg.time < 360.0f && local < 360.0f) {
-        while (diff > 180.0f) diff -= 360.0f;
-        while (diff < -180.0f) diff += 360.0f;
-    }
-    if (std::fabs(diff) > 2.0f) {
-        dComIfGs_setTime(msg.time);
-    }
+    while (diff > 180.0f) diff -= 360.0f;
+    while (diff < -180.0f) diff += 360.0f;
+    if (msg.date == dComIfGs_getDate() && std::fabs(diff) <= 2.0f) return;
+    dComIfGs_setDate(msg.date);
+    dComIfGs_setTime(msg.time);
 }
 
 }
@@ -1519,9 +1645,16 @@ void features_init() {
 
 void features_leave_after_state_load() {
     dSv_info_c* info = dComIfGs_getSaveInfo();
+    static uint32_t s_inGameTicks = 0;
     if (!coop_net_connected() || info == nullptr || daAlink_getAlinkActorClass() == nullptr) {
         s_haveStateItemBits = false;
+        s_inGameTicks = 0;
         return;
+    }
+
+    if (s_inGameTicks < 300) {
+        ++s_inGameTicks;
+        s_haveStateItemBits = false;
     }
     const auto& flags = info->getSavedata().getPlayer().getGetItem().mItemFlags;
     int appeared = 0;
@@ -1654,6 +1787,8 @@ void features_update() {
             repair_early_epona();
             repair_rutela_graveyard();
             repair_midna_shadows();
+            place_epona_after_rescue();
+            catch_up_story();
         }
     }
 
@@ -1747,9 +1882,10 @@ void features_update() {
         s_sentLife = lifeNow;
         send_presence();
     }
-    if (coop_net_is_host() && ++s_timeTicks >= 60) {
+    track_clock_place();
+    if (++s_timeTicks >= 60) {
         s_timeTicks = 0;
-        if (in_gameplay() && coop_session(kSessTime, cfg_bool(s_vars.syncTime, true))) send_time();
+        if (coop_session(kSessTime, cfg_bool(s_vars.syncTime, true))) send_time();
     }
     if (coop_session(kSessItems, cfg_bool(s_vars.syncInventory, true))) {
         scan_inventory();
@@ -1938,7 +2074,7 @@ void features_on_message(uint8_t type, const uint8_t* payload, size_t size, uint
         apply_death_link(msg);
         break;
     }
-    case kMsgTime: on_time(payload, size); break;
+    case kMsgTime: on_time(payload, size, from); break;
     case kMsgSounds: fx_on_sounds(payload, size, from); break;
     case kMsgParticles: fx_on_particles(payload, size, from); break;
     case kMsgPvpState:

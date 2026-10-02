@@ -109,7 +109,7 @@ VoiceSet* load_set(const std::string& skin) {
     set->zeroHeap.initRootHeap(nullptr, 0);
 
     const std::string path = skins_folder_path() + "/" + skin + "/voices.bin";
-    std::ifstream file(path_ci(path), std::ios::binary);
+    std::ifstream file(path_ci(std::filesystem::u8path(path)), std::ios::binary);
     if (!file) {
         set->failed = true;
         return nullptr;

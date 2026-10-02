@@ -978,8 +978,11 @@ void handle_horse_datagram(const mods::net::Event& event) {
     puppet_hook_on_horse_snapshot(static_cast<uint8_t>(id), snap);
 }
 
+uint32_t g_udpReopens = 0;
+
 void reopen_udp_after_close(const char* why) {
     if (g_udpPort <= 0) return;
+    ++g_udpReopens;
 
     static uint32_t s_windowStart = 0;
     static int s_inWindow = 0;
@@ -3034,4 +3037,8 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     coop_log::info("coop_mod shut down");
     return MOD_OK;
 }
+}
+
+uint32_t coop_udp_reopen_count() {
+    return g_udpReopens;
 }

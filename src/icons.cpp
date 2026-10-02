@@ -43,7 +43,7 @@ void unregister_all() {
 
 void load_for(const std::string& model) {
     const std::string path = skins_folder_path() + "/" + model + "/icons.bin";
-    std::ifstream file(path, std::ios::binary);
+    std::ifstream file(std::filesystem::u8path(path), std::ios::binary);
     if (!file) {
         s_loaded = model;
         return;
