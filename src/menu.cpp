@@ -43,6 +43,15 @@ struct SurfaceHandles {
     std::vector<uint8_t> rowIds;
     std::vector<std::string> rowLabels;
 
+    UiElementHandle globalStatus = 0;
+    std::string lastGlobalStatus;
+    UiListHandle blockList = 0;
+    std::string lastBlockList;
+    bool blockListPushed = false;
+    std::vector<GlobalPlayer> blockRows;
+    std::vector<bool> blockRowBlocked;
+    std::vector<std::string> blockLabels;
+
     std::vector<UiElementHandle> presetHas;
     std::vector<UiElementHandle> presetOther;
     UiElementHandle presetHasHead = 0;
@@ -55,6 +64,10 @@ struct SurfaceHandles {
 SurfaceHandles s_panel;
 SurfaceHandles s_window;
 UiWindowHandle s_windowHandle = 0;
+
+ConfigVarHandle s_networkTabVar = 0;
+bool s_networkTabShown = false;
+bool s_reopenWindow = false;
 
 void open_window();
 
@@ -192,6 +205,10 @@ void add_color(UiElementHandle pane, const char* label, ConfigVarHandle var) {
 }
 
 std::string status_text() {
+
+    if (!coop_net_connected() && !coop_net_connecting() && cfg_bool(global_enabled_var(), false)) {
+        return "Hyrule Online: " + global_status();
+    }
     return coop_net_status();
 }
 
@@ -271,6 +288,51 @@ std::string invite_text() {
     if (!online.empty()) return online;
     if (!address.empty()) return "Others can join you at " + address;
     return upnp_status();
+}
+
+void push_block_list(SurfaceHandles& h) {
+    if (h.blockList == 0) return;
+    std::vector<GlobalPlayer> rows;
+    std::vector<bool> isBlocked;
+    const auto add = [&](const GlobalPlayer& p) {
+        for (const GlobalPlayer& r : rows) {
+            if (r.tag == p.tag) return;
+        }
+        rows.push_back(p);
+        isBlocked.push_back(global_blocked(p.tag));
+    };
+    for (const GlobalPlayer& p : global_players()) add(p);
+    for (const GlobalPlayer& p : chat_recent_speakers()) add(p);
+    for (const GlobalPlayer& p : global_blocked_list()) add(p);
+    std::string joined;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        joined += rows[i].tag + rows[i].name + (isBlocked[i] ? "!" : "") + "\n";
+    }
+    if (h.blockListPushed && joined == h.lastBlockList) return;
+    h.lastBlockList = joined;
+    h.blockListPushed = true;
+    h.blockRows = rows;
+    h.blockRowBlocked = isBlocked;
+    h.blockLabels.clear();
+    for (size_t i = 0; i < rows.size(); ++i) {
+        h.blockLabels.push_back(rows[i].name + (isBlocked[i] ? "  (blocked)" : ""));
+    }
+    std::vector<UiListItem> items;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        UiListItem item = UI_LIST_ITEM_INIT;
+        item.key = i;
+        item.label = h.blockLabels[i].c_str();
+        items.push_back(item);
+    }
+    svc_ui->list_set_items(mod_ctx, h.blockList, items.empty() ? nullptr : items.data(), items.size());
+}
+
+void on_block_pressed(ModContext*, UiListHandle, uint64_t key, void*) {
+    SurfaceHandles& h = s_window;
+    if (key >= h.blockRows.size()) return;
+    global_set_blocked(h.blockRows[key], !h.blockRowBlocked[key]);
+    h.blockListPushed = false;
+    push_block_list(h);
 }
 
 void push_players(SurfaceHandles& h) {
@@ -461,6 +523,14 @@ void refresh(SurfaceHandles& h) {
             svc_ui->elem_set_text(mod_ctx, h.net, h.lastNet.c_str());
         }
     }
+    if (h.globalStatus != 0) {
+        const std::string text = "Status: " + global_status();
+        if (text != h.lastGlobalStatus) {
+            h.lastGlobalStatus = text;
+            svc_ui->elem_set_text(mod_ctx, h.globalStatus, h.lastGlobalStatus.c_str());
+        }
+    }
+    push_block_list(h);
     if (h.netPeers != 0) {
         const std::string text = net_peers_text();
         if (text != h.lastNetPeers) {
@@ -572,6 +642,33 @@ ModResult group_advanced(ModContext*, UiElementHandle pane, void*, ModError*) {
     return MOD_OK;
 }
 
+void build_global(UiElementHandle pane, SurfaceHandles& h) {
+    h.lastGlobalStatus = "Status: " + global_status();
+    svc_ui->pane_add_text(mod_ctx, pane, h.lastGlobalStatus.c_str(), &h.globalStatus);
+    add_toggle(pane, "Hyrule Online", global_enabled_var(),
+        "Other players can see your IP address while this is on.");
+
+    svc_ui->pane_add_section(mod_ctx, pane, "Name tags");
+    add_toggle(pane, "Show their names", global_nametags_var(),
+        "Only for Hyrule Online. Off in Local > Name tags hides these too.");
+    add_number(pane, "Name distance", global_nametag_distance_var(), 500, 30000, 500, "",
+        "How far away you can read their names.", global_nametags_var());
+
+    svc_ui->pane_add_section(mod_ctx, pane, "Chat");
+    svc_ui->pane_add_text(mod_ctx, pane, chat_how_text(), nullptr);
+    add_toggle(pane, "Show chat on screen", chat_show_var());
+    add_number(pane, "Chat size", chat_size_var(), 50, 200, 10, "%");
+    add_number(pane, "Fade after", chat_fade_var(), 2, 120, 1, " s");
+
+    svc_ui->pane_add_section(mod_ctx, pane, "Players");
+    svc_ui->pane_add_text(mod_ctx, pane, "Press someone to block them. Press again to unblock.", nullptr);
+    UiListDesc list = UI_LIST_DESC_INIT;
+    list.on_pressed = on_block_pressed;
+    if (svc_ui->pane_add_list(mod_ctx, pane, &list, &h.blockList) != MOD_OK) h.blockList = 0;
+    h.blockListPushed = false;
+    push_block_list(h);
+}
+
 void build_connect(UiElementHandle pane, SurfaceHandles& h, UiElementHandle detail) {
     const CoopFeatureVars& vars = features_vars();
     h.lastStatus = status_text();
@@ -585,6 +682,8 @@ void build_connect(UiElementHandle pane, SurfaceHandles& h, UiElementHandle deta
         "Empty Room gets a random code.");
     add_button(pane, "Join", [](ModContext*, void*) { coop_net_join_code(); }, net_active);
     add_button(pane, "Disconnect", [](ModContext*, void*) { coop_net_disconnect(); }, net_idle);
+    add_button(pane, "Chat", [](ModContext*, void*) { chat_open(); }, nullptr,
+        "Needs Hyrule Online on.");
 
     add_group_or_section(pane, detail, "Advanced", group_advanced);
     add_group_or_section(pane, detail, "How to play together", build_online_guide);
@@ -845,6 +944,8 @@ void build_screen(UiElementHandle pane, UiElementHandle detail) {
     add_group_or_section(pane, detail, "Sound", group_sound);
     add_group_or_section(pane, detail, "Notifications", group_messages);
     add_group_or_section(pane, detail, "Joining", group_joining);
+    svc_ui->pane_add_section(mod_ctx, pane, "Menu");
+    add_toggle(pane, "Show Network tab", s_networkTabVar, "Ping and traffic for each player.");
 }
 
 std::vector<std::string> s_modelNames;
@@ -1225,6 +1326,20 @@ ModResult tab_connect(
     return MOD_OK;
 }
 
+ModResult tab_global(
+    ModContext*, UiWindowHandle, UiElementHandle left, UiElementHandle right, void*, ModError*) {
+    s_window = SurfaceHandles{};
+    build_global(left, s_window);
+    add_panel_header(right, "Hyrule Online");
+    svc_ui->pane_add_text(mod_ctx, right,
+        "See other people playing in the same area as you. You each keep your own game, "
+        "nothing gets shared.", nullptr);
+    svc_ui->pane_add_text(mod_ctx, right,
+        "Other players can see your IP address while this is on.", nullptr);
+    svc_ui->pane_add_text(mod_ctx, right, "Turns off while you're in a co-op room.", nullptr);
+    return MOD_OK;
+}
+
 ModResult tab_players(
     ModContext*, UiWindowHandle, UiElementHandle left, UiElementHandle right, void*, ModError*) {
     s_window = SurfaceHandles{};
@@ -1285,6 +1400,7 @@ ModResult tab_debug(
 
 ModResult update_window(ModContext*, void*, ModError*) {
     refresh(s_window);
+    if (cfg_bool(s_networkTabVar, false) != s_networkTabShown) s_reopenWindow = true;
     return MOD_OK;
 }
 
@@ -1460,43 +1576,38 @@ void open_window() {
     report_hint_arm();
     if (s_windowHandle != 0) return;
 
-    const size_t tabCount = features_debug_menu() ? 8 : 7;
-    UiTabDesc tabs[8] = {UI_TAB_DESC_INIT, UI_TAB_DESC_INIT, UI_TAB_DESC_INIT, UI_TAB_DESC_INIT,
-        UI_TAB_DESC_INIT, UI_TAB_DESC_INIT, UI_TAB_DESC_INIT, UI_TAB_DESC_INIT};
-    tabs[0].title = "Connect";
-    tabs[0].build = tab_connect;
-    tabs[0].update = update_window;
-
-    tabs[1].title = "Host";
-    tabs[1].build = tab_game;
-    tabs[1].update = update_window;
-    tabs[2].title = "Local";
-    tabs[2].build = tab_screen;
-    tabs[2].update = update_window;
-    tabs[3].title = "Players";
-    tabs[3].build = tab_players;
-    tabs[3].update = update_window;
-    tabs[4].title = "Customization";
-    tabs[4].build = tab_models;
-    tabs[4].update = update_window;
-
-    tabs[5].title = "Network";
-    tabs[5].build = tab_network;
-    tabs[5].update = update_window;
-
-    tabs[6].title = "Report Bug";
-    tabs[6].build = [](ModContext*, UiWindowHandle, UiElementHandle left, UiElementHandle right,
-                         void*, ModError*) -> ModResult {
-        report_build_tab(left, right);
-        return MOD_OK;
+    UiTabDesc tabs[9];
+    size_t tabCount = 0;
+    const auto add_tab = [&](const char* title, UiTabBuildFn build, UiPanelUpdateFn update) {
+        tabs[tabCount] = UI_TAB_DESC_INIT;
+        tabs[tabCount].title = title;
+        tabs[tabCount].build = build;
+        tabs[tabCount].update = update;
+        ++tabCount;
     };
-    tabs[6].update = [](ModContext*, void*, ModError*) -> ModResult {
-        report_update_tab();
-        return MOD_OK;
-    };
-    tabs[7].title = "Debug";
-    tabs[7].build = tab_debug;
-    tabs[7].update = update_window;
+    add_tab("Connect", tab_connect, update_window);
+    add_tab("Hyrule Online", tab_global, update_window);
+
+    add_tab("Host", tab_game, update_window);
+    add_tab("Local", tab_screen, update_window);
+    add_tab("Players", tab_players, update_window);
+
+    add_tab("Customization", tab_models, update_window);
+
+    s_networkTabShown = cfg_bool(s_networkTabVar, false);
+    if (s_networkTabShown) add_tab("Network", tab_network, update_window);
+
+    add_tab("Report Bug",
+        [](ModContext*, UiWindowHandle, UiElementHandle left, UiElementHandle right, void*,
+            ModError*) -> ModResult {
+            report_build_tab(left, right);
+            return MOD_OK;
+        },
+        [](ModContext*, void*, ModError*) -> ModResult {
+            report_update_tab();
+            return MOD_OK;
+        });
+    if (features_debug_menu()) add_tab("Debug", tab_debug, update_window);
 
     UiWindowDesc desc = UI_WINDOW_DESC_INIT;
     desc.tabs = tabs;
@@ -1511,7 +1622,22 @@ void open_window() {
 
 }
 
+void ui_update() {
+    if (!s_reopenWindow) return;
+    s_reopenWindow = false;
+    if (s_windowHandle == 0) return;
+    svc_ui->window_close(mod_ctx, s_windowHandle);
+    s_windowHandle = 0;
+    open_window();
+}
+
 void ui_init() {
+    ConfigVarDesc network = CONFIG_VAR_DESC_INIT;
+    network.name = "show_network_tab";
+    network.type = CONFIG_VAR_BOOL;
+    network.default_bool = false;
+    if (svc_config->register_var(mod_ctx, &network, &s_networkTabVar) != MOD_OK) s_networkTabVar = 0;
+
     UiModsPanelDesc panel = UI_MODS_PANEL_DESC_INIT;
     panel.build = build_panel;
     panel.update = update_panel;
@@ -1525,5 +1651,13 @@ void ui_init() {
     UiMenuTabHandle handle = 0;
     if (svc_ui->register_menu_tab(mod_ctx, &tab, &handle) != MOD_OK) {
         coop_log::warn("coop_mod: [UI] failed to add the Co-op menu bar tab");
+    }
+
+    UiMenuTabDesc chat = UI_MENU_TAB_DESC_INIT;
+    chat.label = "Chat";
+    chat.on_selected = [](ModContext*, void*) { chat_open(); };
+    UiMenuTabHandle chatHandle = 0;
+    if (svc_ui->register_menu_tab(mod_ctx, &chat, &chatHandle) != MOD_OK) {
+        coop_log::warn("coop_mod: [UI] failed to add the Chat menu bar tab");
     }
 }

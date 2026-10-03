@@ -36,7 +36,32 @@ function clip(value, max) {
 }
 
 function safe(s) {
-  return s.replace(/@/g, "@​").replace(/`/g, "'");
+  return s.replace(/@/g, "@​").replace(/\x60/g, "'");
+}
+
+function shortHash(text) {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return ((h >>> 0) & 0xffff).toString(16).padStart(4, "0");
+}
+
+function privateV4(a, b) {
+  return a === 10 || a === 127 || a === 0 || (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127);
+}
+
+export function scrub(text) {
+  return text
+    .replace(/\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b/g, (m, a, b) =>
+      privateV4(Number(a), Number(b)) ? m : `ip-${shortHash(m)}`)
+    .replace(/\[([0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7})\]/g, (m, a) =>
+      /^(::1|fe80:|fc|fd)/i.test(a) ? m : `[ip6-${shortHash(a.toLowerCase())}]`)
+    .replace(/([\\/](?:Users|home)[\\/])[^\\/\r\n"']+/g, "$1~")
+    .replace(/(\[ONLINE\] room |joining room |no room )[^\s.]+/g, "$1~")
+    .replace(/(\/(?:join|host)\/)[^\s/]+/g, "$1~");
 }
 
 function json(obj, status = 200) {
@@ -77,8 +102,8 @@ export async function handleReport(request, env) {
   const platform = safe(clip(body.platform, 20)) || "?";
   const device = safe(clip(body.device, 120));
   const mod = safe(clip(body.mod, 20));
-  const session = clip(body.session, 4000);
-  const log = clip(body.log, MAX_BODY_BYTES);
+  const session = scrub(clip(body.session, 4000));
+  const log = scrub(clip(body.log, MAX_BODY_BYTES));
 
   let content;
   if (kind === "report") {
@@ -100,12 +125,21 @@ export async function handleReport(request, env) {
     (kind === "report" ? `when: ${clip(body.when, 60)}\n\nwhat happened:\n${clip(body.text, MAX_TEXT)}\n` : "") +
     `\n--- session ---\n${session}\n\n--- co-op log ---\n${log}`;
 
+  const payload = JSON.stringify({ content, allowed_mentions: { parse: [] } });
   const form = new FormData();
-  form.append("payload_json", JSON.stringify({ content, allowed_mentions: { parse: [] } }));
+  form.append("payload_json", payload);
   const name = `${code}-${player.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 24) || "player"}.txt`;
   form.append("files[0]", new Blob([file], { type: "text/plain" }), name);
 
   const sent = await fetch(env.REPORT_WEBHOOK, { method: "POST", body: form });
   if (!sent.ok) return json({ error: "could not deliver" }, 502);
+
+  if (env.REPORT_WEBHOOK_PUBLIC && kind === "report") {
+    await fetch(env.REPORT_WEBHOOK_PUBLIC, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload,
+    });
+  }
   return json({ code });
 }

@@ -13,6 +13,7 @@
 
 #include "d/actor/d_a_alink.h"
 #include "d/d_com_inf_game.h"
+#include "f_op/f_op_actor_mng.h"
 
 #include <chrono>
 #include <cstdio>
@@ -275,6 +276,42 @@ std::string scrub_addresses(std::string text) {
     return out;
 }
 
+struct ActorTally {
+    std::string npcs;
+    int counts[0x400] = {};
+};
+
+void* tally_actor(void* proc, void* data) {
+    auto* actor = static_cast<fopAc_ac_c*>(proc);
+    auto* t = static_cast<ActorTally*>(data);
+    if (actor == nullptr || !fopAcM_IsActor(actor)) return nullptr;
+    const int name = fopAcM_GetName(actor);
+    if (fopAcM_GetGroup(actor) == fopAc_NPC_e && t->npcs.size() < 3000) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), " %d@%d,%d,%d r%d", name, static_cast<int>(actor->current.pos.x),
+            static_cast<int>(actor->current.pos.y), static_cast<int>(actor->current.pos.z),
+            static_cast<int>(fopAcM_GetRoomNo(actor)));
+        t->npcs += buf;
+    } else if (name >= 0 && name < 0x400) {
+        ++t->counts[name];
+    }
+    return nullptr;
+}
+
+std::string actors_here() {
+    if (daAlink_getAlinkActorClass() == nullptr) return "(not in the game)\n";
+    static ActorTally t;
+    t.npcs.clear();
+    std::memset(t.counts, 0, sizeof(t.counts));
+    fopAcM_Search(tally_actor, &t);
+    std::string out = "npcs:" + t.npcs + "\nothers:";
+    for (int i = 0; i < 0x400 && out.size() < 6000; ++i) {
+        if (t.counts[i] == 0) continue;
+        out += " " + std::to_string(i) + (t.counts[i] > 1 ? "x" + std::to_string(t.counts[i]) : "");
+    }
+    return out + "\n";
+}
+
 std::string build_body(const char* kind, const std::string& code, const std::string& text,
     const std::string& when, const std::string& log) {
     std::string b = "{";
@@ -288,7 +325,8 @@ std::string build_body(const char* kind, const std::string& code, const std::str
     b += ",\"text\":\"" + json_escape(text) + "\"";
     b += ",\"session\":\"" + json_escape(scrub_addresses(session_summary())) + "\"";
 
-    const std::string state = "=== save state ===\n" + world_state_dump() + "=== end save state ===\n";
+    const std::string state = "=== save state ===\n" + world_state_dump() + "=== end save state ===\n" +
+                              "=== actors here ===\n" + actors_here();
     b += ",\"log\":\"" + json_escape(state + scrub_addresses(log)) + "\"";
     b += "}";
     return b;
@@ -457,7 +495,12 @@ void report_on_message(const uint8_t* payload, size_t size, uint8_t from) {
     s_answeredNext = (s_answeredNext + 1) % 8;
     flush_to_disk();
     const std::string asker = features_peer_of(from).name;
-    const std::string body = build_body("log", code, "log for " + asker + "'s report", "", current_log());
+
+    std::string log = "=== this run ===\n" + current_log();
+    log += "\n=== the run before this one ===\n" + previous_log(1, 300u * 1024u);
+    log += "\n=== crash trail, last lines ===\n" + crash_trail_tail();
+    log += "\n=== dusklight's own log, the run before ===\n" + engine_log_before(16u * 1024u);
+    const std::string body = build_body("log", code, "log for " + asker + "'s report", "", log);
     if (post(body, on_log_sent)) {
         coop_log::info("coop_mod: [REPORT] sending log for {} report {}", asker, code);
     }

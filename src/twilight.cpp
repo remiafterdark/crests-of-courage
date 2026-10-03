@@ -234,7 +234,7 @@ void on_tear_got(const MsgTearGot& msg) {
             ++count;
         }
     }
-    if (msg.count > count) count = msg.count;
+
     if (count > 16) count = 16;
     dComIfGs_setLightDropNum(msg.area, static_cast<u8>(count));
 

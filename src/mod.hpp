@@ -634,6 +634,9 @@ void rando_init();
 void checks_init();
 
 void map_markers_init();
+bool map_markers_minimap_top(float* top);
+
+bool squad_hud_corner(float* crossTop, float* heartsBottom);
 ConfigVarHandle map_markers_full_var();
 ConfigVarHandle map_markers_dungeon_var();
 ConfigVarHandle map_markers_names_var();
@@ -774,13 +777,83 @@ bool online_active();
 std::string online_room_code();
 std::string online_status();
 
-bool online_accept_token(uint64_t token);
+bool online_accept_token(uint64_t token, bool sealed, uint32_t keyId);
+std::string online_room_server();
+bool online_parse_stun(const uint8_t* data, size_t size, std::string& out);
+
+namespace mods::ws {
+struct Event;
+}
+struct PlayerSnapshot;
+struct MsgPresence;
+struct MsgSkinChoices;
+struct MsgColorEntry;
+void global_register_vars();
+ConfigVarHandle global_enabled_var();
+ConfigVarHandle global_nametags_var();
+ConfigVarHandle global_nametag_distance_var();
+void global_update();
+void global_shutdown();
+bool global_active();
+bool global_slot_present(uint8_t slot);
+std::string global_status();
+void global_on_ws_event(const mods::ws::Event& event);
+bool global_on_datagram(const std::string& from, const uint8_t* data, size_t size);
+void global_send_snapshot(const PlayerSnapshot& snapshot);
+bool global_send_chat(const std::string& text);
+uint32_t global_my_id();
+
+struct GlobalPlayer {
+    uint32_t id;
+    std::string name;
+    std::string tag;
+};
+bool global_blocked(const std::string& tag);
+void global_set_blocked(const GlobalPlayer& who, bool on);
+std::vector<GlobalPlayer> global_players();
+std::vector<GlobalPlayer> global_blocked_list();
+std::vector<GlobalPlayer> chat_recent_speakers();
+void chat_forget_player(const std::string& tag);
+void ui_update();
+const char* chat_how_text();
+
+void chat_register_vars();
+ConfigVarHandle chat_show_var();
+ConfigVarHandle chat_size_var();
+ConfigVarHandle chat_fade_var();
+void chat_on_message(uint32_t id, const std::string& tag, const std::string& name, const std::string& text);
+void chat_on_rename(uint32_t id, const std::string& name);
+void chat_note(const std::string& text);
+void chat_open();
+void chat_update();
+void chat_first_online();
+void chat_draw();
+bool chat_key_pressed();
+struct HorseSnapshot;
+struct MidnaSnapshot;
+void global_send_horse(const HorseSnapshot& snap);
+void global_send_midna(const MidnaSnapshot& snap);
+struct MsgParticleEntry;
+void global_send_sounds(const uint8_t* payload, size_t size);
+void global_send_particles(const MsgParticleEntry* entries, int count);
+void puppet_hook_on_horse_snapshot(uint8_t playerId, const HorseSnapshot& snap);
+void puppet_hook_on_midna_snapshot(uint8_t playerId, const MidnaSnapshot& snap);
+
+bool coop_global_udp_open(int* port);
+void coop_global_udp_close();
+void coop_accept_global_snapshot(uint8_t slot, const PlayerSnapshot& snapshot);
+void features_build_presence(MsgPresence* out);
+void features_build_skin_choices(MsgSkinChoices* out);
+void features_global_forget(uint8_t slot);
+void colors_build_local(MsgColorEntry* out);
+
+bool online_pending_key(uint32_t keyId, uint8_t out[32]);
 
 bool online_on_datagram(const std::string& from, const uint8_t* data, size_t size);
 
 void coop_udp_send_raw(const std::string& endpoint, const void* data, size_t size);
 
-void coop_online_punched(const std::string& endpoint, uint64_t token);
+void coop_online_punched(const std::string& endpoint, uint64_t token, const uint8_t* key);
 
 void coop_online_failed(const std::string& why, const std::string& upnpFallback);
 

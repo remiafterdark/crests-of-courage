@@ -6,6 +6,7 @@
 #include "mods/svc/websocket.hpp"
 
 #include "net/messages.hpp"
+#include "net/json.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -52,150 +53,6 @@ std::mt19937_64& rng() {
     return engine;
 }
 
-struct JsonField {
-    std::string str;
-    double num = 0;
-    bool boolean = false;
-    std::vector<std::string> list;
-};
-
-struct JsonObject {
-    std::vector<std::pair<std::string, JsonField>> fields;
-
-    const JsonField* find(const char* key) const {
-        for (const auto& f : fields) {
-            if (f.first == key) return &f.second;
-        }
-        return nullptr;
-    }
-    std::string str(const char* key) const {
-        const JsonField* f = find(key);
-        return f != nullptr ? f->str : std::string{};
-    }
-    bool boolean(const char* key) const {
-        const JsonField* f = find(key);
-        return f != nullptr && f->boolean;
-    }
-    std::vector<std::string> list(const char* key) const {
-        const JsonField* f = find(key);
-        return f != nullptr ? f->list : std::vector<std::string>{};
-    }
-};
-
-class JsonReader {
-public:
-    explicit JsonReader(std::string_view text) : m_text(text) {}
-
-    bool object(JsonObject& out) {
-        skip_ws();
-        if (!eat('{')) return false;
-        skip_ws();
-        if (eat('}')) return true;
-        for (;;) {
-            std::string key;
-            skip_ws();
-            if (!string(key)) return false;
-            skip_ws();
-            if (!eat(':')) return false;
-            JsonField field;
-            if (!value(field)) return false;
-            out.fields.emplace_back(std::move(key), std::move(field));
-            skip_ws();
-            if (eat(',')) continue;
-            return eat('}');
-        }
-    }
-
-private:
-    bool value(JsonField& out) {
-        skip_ws();
-        if (m_pos >= m_text.size()) return false;
-        const char c = m_text[m_pos];
-        if (c == '"') return string(out.str);
-        if (c == '[') {
-            ++m_pos;
-            skip_ws();
-            if (eat(']')) return true;
-            for (;;) {
-                JsonField item;
-                if (!value(item)) return false;
-                out.list.push_back(std::move(item.str));
-                skip_ws();
-                if (eat(',')) continue;
-                return eat(']');
-            }
-        }
-        if (c == '{') {
-            JsonObject ignored;
-            return object(ignored);
-        }
-        if (m_text.substr(m_pos, 4) == "true") {
-            m_pos += 4;
-            out.boolean = true;
-            return true;
-        }
-        if (m_text.substr(m_pos, 5) == "false") {
-            m_pos += 5;
-            return true;
-        }
-        if (m_text.substr(m_pos, 4) == "null") {
-            m_pos += 4;
-            return true;
-        }
-        const size_t start = m_pos;
-        while (m_pos < m_text.size() && std::strchr("+-0123456789.eE", m_text[m_pos]) != nullptr) {
-            ++m_pos;
-        }
-        if (m_pos == start) return false;
-        out.str = std::string(m_text.substr(start, m_pos - start));
-        out.num = std::strtod(out.str.c_str(), nullptr);
-        return true;
-    }
-
-    bool string(std::string& out) {
-        if (!eat('"')) return false;
-        while (m_pos < m_text.size()) {
-            const char c = m_text[m_pos++];
-            if (c == '"') return true;
-            if (c != '\\') {
-                out += c;
-                continue;
-            }
-            if (m_pos >= m_text.size()) return false;
-            const char e = m_text[m_pos++];
-            switch (e) {
-            case 'n': out += '\n'; break;
-            case 't': out += '\t'; break;
-            case 'r': out += '\r'; break;
-            case 'b': out += '\b'; break;
-            case 'f': out += '\f'; break;
-            case 'u':
-
-                if (m_pos + 4 > m_text.size()) return false;
-                m_pos += 4;
-                out += '?';
-                break;
-            default: out += e; break;
-            }
-        }
-        return false;
-    }
-
-    void skip_ws() {
-        while (m_pos < m_text.size() && std::strchr(" \t\r\n", m_text[m_pos]) != nullptr) ++m_pos;
-    }
-    bool eat(char c) {
-        if (m_pos < m_text.size() && m_text[m_pos] == c) {
-            ++m_pos;
-            return true;
-        }
-        return false;
-    }
-
-    std::string_view m_text;
-    size_t m_pos = 0;
-};
-
 std::string json_escape(const std::string& text) {
     std::string out;
     for (const char c : text) {
@@ -218,6 +75,20 @@ std::string bare(std::string_view endpoint) {
 
 std::string as_udp(const std::string& address) {
     return "udp://" + address;
+}
+
+bool parse_hex_key(const std::string& text, uint8_t out[32]) {
+    if (text.size() != 64) return false;
+    for (size_t i = 0; i < 64; ++i) {
+        const char c = text[i];
+        uint8_t v;
+        if (c >= '0' && c <= '9') v = static_cast<uint8_t>(c - '0');
+        else if (c >= 'a' && c <= 'f') v = static_cast<uint8_t>(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') v = static_cast<uint8_t>(c - 'A' + 10);
+        else return false;
+        out[i / 2] = static_cast<uint8_t>((i % 2 == 0) ? v << 4 : out[i / 2] | v);
+    }
+    return true;
 }
 
 bool parse_hex_token(const std::string& text, uint64_t& out) {
@@ -251,6 +122,9 @@ struct PendingPeer {
     uint64_t startedMs = 0;
     uint64_t lastProbeMs = 0;
     bool accepted = false;
+
+    uint8_t key[32] = {};
+    bool haveKey = false;
     uint32_t reopensAtStart = 0;
     bool droppedLoopback = false;
 };
@@ -550,7 +424,7 @@ bool on_punch(const std::string& from, const uint8_t* data, size_t size) {
     const uint64_t token_ = s_target.token;
     close_ws();
     set_phase(Phase::Done, "Found the host. Connecting...");
-    coop_online_punched(from, token_);
+    coop_online_punched(from, token_, s_target.haveKey ? s_target.key : nullptr);
     return true;
 }
 
@@ -634,6 +508,7 @@ void on_server_message(const std::string& text) {
     PendingPeer peer;
     if (!parse_hex_token(msg.str("token"), peer.token)) return;
     for (const std::string& ep : msg.list("eps")) peer.candidates.push_back(as_udp(ep));
+    peer.haveKey = parse_hex_key(msg.str("key"), peer.key);
     peer.startedMs = now_ms();
 
     if (s_host) {
@@ -658,7 +533,10 @@ void on_server_message(const std::string& text) {
 void pump_websocket() {
     mods::ws::Event event;
     while (mods::ws::poll(event)) {
-        if (!s_ws || event.handle != s_ws.handle()) continue;
+        if (!s_ws || event.handle != s_ws.handle()) {
+            global_on_ws_event(event);
+            continue;
+        }
         switch (event.type) {
         case WEBSOCKET_EVENT_OPEN:
             coop_log::info("coop_mod: [ONLINE] room server connected");
@@ -748,13 +626,24 @@ std::string online_status() {
     return s_status;
 }
 
-bool online_accept_token(uint64_t token) {
+bool online_accept_token(uint64_t token, bool sealed, uint32_t keyId) {
     if (!s_host) return false;
     for (PendingPeer& p : s_peers) {
-        if (p.token == token && !p.accepted) {
-            p.accepted = true;
-            return true;
-        }
+        if (p.token != token || p.accepted) continue;
+
+        if (p.haveKey && (!sealed || keyId != static_cast<uint32_t>(token))) return false;
+        p.accepted = true;
+        return true;
+    }
+    return false;
+}
+
+bool online_pending_key(uint32_t keyId, uint8_t out[32]) {
+    if (!s_host) return false;
+    for (const PendingPeer& p : s_peers) {
+        if (!p.haveKey || p.accepted || static_cast<uint32_t>(p.token) != keyId) continue;
+        std::memcpy(out, p.key, sizeof(p.key));
+        return true;
     }
     return false;
 }
@@ -824,4 +713,12 @@ void online_update() {
                           }),
             s_peers.end());
     }
+}
+
+std::string online_room_server() {
+    return room_server();
+}
+
+bool online_parse_stun(const uint8_t* data, size_t size, std::string& out) {
+    return parse_stun(data, size, out);
 }

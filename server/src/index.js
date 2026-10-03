@@ -1,6 +1,7 @@
 
 
 import { handleReport } from "./report.js";
+import { cleanChat, cleanName } from "./filter.js";
 
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const CODE_LENGTH = 6;
@@ -31,6 +32,12 @@ function normalizeCode(text) {
   const code = text.toUpperCase().replace(/[^A-Z0-9]/g, "");
   if (code.length < NAME_MIN || code.length > NAME_MAX) return "";
   return code;
+}
+
+function newKey() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function newToken() {
@@ -140,6 +147,11 @@ export default {
         if (response.status !== 409) return response;
       }
       return new Response("Could not find a free room code", { status: 503 });
+    }
+
+    if (url.pathname === "/global") {
+      const lobby = env.GLOBAL.get(env.GLOBAL.idFromName("hyrule-online"));
+      return lobby.fetch(new Request("https://global/", request));
     }
 
     const join = url.pathname.match(/^\/join\/([A-Za-z0-9-]+)$/);
@@ -282,6 +294,8 @@ export class Room {
     }
     const token = newToken();
 
+    const key = newKey();
+
     const outside = (ep) => (isEndpoint(ep) ? ep.slice(0, ep.lastIndexOf(":")) : "");
     const sameNet =
       (hostInfo.ip !== "" && hostInfo.ip === joinInfo.ip) ||
@@ -290,12 +304,14 @@ export class Room {
     send(hostWs, {
       op: "peer",
       token,
+      key,
       eps: candidates({ ...joinInfo.hello, ip: joinInfo.ip }, sameNet, hostInfo.hello.lan),
       sameNet,
     });
     send(joinWs, {
       op: "peer",
       token,
+      key,
       eps: candidates({ ...hostInfo.hello, ip: hostInfo.ip }, sameNet, joinInfo.hello.lan),
       upnp: hostInfo.hello.upnp,
       sameNet,
@@ -315,6 +331,273 @@ export class Room {
     if (me && me.role === "host") {
       for (const j of this.ctx.getWebSockets("join")) fail(j, "no_room");
     }
+  }
+
+  async webSocketError(ws) {
+    await this.webSocketClose(ws, 1011);
+  }
+}
+
+const GLOBAL_PEERS = 15;
+const GLOBAL_MAX = 400;
+const GLOBAL_AREA = /^[A-Za-z0-9_]{0,8}$/;
+const GLOBAL_AREA_CHANGES = 30;
+
+const GLOBAL_CHAT_MAX = 100;
+const GLOBAL_CHAT_GAP_MS = 2000;
+const GLOBAL_RENAMES = 6;
+
+function addressTag(ip) {
+  let h = 2166136261;
+  for (let i = 0; i < ip.length; i++) {
+    h ^= ip.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+async function tagOf(key) {
+  if (typeof key !== "string" || !/^[0-9a-f]{32}$/.test(key)) return "";
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+  return [...new Uint8Array(digest)].slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function printable(text, max) {
+  return String(text || "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, max);
+}
+
+export class Global {
+  constructor(ctx, env) {
+    this.ctx = ctx;
+    this.env = env || {};
+  }
+
+  banned(info) {
+    const list = String(this.env.GLOBAL_BANS || "").split(",").map((x) => x.trim()).filter(Boolean);
+    return list.includes(addressTag(info.ip || ""));
+  }
+
+  async chat(ws, info, text) {
+    const now = Date.now();
+    if (this.banned(info)) return send(ws, { op: "chat_banned" });
+    if (now - (info.lastChat || 0) < GLOBAL_CHAT_GAP_MS) return send(ws, { op: "chat_slow" });
+    const line = cleanChat(printable(text, GLOBAL_CHAT_MAX));
+    if (!line) return;
+    info.lastChat = now;
+    ws.serializeAttachment(info);
+    console.log(`chat ${addressTag(info.ip || "")} ${info.name}: ${line}`);
+    const msg = { op: "chat", id: info.id, tag: info.tag || "", name: info.name, text: line };
+    this.everyone(msg);
+  }
+
+  rename(ws, info, name) {
+    const now = Date.now();
+    if (now - (info.renameWindow || 0) > 60000) {
+      info.renameWindow = now;
+      info.renames = 0;
+    }
+    const clean = cleanName(printable(name, 16)) || "Player";
+    if (clean === info.name || ++info.renames > GLOBAL_RENAMES) {
+      ws.serializeAttachment(info);
+      return;
+    }
+    info.name = clean;
+    ws.serializeAttachment(info);
+    this.everyone({ op: "rename", id: info.id, name: clean });
+  }
+
+  unpair(ws, info, otherId) {
+    if (!(info.peers || []).includes(otherId)) return null;
+    info.peers = info.peers.filter((id) => id !== otherId);
+    const other = this.byId(otherId);
+    if (!other) return null;
+    const theirs = other.deserializeAttachment();
+    theirs.peers = (theirs.peers || []).filter((id) => id !== info.id);
+    other.serializeAttachment(theirs);
+    send(other, { op: "gone", id: info.id });
+    send(ws, { op: "gone", id: otherId });
+    return other;
+  }
+
+  block(ws, info, id, on) {
+    if (!Number.isInteger(id) || id <= 0) return;
+    const blocks = (info.blocks || []).filter((b) => b !== id);
+    if (on) blocks.push(id);
+    info.blocks = blocks.slice(-200);
+    const other = on ? this.unpair(ws, info, id) : null;
+    this.introduce(ws, info);
+    ws.serializeAttachment(info);
+    if (other) {
+      const theirs = other.deserializeAttachment();
+      this.introduce(other, theirs, ws);
+      other.serializeAttachment(theirs);
+    }
+  }
+
+  everyone(msg) {
+    for (const other of this.all()) {
+      const theirs = other.deserializeAttachment();
+      if (theirs && theirs.hello) send(other, msg);
+    }
+  }
+
+  all() {
+    return this.ctx.getWebSockets("global");
+  }
+
+  byId(id) {
+    for (const ws of this.all()) {
+      const info = ws.deserializeAttachment();
+      if (info && info.id === id) return ws;
+    }
+    return null;
+  }
+
+  newId() {
+    const used = new Set(this.all().map((ws) => (ws.deserializeAttachment() || {}).id));
+    for (;;) {
+      const id = crypto.getRandomValues(new Uint32Array(1))[0] & 0x7fffffff;
+      if (id !== 0 && !used.has(id)) return id;
+    }
+  }
+
+  counts(area) {
+    let total = 0;
+    let here = 0;
+    for (const ws of this.all()) {
+      const info = ws.deserializeAttachment();
+      if (!info || !info.hello) continue;
+      ++total;
+      if (area && info.area === area) ++here;
+    }
+    return { total, here };
+  }
+
+  part(ws, info) {
+    const freed = [];
+    for (const otherId of info.peers || []) {
+      const other = this.byId(otherId);
+      if (!other) continue;
+      const theirs = other.deserializeAttachment();
+      theirs.peers = (theirs.peers || []).filter((id) => id !== info.id);
+      other.serializeAttachment(theirs);
+      send(other, { op: "gone", id: info.id });
+      send(ws, { op: "gone", id: otherId });
+      freed.push(other);
+    }
+    info.peers = [];
+    ws.serializeAttachment(info);
+    for (const other of freed) {
+      const theirs = other.deserializeAttachment();
+      if (!theirs) continue;
+      this.introduce(other, theirs, ws);
+      other.serializeAttachment(theirs);
+    }
+  }
+
+  introduce(ws, info, except = null) {
+    if (!info.area || !info.hello) return;
+    for (const other of this.all()) {
+      if ((info.peers || []).length >= GLOBAL_PEERS) break;
+      if (other === ws || other === except) continue;
+      const theirs = other.deserializeAttachment();
+      if (!theirs || !theirs.hello || theirs.area !== info.area || theirs.v !== info.v) continue;
+      if ((theirs.peers || []).length >= GLOBAL_PEERS || (theirs.peers || []).includes(info.id)) continue;
+      if ((info.blocks || []).includes(theirs.id) || (theirs.blocks || []).includes(info.id)) continue;
+      const token = newToken();
+      const key = newKey();
+      const outside = (ep) => (isEndpoint(ep) ? ep.slice(0, ep.lastIndexOf(":")) : "");
+      const sameNet = (info.ip !== "" && info.ip === theirs.ip) ||
+        (outside(info.ep) !== "" && outside(info.ep) === outside(theirs.ep));
+      send(ws, { op: "peer", id: theirs.id, tag: theirs.tag || "", token, key, sameNet,
+        eps: candidates(theirs, sameNet, info.lan) });
+      send(other, { op: "peer", id: info.id, tag: info.tag || "", token, key, sameNet,
+        eps: candidates(info, sameNet, theirs.lan) });
+      theirs.peers = [...(theirs.peers || []), info.id];
+      other.serializeAttachment(theirs);
+      info.peers = [...(info.peers || []), theirs.id];
+    }
+  }
+
+  async fetch(request) {
+    if (this.all().length >= GLOBAL_MAX) {
+      return new Response("Hyrule Online is full", { status: 503 });
+    }
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    this.ctx.acceptWebSocket(server, ["global"]);
+    const id = this.newId();
+    server.serializeAttachment({
+      id, ip: request.headers.get("CF-Connecting-IP") || "", hello: false, v: 0, ep: "", port: 0,
+      lan: "", area: "", peers: [], window: Date.now(), changes: 0,
+    });
+    send(server, { op: "welcome", id, stun: await stunServers(), total: this.counts("").total });
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async webSocketMessage(ws, message) {
+    if (typeof message !== "string" || message.length > 512) return fail(ws, "bad_message");
+    let msg;
+    try {
+      msg = JSON.parse(message);
+    } catch {
+      return fail(ws, "bad_message");
+    }
+    const info = ws.deserializeAttachment();
+    if (!info) return;
+    if (msg.op === "hello" && !info.hello) {
+      info.hello = true;
+      info.v = Number(msg.v) || 0;
+      info.ep = isEndpoint(msg.ep) ? msg.ep : "";
+      info.port = isPort(msg.port) ? msg.port : 0;
+      info.lan = isPrivateIpv4(msg.lan) ? msg.lan : "";
+      info.name = cleanName(printable(msg.name, 16)) || "Player";
+      info.tag = await tagOf(msg.key);
+      this.introduce(ws, info);
+      ws.serializeAttachment(info);
+      send(ws, { op: "count", ...this.counts(info.area) });
+      return;
+    }
+    if (msg.op === "area") {
+      const now = Date.now();
+      if (now - info.window > 60000) {
+        info.window = now;
+        info.changes = 0;
+      }
+      if (++info.changes > GLOBAL_AREA_CHANGES) return fail(ws, "too_fast");
+      const area = typeof msg.stage === "string" && GLOBAL_AREA.test(msg.stage) ? msg.stage : "";
+      if (area !== info.area) {
+        this.part(ws, info);
+        info.area = area;
+        this.introduce(ws, info);
+      }
+      ws.serializeAttachment(info);
+      send(ws, { op: "count", ...this.counts(info.area) });
+      return;
+    }
+    if (msg.op === "chat" && info.hello) {
+      await this.chat(ws, info, msg.text);
+      return;
+    }
+    if (msg.op === "name" && info.hello) {
+      this.rename(ws, info, msg.name);
+      return;
+    }
+    if ((msg.op === "block" || msg.op === "unblock") && info.hello) {
+      this.block(ws, info, Number(msg.id), msg.op === "block");
+      return;
+    }
+    return fail(ws, "bad_message");
+  }
+
+  async webSocketClose(ws, code) {
+    try {
+      ws.close(code === 1005 ? 1000 : code);
+    } catch {
+
+    }
+    const info = ws.deserializeAttachment();
+    if (info) this.part(ws, info);
   }
 
   async webSocketError(ws) {

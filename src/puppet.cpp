@@ -211,6 +211,18 @@ struct MidnaTiredSave {
     bool applied = false;
 };
 
+struct PuppetRein {
+    static const int kCap = 35;
+    cXyz pos[kCap];
+    cXyz vel[kCap];
+    int count = 1;
+    int cap = kCap;
+    f32 sideX = 0.0f;
+    f32 sideZ = 0.0f;
+    f32 neckPush = 0.0f;
+    cXyz neckAt;
+};
+
 struct Puppet {
     int state = 0;
     u8 outfit = kPuppetOutfitDefault;
@@ -239,6 +251,7 @@ struct Puppet {
     J3DModel* sheathModel = nullptr;
     J3DModel* shieldModel = nullptr;
     u8 swordId = kPuppetSwordNone;
+    u16 swordTries = 0;
     u8 sheathId = kPuppetSheathNone;
     char shieldArc[16] = {};
     u8 wantSword = kPuppetSwordNone;
@@ -305,6 +318,12 @@ struct Puppet {
     J3DModel* horseModel = nullptr;
     bool horseArcHeld = false;
     mDoExt_3DlineMat1_c* horseReins = nullptr;
+    PuppetRein reins[3];
+    bool reinsLaid = false;
+    u32 reinsTick = 0;
+    cXyz reinsPos;
+    s16 reinsYaw = 0;
+    int reinsPoints = 0;
     f32 horseIdleFrame = 0.0f;
     u32 horseShadowKey = 0;
     u16 horseIdleAnm = 0xFFFF;
@@ -801,6 +820,7 @@ void release_puppet_models_only() {
     }
     release_outfit_item_data();
     pup().swordId = kPuppetSwordNone;
+    pup().swordTries = 0;
     pup().sheathId = kPuppetSheathNone;
 
     for (int k = 0; k < kPuppetAttachSlots; ++k) {
@@ -858,6 +878,7 @@ void release_puppet() {
     }
     pup().bodyRotX = pup().bodyRotY = pup().bodyRotZ = 0;
     pup().swordId = kPuppetSwordNone;
+    pup().swordTries = 0;
     pup().sheathId = kPuppetSheathNone;
 
     clear_installed_mtx_calc();
@@ -2534,13 +2555,16 @@ void render_get_item(J3DModel* model, const Mtx world, u8 item) {
     J3DModelData* data = model->getModelData();
     GetItemAnims& a = s_getItemAnims;
 
-    if (a.item != item || a.boundTo != data) {
+    const char* arc = dItem_data::getArcName(item);
+    auto* btkNow = item_anim_res<J3DAnmTextureSRTKey>(arc, dItem_data::getBtkName(item));
+    auto* brkNow = item_anim_res<J3DAnmTevRegKey>(arc, dItem_data::getBrkName(item));
+    auto* btpNow = item_anim_res<J3DAnmTexPattern>(arc, dItem_data::getBtpName(item));
+    if (a.item != item || a.boundTo != data || a.btk != btkNow || a.brk != brkNow || a.btp != btpNow) {
         a = GetItemAnims{};
         a.item = item;
-        const char* arc = dItem_data::getArcName(item);
-        a.btk = item_anim_res<J3DAnmTextureSRTKey>(arc, dItem_data::getBtkName(item));
-        a.brk = item_anim_res<J3DAnmTevRegKey>(arc, dItem_data::getBrkName(item));
-        a.btp = item_anim_res<J3DAnmTexPattern>(arc, dItem_data::getBtpName(item));
+        a.btk = btkNow;
+        a.brk = brkNow;
+        a.btp = btpNow;
         static int s_logCount = 0;
         if (s_logCount++ < 60) {
             coop_log::info("coop_mod: [GETITEM] player {} item={:#x} arc='{}' tevFrm={} btpFrm={} brk={} btp={} btk={} data={:p}",
@@ -3417,6 +3441,7 @@ public:
         const f32 dist = (head - eye).abs();
 
         if (s_nametagHideFar && dist > 6000.0f) return false;
+        if (mStranger && dist > mStrangerDist) return false;
 
         const f32 kFullSizeDist = 500.0f;
         f32 cell = dist <= kFullSizeDist ? 18.0f : 18.0f * (kFullSizeDist / dist);
@@ -3443,7 +3468,7 @@ public:
         f32 ty = screen.y;
         if (!onScreen) {
 
-            if (!s_edgeTagsEnabled) return false;
+            if (!s_edgeTagsEnabled || mStranger) return false;
             const f32 cx = minX + width * 0.5f;
             const f32 cy = minY + height * 0.5f;
             f32 dx;
@@ -3583,6 +3608,9 @@ public:
     f32 mY = 0.0f;
     bool mVisible = false;
 
+    bool mStranger = false;
+    f32 mStrangerDist = 8000.0f;
+
     bool mEdge = false;
 };
 
@@ -3621,6 +3649,10 @@ void queue_puppet_nametag(daAlink_c* alink) {
     tag.mFeetWorld.set(pup().pos.x, pup().pos.y - 8.0f, pup().pos.z);
     std::strncpy(tag.mBaseName, pup().nametagName, sizeof(tag.mBaseName) - 1);
     tag.mBaseName[sizeof(tag.mBaseName) - 1] = '\0';
+    tag.mStranger = global_slot_present(s_pupId);
+
+    if (tag.mStranger && !cfg_bool(global_nametags_var(), true)) return;
+    tag.mStrangerDist = static_cast<f32>(std::clamp<int64_t>(cfg_int(global_nametag_distance_var(), 8000), 500, 30000));
     tag.mVisible = true;
 
     dDlst_list_c& lists = g_dComIfG_gameInfo.drawlist;
@@ -3728,7 +3760,9 @@ void on_alink_execute_puppet_post(ModContext*, void*, void*, void*) {
 }
 
 void update_one_puppet(daAlink_c* alink) {
-    if (pup().midnaActive && ++pup().midnaAge > kMidnaStaleTicks) pup().midnaActive = false;
+
+    const int midnaStale = global_slot_present(s_pupId) ? 150 : kMidnaStaleTicks;
+    if (pup().midnaActive && ++pup().midnaAge > midnaStale) pup().midnaActive = false;
     if (pup().horseAge < (1 << 20)) ++pup().horseAge;
     net_clock_tick();
     horse_idle_tick();
@@ -4560,11 +4594,14 @@ void sync_equipment_models() {
             }
         }
 
-        if (outfitBmd == nullptr || pup().swordModel != nullptr) {
+        const bool waiting = pup().swordModel == nullptr && pup().wantSword != kPuppetSwordNone &&
+                             (outfitBmd != nullptr || ++pup().swordTries < 600);
+        if (!waiting) {
+            pup().swordTries = 0;
             pup().swordId = pup().wantSword;
+            coop_log::trace("coop_mod: [DIAG-EQUIP] sword={} model={:p}", pup().swordId,
+                static_cast<void*>(pup().swordModel));
         }
-        coop_log::trace("coop_mod: [DIAG-EQUIP] sword={} model={:p}", pup().swordId,
-            static_cast<void*>(pup().swordModel));
     }
 
     if (pup().wantSheath != pup().sheathId) {
@@ -5878,6 +5915,8 @@ const int kHorseStaleTicks = 20;
 const int kHorseStandingStaleTicks = 45;
 
 int horse_stale_limit() {
+
+    if (global_slot_present(s_pupId)) return 150;
     return (pup().horse.flags & kHorseFlagIdle) != 0 ? kHorseStandingStaleTicks : kHorseStaleTicks;
 }
 
@@ -6021,10 +6060,192 @@ void horse_blend_base(const float a[12], const float b[12], f32 t, Mtx out) {
     for (int r = 0; r < 3; ++r) out[r][3] = ma[r][3] + (mb[r][3] - ma[r][3]) * t;
 }
 
+void rein_normalize(cXyz& v) {
+    const f32 len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    if (len > 0.00001f) {
+        v.x /= len;
+        v.y /= len;
+        v.z /= len;
+    } else {
+        v = cXyz(0.0f, 0.0f, 1.0f);
+    }
+}
+
+void rein_step(PuppetRein& r, int i) {
+    const cXyz next = r.pos[i + 1];
+    cXyz pull = r.pos[0] - next;
+    rein_normalize(pull);
+    const f32 t = static_cast<f32>(i) / static_cast<f32>(r.count);
+    const f32 t2 = t * t;
+    pull *= (1.0f - t2) * 3.0f;
+    pull.y += -4.5f;
+    pull.x += t2 * r.sideX;
+    pull.z += t2 * r.sideZ;
+    const cXyz was = r.pos[i];
+    cXyz dir = (r.pos[i] - next) + r.vel[i] + pull;
+    if (r.neckPush > 0.0f) {
+        cXyz neck = r.neckAt - next;
+        rein_normalize(neck);
+        dir += neck * r.neckPush;
+        r.neckPush -= 20.0f / 17.0f;
+    }
+    rein_normalize(dir);
+    r.pos[i] = next + dir * 5.5f;
+    cXyz span = r.pos[i] - r.pos[0];
+    const f32 len = span.abs();
+    const f32 most = static_cast<f32>(i) * 5.5f * 1.2f;
+    if (len > most && len > 0.0f) {
+        span *= most / len;
+        r.pos[i] = (r.pos[0] + span) * (1.0f - t) + r.pos[i] * t;
+    }
+    r.vel[i] = (r.pos[i] - was) * 0.2f;
+}
+
+void rein_part(PuppetRein& r, int end) {
+    r.count = end + 1;
+    r.vel[end] = cXyz::Zero;
+    for (int i = r.cap - 1; i > end; --i) {
+        r.pos[i] = r.pos[end];
+        r.vel[i] = cXyz::Zero;
+    }
+    for (int i = end - 1; i > 0; --i) rein_step(r, i);
+}
+
+void rein_move_init(J3DModel* horse, const Mtx base, int hand, s16 steer) {
+    PuppetRein* r = pup().reins;
+    static const cXyz kLeftStart(63.0f, 17.0f, 11.0f);
+    static const cXyz kRightStart(63.0f, 17.0f, -11.0f);
+    static const cXyz kNeckLeft(10.0f, 10.0f, 35.0f);
+    static const cXyz kNeckRight(10.0f, 10.0f, -35.0f);
+    mDoMtx_multVec(horse->getAnmMtx(0xF), &kLeftStart, &r[0].pos[0]);
+    mDoMtx_multVec(horse->getAnmMtx(0xF), &kRightStart, &r[1].pos[0]);
+    const s16 yaw = cM_atan2s(base[0][2], base[2][2]);
+    const s16 across = static_cast<s16>(yaw + 0x4000);
+    const f32 sn = cM_ssin(across);
+    const f32 cs = cM_scos(across);
+    const f32 turn = std::fabs(static_cast<f32>(steer) / 8192.0f);
+    f32 left = hand != 3 ? 11.0f : 10.0f;
+    f32 right = left;
+    r[0].neckPush = r[1].neckPush = 0.0f;
+    if (steer > 0) {
+        mDoMtx_multVec(horse->getAnmMtx(0xB), &kNeckRight, &r[1].neckAt);
+        r[1].neckPush = 20.0f * turn;
+        right += 10.0f * turn;
+    } else if (steer < 0) {
+        mDoMtx_multVec(horse->getAnmMtx(0xB), &kNeckLeft, &r[0].neckAt);
+        r[0].neckPush = 20.0f * turn;
+        left += 10.0f * turn;
+    }
+    r[0].sideX = left * sn;
+    r[0].sideZ = left * cs;
+    r[1].sideX = -right * sn;
+    r[1].sideZ = -right * cs;
+
+    const cXyz at(base[0][3], base[1][3], base[2][3]);
+    if (pup().reinsLaid && (at.abs2(pup().reinsPos) >= 1.0f || yaw != pup().reinsYaw)) {
+        mDoMtx_stack_c::transS(at.x, at.y, at.z);
+        mDoMtx_stack_c::YrotM(static_cast<s16>(yaw - pup().reinsYaw));
+        mDoMtx_stack_c::transM(-pup().reinsPos.x, -pup().reinsPos.y, -pup().reinsPos.z);
+        for (int k = 0; k < 3; ++k) {
+            for (int j = 1; j < r[k].cap; ++j) {
+                const cXyz was = r[k].pos[j];
+                mDoMtx_stack_c::multVec(&was, &r[k].pos[j]);
+            }
+        }
+    }
+    pup().reinsPos = at;
+    pup().reinsYaw = yaw;
+}
+
+bool reins_tick(J3DModel* horse, const Mtx base, uint8_t hand, s16 steer) {
+    if (hand == kHorseReinHold) return pup().reinsLaid;
+    PuppetRein* r = pup().reins;
+    r[2].cap = 5;
+    if (!pup().reinsLaid) {
+
+        static const cXyz kLeftStart(63.0f, 17.0f, 11.0f);
+        cXyz bit;
+        mDoMtx_multVec(horse->getAnmMtx(0xF), &kLeftStart, &bit);
+        for (PuppetRein& one : pup().reins) {
+            for (int j = 0; j < PuppetRein::kCap; ++j) {
+                one.pos[j] = bit;
+                one.vel[j] = cXyz::Zero;
+            }
+        }
+    }
+    const int passes = pup().reinsLaid ? 1 : 6;
+    for (int pass = 0; pass < passes; ++pass) {
+        rein_move_init(horse, base, hand, steer);
+        if (hand == 0) {
+            static const cXyz kSaddleLeft(29.0f, -2.0f, 30.0f);
+            static const cXyz kSaddleRight(29.0f, 2.0f, 30.0f);
+            const int side = 24;
+            mDoMtx_multVec(horse->getAnmMtx(0x15), &kSaddleLeft, &r[0].pos[side]);
+            rein_part(r[0], side);
+            mDoMtx_multVec(horse->getAnmMtx(0x15), &kSaddleRight, &r[1].pos[side]);
+            rein_part(r[1], side);
+            r[2].pos[0] = r[0].pos[side];
+            rein_part(r[2], 0);
+        } else {
+
+            J3DModel* body = pup().model;
+            if (body == nullptr || body->getModelData() == nullptr ||
+                body->getModelData()->getJointNum() <= 14) {
+                return false;
+            }
+            MtxP handL = body->getAnmMtx(9);
+            MtxP handR = body->getAnmMtx(14);
+            static const cXyz kLeftOut(9.0f, -5.0f, 3.0f);
+            static const cXyz kRightOut(9.0f, -5.0f, -3.0f);
+            static const cXyz kLeftIn(9.0f, 5.0f, 3.0f);
+            static const cXyz kRightIn(9.0f, 5.0f, -3.0f);
+            int pullIn = (-steer * 5) / 0x2000;
+            if (hand != 3) pullIn *= 2;
+            int left = ((hand & 1) != 0 ? 20 : 24) + pullIn;
+            int right = ((hand & 2) != 0 ? 20 : 24) - pullIn;
+            left = std::clamp(left, 1, PuppetRein::kCap - 1);
+            right = std::clamp(right, 1, PuppetRein::kCap - 1);
+            if (hand == 2) {
+                mDoMtx_multVec(handR, &kRightIn, &r[0].pos[left]);
+                mDoMtx_multVec(handR, &kRightOut, &r[1].pos[right]);
+            } else if (hand == 1) {
+                mDoMtx_multVec(handL, &kLeftOut, &r[0].pos[left]);
+                mDoMtx_multVec(handL, &kLeftIn, &r[1].pos[right]);
+            } else {
+                mDoMtx_multVec(handL, &kLeftOut, &r[0].pos[left]);
+                mDoMtx_multVec(handR, &kRightOut, &r[1].pos[right]);
+            }
+            rein_part(r[0], left);
+            rein_part(r[1], right);
+            mDoMtx_multVec(handL, &kLeftIn, &r[2].pos[0]);
+            if (hand == 3) {
+                mDoMtx_multVec(handR, &kRightIn, &r[2].pos[4]);
+                rein_part(r[2], 4);
+            } else {
+                rein_part(r[2], 0);
+            }
+        }
+        pup().reinsLaid = true;
+    }
+    return true;
+}
+
+int reins_copy(cXyz* out) {
+    const PuppetRein* r = pup().reins;
+    int n = 0;
+    for (int i = 0; i < r[0].count; ++i) out[n++] = r[0].pos[i];
+    if (r[2].count > 1) {
+        for (int i = 0; i < r[2].count; ++i) out[n++] = r[2].pos[i];
+    }
+    for (int i = r[1].count - 1; i >= 0; --i) out[n++] = r[1].pos[i];
+    return n;
+}
+
 void draw_puppet_horse(daAlink_c* alink) {
     const HorseSnapshot& snap = pup().horse;
     if (pup().horseAge > horse_stale_limit() || snap.jointCount == 0 ||
         snap.jointCount > kHorseJoints) {
+        pup().reinsLaid = false;
         return;
     }
     if (pup().model == nullptr) return;
@@ -6115,7 +6336,6 @@ void draw_puppet_horse(daAlink_c* alink) {
         }
     }
 
-    if (snap.reinCount < 2 || snap.reinCount > kHorseReinPoints) return;
     if (pup().horseReins == nullptr) {
         auto* texture = static_cast<ResTIMG*>(dComIfG_getObjectRes("Horse", 0x2C));
         if (texture == nullptr) return;
@@ -6127,14 +6347,16 @@ void draw_puppet_horse(daAlink_c* alink) {
         if (!ok) return;
         pup().horseReins = line;
     }
-    cXyz* points = pup().horseReins->getPos(0);
-    for (int i = 0; i < snap.reinCount; ++i) {
-        const cXyz local(snap.reins[i][0] / kHorsePosScale, snap.reins[i][1] / kHorsePosScale,
-            snap.reins[i][2] / kHorsePosScale);
-        mDoMtx_multVec(base, &local, &points[i]);
+    const u32 tick = coop_local_world_frames();
+    if (tick != pup().reinsTick || !pup().reinsLaid) {
+        pup().reinsTick = tick;
+        const uint8_t hand = (drawnFlags & kHorseFlagRiding) != 0 ? snap.reinHand : 0;
+        if (!reins_tick(model, base, hand, snap.reinSteer)) return;
+        pup().reinsPoints = reins_copy(pup().horseReins->getPos(0));
     }
+    if (pup().reinsPoints < 2) return;
     static GXColor reinColor = {0x00, 0x00, 0x00, 0xFF};
-    pup().horseReins->update(snap.reinCount, 1.5f, reinColor, 0, &alink->tevStr);
+    pup().horseReins->update(pup().reinsPoints, 1.5f, reinColor, 0, &alink->tevStr);
     dComIfGd_set3DlineMat(pup().horseReins);
 }
 
@@ -6214,7 +6436,9 @@ struct PuppetTevTint {
 void draw_one_puppet(daAlink_c* alink) {
 
     if ((pup().combat & kSnapHidden) != 0) return;
-    if (coop_net_connected() && s_puppetFrame - pup().snapFrame > 60) return;
+
+    const uint32_t waitFrames = global_slot_present(s_pupId) ? 150u : 60u;
+    if ((coop_net_connected() || global_active()) && s_puppetFrame - pup().snapFrame > waitFrames) return;
     pup().drawnFrame = s_puppetFrame;
     PuppetPlaceOverride place;
 

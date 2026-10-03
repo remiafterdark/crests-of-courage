@@ -123,6 +123,7 @@ void draw_shadowed(JUTFont* font, f32 x, f32 y, f32 cell, const char* text, JUti
 class NotifyDlst : public dDlst_base_c {
 public:
     virtual void draw() {
+        chat_draw();
         if (s_notes.empty()) return;
         static bool s_loggedDrawing = false;
         if (!s_loggedDrawing) {

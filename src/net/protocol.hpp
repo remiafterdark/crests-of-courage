@@ -274,6 +274,7 @@ struct HorseJointSnapshot {
 };
 
 const int kHorseReinPoints = 75;
+const uint8_t kHorseReinHold = 0xFF;
 
 struct HorseSnapshot {
     uint32_t magic;
@@ -283,10 +284,10 @@ struct HorseSnapshot {
     uint8_t playerId;
     uint8_t flags;
     uint8_t jointCount;
-    uint8_t reinCount;
+    uint8_t reinHand;
     float baseMtx[12];
     HorseJointSnapshot joints[kHorseJoints];
-    int16_t reins[kHorseReinPoints][3];
+    int16_t reinSteer;
 
     uint16_t idleAnm;
     float idleFrame;
@@ -296,7 +297,7 @@ struct HorseSnapshot {
     uint8_t pad2[3];
 };
 static_assert(sizeof(HorseJointSnapshot) == 14, "HorseJointSnapshot must stay packed");
-static_assert(sizeof(HorseSnapshot) == 4 + 4 + 4 + 4 + 48 + kHorseJoints * 14 + kHorseReinPoints * 6 + 2 + 8 + 4,
+static_assert(sizeof(HorseSnapshot) == 4 + 4 + 4 + 4 + 48 + kHorseJoints * 14 + 2 + 2 + 8 + 4,
     "HorseSnapshot must stay packed");
 
 static_assert(sizeof(HorseSnapshot) <= 1200, "HorseSnapshot must fit one small datagram");

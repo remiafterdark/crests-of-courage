@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <string>
 
-const uint16_t kCoopProtocolVersion = 72;
+const uint16_t kCoopProtocolVersion = 73;
 
 #ifndef COOP_MOD_VERSION
 #define COOP_MOD_VERSION "0.0.0"

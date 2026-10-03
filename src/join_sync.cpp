@@ -216,6 +216,32 @@ bool read_backup(const std::filesystem::path& path, std::vector<uint8_t>& blob,
     return static_cast<bool>(f.read(reinterpret_cast<char*>(blob.data()), kSaveSize));
 }
 
+void settle_equipped_sword(dSv_save_c& save) {
+    struct Sword {
+        u8 item;
+        u8 bit;
+    };
+    static const Sword kBestFirst[] = {
+        {dItemNo_LIGHT_SWORD_e, COLLECT_LIGHT_SWORD},
+        {dItemNo_MASTER_SWORD_e, COLLECT_MASTER_SWORD},
+        {dItemNo_SWORD_e, COLLECT_ORDON_SWORD},
+        {dItemNo_WOOD_STICK_e, COLLECT_WOODEN_SWORD},
+    };
+    dSv_player_status_a_c& a = save.mPlayer.mPlayerStatusA;
+    const dSv_player_collect_c& owned = save.mPlayer.mCollect;
+    const u8 inHand = a.getSelectEquip(COLLECT_SWORD);
+    if (inHand == dItemNo_NONE_e) return;
+    u8 best = dItemNo_NONE_e;
+    for (const Sword& s : kBestFirst) {
+        if (!owned.isCollect(COLLECT_SWORD, s.bit)) continue;
+        if (s.item == inHand) return;
+        if (best == dItemNo_NONE_e) best = s.item;
+    }
+    a.setSelectEquip(COLLECT_SWORD, best);
+    coop_log::info("coop_mod: [JOIN] sword {:#x} in hand is not owned here, now {:#x}",
+        static_cast<int>(inHand), static_cast<int>(best));
+}
+
 void merge_into_live_save(dSv_info_c* info, const uint8_t* blob) {
     dSv_save_c& mine = info->getSavedata();
 
@@ -247,6 +273,7 @@ void merge_into_live_save(dSv_info_c* info, const uint8_t* blob) {
     result.mPlayer.mPlayerLastMarkInfo = mine.mPlayer.mPlayerLastMarkInfo;
     result.mPlayer.mPlayerInfo = mine.mPlayer.mPlayerInfo;
     result.mPlayer.mConfig = mine.mPlayer.mConfig;
+    settle_equipped_sword(result);
 
     std::memcpy(&mine, &result, kSaveSize);
 
@@ -295,6 +322,17 @@ void load_host_save(dSv_info_c* info, const uint8_t* blob) {
     s_session.life = joinLife;
 
     result.mPlayer.mConfig = mine.mPlayer.mConfig;
+
+    {
+        dSv_player_info_c& theirs = result.mPlayer.mPlayerInfo;
+        const dSv_player_info_c& own = mine.mPlayer.mPlayerInfo;
+        if (own.mPlayerName[0] != '\0') {
+            std::memcpy(theirs.mPlayerName, own.mPlayerName, sizeof(theirs.mPlayerName));
+        }
+        if (own.mHorseName[0] != '\0') {
+            std::memcpy(theirs.mHorseName, own.mHorseName, sizeof(theirs.mHorseName));
+        }
+    }
 
     if (keepOwn) {
         dSv_player_item_record_c& rec = result.mPlayer.mItemRecord;

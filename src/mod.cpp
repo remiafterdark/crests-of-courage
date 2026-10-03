@@ -31,6 +31,7 @@
 
 #include "net/protocol.hpp"
 #include "net/messages.hpp"
+#include "net/seal.hpp"
 #include "net/reliable.hpp"
 #include "mod.hpp"
 
@@ -107,7 +108,7 @@ mods::net::Socket g_udp;
 
 CoopNetTraffic g_traffic;
 
-void udp_send(std::string_view endpoint, std::span<const std::byte> bytes) {
+void udp_send_plain(std::string_view endpoint, std::span<const std::byte> bytes) {
     g_traffic.txBytes += bytes.size();
     ++g_traffic.txPackets;
 
@@ -119,6 +120,7 @@ void udp_send(std::string_view endpoint, std::span<const std::byte> bytes) {
         }
     }
 }
+void udp_send(std::string_view endpoint, std::span<const std::byte> bytes);
 bool g_isHost = true;
 bool g_handshakeSent = false;
 bool g_connecting = false;
@@ -139,6 +141,12 @@ struct PeerLink {
 
     bool helloAcked = false;
     uint64_t token = 0;
+
+    bool sealed = false;
+    uint8_t key[32] = {};
+    uint32_t keyId = 0;
+    uint64_t sealCounter = 0;
+    seal::Window sealSeen;
     uint64_t helloSentMs = 0;
     uint64_t createdMs = 0;
     mods::net::Socket sock;
@@ -152,6 +160,68 @@ struct PeerLink {
     bool haveRecvSeq = false;
 };
 PeerLink g_links[kCoopMaxPlayers];
+
+void udp_send(std::string_view endpoint, std::span<const std::byte> bytes) {
+    for (PeerLink& link : g_links) {
+        if (!link.used || !link.sealed || link.udpEndpoint != endpoint) continue;
+        std::vector<std::byte> packet(bytes.size() + seal::kOverhead);
+        seal::wrap(link.key, link.keyId, g_isHost ? seal::kFromHost : seal::kFromJoiner,
+            ++link.sealCounter, reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(),
+            reinterpret_cast<uint8_t*>(packet.data()));
+        udp_send_plain(endpoint, packet);
+        return;
+    }
+    udp_send_plain(endpoint, bytes);
+}
+
+struct SealedArrival {
+    bool sealed = false;
+    uint8_t key[32] = {};
+    uint32_t keyId = 0;
+    uint64_t counter = 0;
+};
+SealedArrival g_arrival;
+
+bool open_sealed(const uint8_t* raw, size_t size, std::vector<std::byte>& out) {
+    const uint32_t keyId = seal::key_id_of(raw);
+    const uint64_t counter = seal::counter_of(raw);
+    const uint32_t sender = g_isHost ? seal::kFromJoiner : seal::kFromHost;
+    out.resize(size - seal::kOverhead);
+    uint8_t* plain = reinterpret_cast<uint8_t*>(out.data());
+    for (PeerLink& link : g_links) {
+        if (!link.used || !link.sealed || link.keyId != keyId) continue;
+        if (!seal::unwrap(link.key, sender, raw, size, plain)) return false;
+        if (!link.sealSeen.take(counter)) return false;
+        g_arrival.sealed = true;
+        std::memcpy(g_arrival.key, link.key, sizeof(g_arrival.key));
+        g_arrival.keyId = keyId;
+        g_arrival.counter = counter;
+        return true;
+    }
+    uint8_t key[32];
+    if (!g_isHost || !online_pending_key(keyId, key)) return false;
+    if (!seal::unwrap(key, sender, raw, size, plain)) return false;
+    g_arrival.sealed = true;
+    std::memcpy(g_arrival.key, key, sizeof(g_arrival.key));
+    g_arrival.keyId = keyId;
+    g_arrival.counter = counter;
+    return true;
+}
+
+bool sealed_link_at(std::string_view endpoint) {
+    for (const PeerLink& link : g_links) {
+        if (link.used && link.sealed && link.udpEndpoint == endpoint) return true;
+    }
+    return false;
+}
+
+int arrival_link() {
+    if (!g_arrival.sealed) return -1;
+    for (int i = 0; i < kCoopMaxPlayers; ++i) {
+        if (g_links[i].used && g_links[i].sealed && g_links[i].keyId == g_arrival.keyId) return i;
+    }
+    return -1;
+}
 
 const uint32_t kUdpRelearnTicks = 60;
 const int32_t kSeqRestartGap = 240;
@@ -615,6 +685,7 @@ void process_tcp_rx(PeerLink& link, uint8_t fromId) {
 }
 
 ModResult start_hosting(int64_t port) {
+    global_shutdown();
     g_listener.close();
     g_udp.close();
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
@@ -666,6 +737,7 @@ ModResult start_hosting(int64_t port) {
 }
 
 ModResult start_joining_code(const std::string& typed) {
+    global_shutdown();
     const std::string code = normalize_room_code(typed);
     if (code.size() < kRoomNameMin || code.size() > kRoomNameMax) {
         g_statusText = "Enter the room code or name the host sees";
@@ -721,6 +793,7 @@ std::string normalize_join_address(std::string address) {
 }
 
 ModResult start_joining(const std::string& rawAddress) {
+    global_shutdown();
 
     std::string typed = rawAddress;
     const size_t colons = static_cast<size_t>(std::count(typed.begin(), typed.end(), ':'));
@@ -828,6 +901,8 @@ bool handle_reliable_datagram(const mods::net::Event& event) {
         for (int i = 0; i < kCoopMaxPlayers; ++i) {
             PeerLink& moved = g_links[i];
             if (!moved.used || !moved.viaUdp || moved.rel.conn() != h.conn) continue;
+
+            if (moved.sealed && arrival_link() != i) continue;
             if (!g_isHost && !moved.helloAcked) break;
             if (g_tickCounter - moved.udpHeardTick <= kUdpRelearnTicks) break;
             coop_log::info("coop_mod: player {} udp endpoint moved {} -> {} (room code)", i,
@@ -836,6 +911,11 @@ bool handle_reliable_datagram(const mods::net::Event& event) {
             id = i;
             break;
         }
+    }
+
+    if (id >= 0 && g_links[id].sealed && arrival_link() != id &&
+        !(g_isHost && g_arrival.sealed && h.kind == rudp::kKindHello)) {
+        return true;
     }
     if (id >= 0) g_links[id].udpHeardTick = g_tickCounter;
     if (id >= 0 && g_links[id].rel.conn() != h.conn) {
@@ -849,7 +929,7 @@ bool handle_reliable_datagram(const mods::net::Event& event) {
         uint64_t token;
         std::memcpy(&token, payload, sizeof(token));
 
-        if (!online_accept_token(token)) return true;
+        if (!online_accept_token(token, g_arrival.sealed, g_arrival.keyId)) return true;
         id = lowest_free_id();
         if (id < 0) {
             coop_log::warn("coop_mod: session full ({} players), refused {}",
@@ -858,13 +938,28 @@ bool handle_reliable_datagram(const mods::net::Event& event) {
             refused.rel.start(h.conn, now);
             std::vector<uint8_t> bye;
             refused.rel.control_packet(bye, rudp::kKindBye);
-            udp_send(from, {reinterpret_cast<const std::byte*>(bye.data()), bye.size()});
+            if (g_arrival.sealed) {
+
+                std::vector<std::byte> packet(bye.size() + seal::kOverhead);
+                seal::wrap(g_arrival.key, g_arrival.keyId, seal::kFromHost, (1ull << 62) | now,
+                    bye.data(), bye.size(), reinterpret_cast<uint8_t*>(packet.data()));
+                udp_send_plain(from, packet);
+            } else {
+                udp_send(from, {reinterpret_cast<const std::byte*>(bye.data()), bye.size()});
+            }
             return true;
         }
-        coop_log::info("coop_mod: player {} connected from {} (room code)", id, from);
+        coop_log::info("coop_mod: player {} connected from {} (room code{})", id, from,
+            g_arrival.sealed ? ", sealed" : "");
         g_links[id] = PeerLink{};
         g_links[id].used = true;
         g_links[id].viaUdp = true;
+        if (g_arrival.sealed) {
+            g_links[id].sealed = true;
+            std::memcpy(g_links[id].key, g_arrival.key, sizeof(g_arrival.key));
+            g_links[id].keyId = g_arrival.keyId;
+            g_links[id].sealSeen.take(g_arrival.counter);
+        }
         g_links[id].udpEndpoint = from;
         g_links[id].haveUdp = true;
         g_links[id].createdMs = now;
@@ -888,7 +983,7 @@ bool handle_reliable_datagram(const mods::net::Event& event) {
     if (!g_isHost && !link.helloAcked) {
 
         link.helloAcked = true;
-        coop_log::info("coop_mod: connected to host (room code)");
+        coop_log::info("coop_mod: connected to host (room code{})", link.sealed ? ", sealed" : "");
         g_statusText = "Connected";
         online_stop();
         on_session_up();
@@ -1038,6 +1133,8 @@ void take_player_snapshot(int id, PlayerSnapshot& snapshot) {
         snapshot.outfit, snapshot.under, snapshot.upper, snapshot.handL, snapshot.handR, snapshot);
 }
 
+void handle_udp_payload(const mods::net::Event& event);
+
 void handle_udp_event(const mods::net::Event& event) {
     if (event.type != NET_EVENT_DATAGRAM) {
         if (event.error != NET_ERROR_NONE) {
@@ -1055,7 +1152,33 @@ void handle_udp_event(const mods::net::Event& event) {
             reinterpret_cast<const uint8_t*>(event.data.data()), event.data.size())) {
         return;
     }
+    if (global_on_datagram(std::string{event.endpoint},
+            reinterpret_cast<const uint8_t*>(event.data.data()), event.data.size())) {
+        return;
+    }
+
+    const uint8_t* raw = reinterpret_cast<const uint8_t*>(event.data.data());
+    g_arrival.sealed = false;
+    if (seal::looks_sealed(raw, event.data.size())) {
+        std::vector<std::byte> opened;
+        if (!open_sealed(raw, event.data.size(), opened)) return;
+        mods::net::Event inner = event;
+        inner.data = opened;
+        handle_udp_payload(inner);
+        g_arrival.sealed = false;
+        return;
+    }
+    if (sealed_link_at(event.endpoint)) return;
+    handle_udp_payload(event);
+}
+
+void handle_udp_payload(const mods::net::Event& event) {
     if (handle_reliable_datagram(event)) return;
+
+    if (g_arrival.sealed) {
+        const int from = arrival_link();
+        if (from < 0 || g_links[from].udpEndpoint != event.endpoint) return;
+    }
 
     if (!g_isHost && !g_peerConnected) return;
     g_ticksSinceRx = 0;
@@ -2041,6 +2164,7 @@ void send_local_snapshot() {
     }
 
     snapshot.playerId = g_localId;
+    global_send_snapshot(snapshot);
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         if (!g_links[i].used || !g_links[i].haveUdp) continue;
         if (!worth_sending(g_localId, i, snapshot.seq)) continue;
@@ -2127,6 +2251,7 @@ uint8_t local_midna_hair_shape(daMidna_c* midna) {
 }
 
 void send_midna_datagram(const MidnaSnapshot& snap) {
+    global_send_midna(snap);
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         if (!g_links[i].used || !g_links[i].haveUdp) continue;
         if (!worth_sending(g_localId, i, snap.seq)) continue;
@@ -2289,6 +2414,7 @@ int16_t to_fixed(f32 v, f32 scale) {
 }
 
 void send_horse_datagram(const HorseSnapshot& snap) {
+    global_send_horse(snap);
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         if (!g_links[i].used || !g_links[i].haveUdp) continue;
         if (!worth_sending(g_localId, i, snap.seq)) continue;
@@ -2385,19 +2511,9 @@ void send_local_horse() {
         for (int r = 0; r < 3; ++r) out.p[r] = to_fixed(m[r][3], kHorsePosScale);
     }
 
-    const int reins = horse->field_0x1204 < kHorseReinPoints ? horse->field_0x1204
-                                                               : kHorseReinPoints;
-    cXyz* points = reins > 0 ? horse->m_reinLine.getPos(0) : nullptr;
-    if (points != nullptr) {
-        snap.reinCount = static_cast<uint8_t>(reins);
-        for (int i = 0; i < reins; ++i) {
-            cXyz local;
-            mDoMtx_multVec(invBase, &points[i], &local);
-            snap.reins[i][0] = to_fixed(local.x, kHorsePosScale);
-            snap.reins[i][1] = to_fixed(local.y, kHorsePosScale);
-            snap.reins[i][2] = to_fixed(local.z, kHorsePosScale);
-        }
-    }
+    const int hand = riding ? alink->getReinHandType() : 0;
+    snap.reinHand = hand >= 0 && hand <= 3 ? static_cast<uint8_t>(hand) : kHorseReinHold;
+    snap.reinSteer = horse->field_0x1712;
     send_horse_datagram(snap);
 }
 
@@ -2566,6 +2682,41 @@ bool coop_net_player_present(uint8_t playerId) {
     return playerId < kCoopMaxPlayers && ((g_roster | g_fakeMask) & (1u << playerId)) != 0;
 }
 
+bool coop_global_udp_open(int* port) {
+    if (g_peerConnected || g_connecting) return false;
+    if (!g_udp) {
+        mods::net::BindOutcome outcome;
+        g_udp = mods::net::open_datagram("udp://0.0.0.0:0", &outcome);
+        if (!g_udp) return false;
+        remember_udp_port(outcome.local);
+        coop_log::info("coop_mod: [GLOBAL] udp {}", outcome.local);
+    }
+    *port = g_udpPort;
+    return true;
+}
+
+void coop_global_udp_close() {
+    if (g_peerConnected || g_connecting) return;
+    g_udp.close();
+}
+
+void coop_accept_global_snapshot(uint8_t slot, const PlayerSnapshot& incoming) {
+    if (slot == 0 || slot >= kCoopMaxPlayers) return;
+    PlayerSnapshot snapshot = incoming;
+    snapshot.playerId = slot;
+    g_playerQuiet[slot] = 0;
+    if (!g_playerWorldSeen[slot] || g_playerWorldTick[slot] != snapshot.worldTick) {
+        g_playerWorldTick[slot] = snapshot.worldTick;
+        g_playerWorldSeen[slot] = true;
+        g_playerWorldStill[slot] = 0;
+    }
+    ++g_snapIn[slot];
+    g_playerSnapTick[slot] = g_tickCounter;
+    puppet_hook_on_network_snapshot(slot, snapshot.posX, snapshot.posY, snapshot.posZ,
+        snapshot.angleX, snapshot.angleY, snapshot.angleZ, snapshot.roomNo, snapshot.outfit,
+        snapshot.under, snapshot.upper, snapshot.handL, snapshot.handR, snapshot);
+}
+
 void coop_net_set_local_id(uint8_t playerId, uint8_t hostMaxPlayers) {
     if (g_isHost) return;
     if (playerId >= kCoopMaxPlayers) {
@@ -2668,10 +2819,10 @@ void coop_net_join_code() {
 
 void coop_udp_send_raw(const std::string& endpoint, const void* data, size_t size) {
     if (!g_udp) return;
-    udp_send(endpoint, {static_cast<const std::byte*>(data), size});
+    udp_send_plain(endpoint, {static_cast<const std::byte*>(data), size});
 }
 
-void coop_online_punched(const std::string& endpoint, uint64_t token) {
+void coop_online_punched(const std::string& endpoint, uint64_t token, const uint8_t* key) {
     if (g_isHost || g_peerConnected) return;
     const uint64_t now = steady_ms();
     PeerLink& link = g_links[kCoopHostId];
@@ -2681,6 +2832,11 @@ void coop_online_punched(const std::string& endpoint, uint64_t token) {
     link.udpEndpoint = endpoint;
     link.haveUdp = true;
     link.token = token;
+    if (key != nullptr) {
+        link.sealed = true;
+        std::memcpy(link.key, key, sizeof(link.key));
+        link.keyId = static_cast<uint32_t>(token);
+    }
     link.createdMs = now;
 
     uint32_t conn = 0;
@@ -2883,6 +3039,8 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     }
 
     report_register_vars();
+    global_register_vars();
+    chat_register_vars();
     report_init();
     features_register_vars();
     features_init();
@@ -3007,6 +3165,9 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 
     upnp_update();
     online_update();
+    global_update();
+    chat_update();
+    ui_update();
     update_pings();
     announce_local_pause();
     features_update();
@@ -3027,6 +3188,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 }
 
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
+    global_shutdown();
     online_stop();
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         send_bye(g_links[i]);

@@ -687,7 +687,7 @@ const int kMaxPuppetModels = kCoopMaxPlayers * 7 + 4;
 PuppetModelColors s_models[kMaxPuppetModels];
 
 SlotColor peer_color(uint8_t owner, int slot) {
-    if (!coop_net_connected() || slot < 0 || slot >= kSlotCount) return SlotColor{};
+    if ((!coop_net_connected() && !global_active()) || slot < 0 || slot >= kSlotCount) return SlotColor{};
     if (owner >= kCoopMaxPlayers) return SlotColor{};
     return s_peer[owner][slot];
 }
@@ -874,6 +874,16 @@ void colors_forget_player(uint8_t id) {
 void colors_on_disconnected() {
     for (auto& row : s_peer) for (SlotColor& c : row) c = SlotColor{};
     for (SlotColor& c : s_lastSent) c = SlotColor{};
+}
+
+void colors_build_local(MsgColorEntry* out) {
+    for (int i = 0; i < kSlotCount && i < kCoopColorSlots; ++i) {
+        const SlotColor c = effective_local(i);
+        out[i].set = c.set ? 1 : 0;
+        out[i].r = c.r;
+        out[i].g = c.g;
+        out[i].b = c.b;
+    }
 }
 
 void colors_on_message(const uint8_t* payload, size_t size, uint8_t from) {

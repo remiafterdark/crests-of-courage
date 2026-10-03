@@ -382,6 +382,33 @@ uint32_t s_invExpectUntil[kItemIdCount] = {};
 uint32_t s_invOwedSince[kItemIdCount] = {};
 const uint32_t kOwedRetryTicks = 600;
 
+const uint16_t kQueuedOwed = 0x100;
+uint16_t s_invQueued[96] = {};
+int s_invQueuedCount = 0;
+
+void give_silent(uint8_t item, bool owed) {
+    svc_item->give_item(mod_ctx, nullptr, item, ITEM_GIVE_SILENT);
+    if (s_invQueuedCount < static_cast<int>(sizeof(s_invQueued) / sizeof(s_invQueued[0]))) {
+        s_invQueued[s_invQueuedCount++] = static_cast<uint16_t>(item | (owed ? kQueuedOwed : 0));
+    }
+}
+
+bool item_still_queued(uint8_t item) {
+    for (int i = 0; i < s_invQueuedCount; ++i) {
+        if (s_invQueued[i] == (item | kQueuedOwed)) return true;
+    }
+    return false;
+}
+
+void note_queued_item_landed() {
+    if (s_invQueuedCount == 0) return;
+    const uint16_t entry = s_invQueued[0];
+    --s_invQueuedCount;
+    std::memmove(s_invQueued, s_invQueued + 1, static_cast<size_t>(s_invQueuedCount) * sizeof(s_invQueued[0]));
+    const uint8_t item = static_cast<uint8_t>(entry);
+    if ((entry & kQueuedOwed) != 0 && !item_still_queued(item)) s_invOwedSince[item] = 0;
+}
+
 bool on_title_screen() {
     const char* stage = dComIfGp_getStartStageName();
     return stage != nullptr && (std::strcmp(stage, "F_SP102") == 0 || std::strcmp(stage, "title") == 0);
@@ -404,8 +431,9 @@ void retry_owed_items() {
             continue;
         }
         if (s_invTick - s_invOwedSince[i] < kOwedRetryTicks) continue;
+        if (item_still_queued(item)) continue;
         coop_log::info("coop_mod: [INV] item {:#x} not received, requesting again", item);
-        svc_item->give_item(mod_ctx, nullptr, item, ITEM_GIVE_SILENT);
+        give_silent(item, true);
         s_invOwedSince[i] = s_invTick;
         s_invExpectUntil[i] = s_invTick + 1200;
     }
@@ -416,6 +444,7 @@ void scan_inventory() {
     if (on_title_screen()) {
         s_haveInv = false;
         std::memset(s_invOwedSince, 0, sizeof(s_invOwedSince));
+        s_invQueuedCount = 0;
         return;
     }
     if (!in_gameplay() || (s_invTick % 30) != 0) return;
@@ -524,6 +553,9 @@ void apply_death_link(const MsgDeathLink& msg) {
 
 void on_item_given(ModContext*, const ItemGiveInfo* info, void*) {
     if (info == nullptr) return;
+    if (info->origin == ITEM_GIVE_ORIGIN_QUEUE_SILENT && info->check_name == nullptr) {
+        note_queued_item_landed();
+    }
 
     const bool queuedCheck = info->origin == ITEM_GIVE_ORIGIN_QUEUE && info->check_name != nullptr;
     if (info->origin != ITEM_GIVE_ORIGIN_GAME && !queuedCheck) return;
@@ -901,15 +933,14 @@ void apply_remote_item(uint8_t item, uint8_t from) {
     if (item == dItemNo_UTAWA_HEART_e) {
 
         for (int i = 0; i < 5; ++i) {
-            svc_item->give_item(mod_ctx, nullptr, dItemNo_KAKERA_HEART_e, ITEM_GIVE_SILENT);
+            give_silent(dItemNo_KAKERA_HEART_e, false);
         }
 
         remove_local_heart_containers(from);
     } else if (!grant_equipment(item)) {
-        svc_item->give_item(mod_ctx, nullptr, item, ITEM_GIVE_SILENT);
-        if (!item_is_stackable(item) && !extra) {
-            s_invOwedSince[item] = s_invTick != 0 ? s_invTick : 1;
-        }
+        const bool owed = !item_is_stackable(item) && !extra;
+        give_silent(item, owed);
+        if (owed) s_invOwedSince[item] = s_invTick != 0 ? s_invTick : 1;
     }
 
     s_invExpectUntil[item] = s_invTick + 1200;
@@ -1126,6 +1157,88 @@ bool in_ordon(const char* stage) {
 
 bool teleport_in_progress();
 
+struct NearActor {
+    int name = -1;
+    float dist = 0.0f;
+};
+struct NearFind {
+    cXyz at;
+    NearActor best[3];
+};
+
+void* find_near(void* proc, void* data) {
+    auto* actor = static_cast<fopAc_ac_c*>(proc);
+    auto* f = static_cast<NearFind*>(data);
+    if (actor == nullptr || !fopAcM_IsActor(actor) || fopAcM_GetGroup(actor) == fopAc_PLAYER_e) return nullptr;
+    const float d = actor->current.pos.abs(f->at);
+    if (d > 1500.0f) return nullptr;
+    for (int i = 0; i < 3; ++i) {
+        if (f->best[i].name >= 0 && f->best[i].dist <= d) continue;
+        for (int k = 2; k > i; --k) f->best[k] = f->best[k - 1];
+        f->best[i] = NearActor{fopAcM_GetName(actor), d};
+        break;
+    }
+    return nullptr;
+}
+
+void log_hurt() {
+    static int s_lastLife = -1;
+    static uint32_t s_ticks = 0;
+    static uint32_t s_lastLog = 0;
+    static uint32_t s_hits[16] = {};
+    static int s_hitNext = 0;
+    ++s_ticks;
+    daAlink_c* alink = daAlink_getAlinkActorClass();
+    if (alink == nullptr || coop_on_title_screen()) {
+        s_lastLife = -1;
+        return;
+    }
+    const int life = dComIfGs_getLife();
+    const int was = s_lastLife;
+    s_lastLife = life;
+    if (was < 0 || life >= was) return;
+    s_hits[s_hitNext] = s_ticks;
+    s_hitNext = (s_hitNext + 1) % 16;
+    if (s_ticks - s_lastLog < 30) return;
+    s_lastLog = s_ticks;
+    int recent = 0;
+    for (uint32_t t : s_hits) {
+        if (t != 0 && s_ticks - t < 300) ++recent;
+    }
+    NearFind f;
+    f.at = alink->current.pos;
+    fopAcM_Search(find_near, &f);
+    coop_log::info("coop_mod: [HURT] {} -> {} at {:.0f},{:.0f},{:.0f} hits10s={} near {}@{:.0f} {}@{:.0f} {}@{:.0f}",
+        was, life, f.at.x, f.at.y, f.at.z, recent, f.best[0].name, f.best[0].dist, f.best[1].name,
+        f.best[1].dist, f.best[2].name, f.best[2].dist);
+}
+
+void log_events() {
+    static bool s_running = false;
+    static std::string s_last;
+    static int s_repeats = 0;
+    static uint32_t s_lastStart = 0;
+    static uint32_t s_ticks = 0;
+    ++s_ticks;
+    const bool running = dComIfGp_event_runCheck() != 0;
+    if (running == s_running) return;
+    s_running = running;
+    daAlink_c* alink = daAlink_getAlinkActorClass();
+    if (!running || alink == nullptr) return;
+    const char* name = dComIfGp_getPEvtManager()->getRunEventName();
+    fopAc_ac_c* partner = dComIfGp_getEvent()->getPt2();
+    const std::string now = (name != nullptr ? std::string(name) : std::string("-")) + "/" +
+        std::to_string(partner != nullptr ? static_cast<int>(fopAcM_GetName(partner)) : -1);
+    s_repeats = (now == s_last && s_ticks - s_lastStart < 1800) ? s_repeats + 1 : 0;
+    s_last = now;
+    s_lastStart = s_ticks;
+    coop_log::info("coop_mod: [EVENT] '{}' by actor {} mode {} at {:.0f},{:.0f},{:.0f}{}",
+        name != nullptr ? name : "-",
+        partner != nullptr ? static_cast<int>(fopAcM_GetName(partner)) : -1,
+        static_cast<int>(dComIfGp_getEvent()->getMode()), alink->current.pos.x, alink->current.pos.y,
+        alink->current.pos.z, s_repeats >= 2 ? " REPEATING" : "");
+}
+
 void catch_up_story() {
     static uint32_t s_calm = 0;
     static uint32_t s_lastAt = 0;
@@ -1229,6 +1342,22 @@ void log_state() {
 
 void send_presence() {
     MsgPresence msg{};
+    features_build_presence(&msg);
+
+    const uint32_t storyBits = joinsync_ready_to_share() ? shared_story_bits() : 0;
+    msg.storyBits = static_cast<uint8_t>(storyBits & 0xFF);
+    coop_net_send(kMsgPresence, &msg, sizeof(msg));
+    if (storyBits != 0) {
+        MsgSharedStory story{};
+        story.bits = storyBits;
+        coop_net_send(kMsgSharedStory, &story, sizeof(story));
+    }
+}
+
+}
+
+void features_build_presence(MsgPresence* out) {
+    MsgPresence msg{};
     copy_name(msg.name, features_local_name());
     daAlink_c* alink = daAlink_getAlinkActorClass();
     const char* stage = dComIfGp_getStartStageName();
@@ -1249,16 +1378,20 @@ void send_presence() {
         msg.life = dComIfGs_getLife();
         msg.maxLife = dComIfGs_getMaxLife();
     }
-
-    const uint32_t storyBits = joinsync_ready_to_share() ? shared_story_bits() : 0;
-    msg.storyBits = static_cast<uint8_t>(storyBits & 0xFF);
-    coop_net_send(kMsgPresence, &msg, sizeof(msg));
-    if (storyBits != 0) {
-        MsgSharedStory story{};
-        story.bits = storyBits;
-        coop_net_send(kMsgSharedStory, &story, sizeof(story));
-    }
+    *out = msg;
 }
+
+void features_build_skin_choices(MsgSkinChoices* out) {
+    SkinChoices choices;
+    skins_local_choices(&choices);
+    MsgSkinChoices msg{};
+    static_assert(sizeof(msg.name) == sizeof(choices.name), "slot count changed");
+    std::memcpy(msg.name, choices.name, sizeof(msg.name));
+    std::memcpy(msg.hash, choices.hash, sizeof(msg.hash));
+    *out = msg;
+}
+
+namespace {
 
 struct LifeGuess {
     bool on = false;
@@ -1272,6 +1405,8 @@ const uint32_t kLifeGuessTicks = 60;
 void announce_peer_once(uint8_t from) {
     if (from >= kCoopMaxPlayers || s_peerAnnounced[from] || !s_peers[from].present) return;
     s_peerAnnounced[from] = true;
+
+    if (global_slot_present(from)) return;
     toast_kind(kNotifyPlayers, sender_name(from) + " joined", "");
 }
 
@@ -1783,6 +1918,8 @@ void features_update() {
     {
         static uint32_t s_eponaTick = 0;
         log_state();
+        log_events();
+        log_hurt();
         if (++s_eponaTick % 60 == 0) {
             repair_early_epona();
             repair_rutela_graveyard();
@@ -1845,7 +1982,7 @@ void features_update() {
         if (id == coop_net_local_id()) continue;
         const CoopPeer& p = s_peers[i];
         bool visible = true;
-        if (connected && p.present) {
+        if ((connected || global_active()) && p.present) {
             visible = p.inGame && local_on_stage(p.stage);
         }
         puppet_hook_set_player_visible(id, visible);
@@ -1915,6 +2052,13 @@ void features_on_roster_changed() {
     if ((now & ~s_lastRoster) != 0) colors_resend();
     s_lastRoster = now;
     send_hello();
+}
+
+void features_global_forget(uint8_t slot) {
+    if (slot == 0 || slot >= kCoopMaxPlayers) return;
+    s_peers[slot] = CoopPeer{};
+    s_peerAnnounced[slot] = false;
+    colors_forget_player(slot);
 }
 
 void features_on_connected() {

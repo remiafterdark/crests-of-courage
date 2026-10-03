@@ -660,11 +660,6 @@ void diff_light_drop(dSv_info_c* info) {
     uint8_t set[32] = {};
     uint8_t clr[32] = {};
 
-    for (int i = 0; i < kLightDropCounts; ++i) {
-        set[i] = cur[i] > s_lightDrop.bytes[i]
-                     ? static_cast<uint8_t>(cur[i] - s_lightDrop.bytes[i])
-                     : 0;
-    }
     set[4] = cur[4];
     send_delta(s_base, kRegionLightDrop, -1, 0, kLightDropSize, set, clr);
     std::memcpy(s_lightDrop.bytes, cur, kLightDropSize);
@@ -1213,11 +1208,6 @@ void republish_globals(dSv_info_c* info) {
     uint8_t set[32] = {};
     uint8_t clr[32] = {};
 
-    for (int i = 0; i < kLightDropCounts; ++i) {
-        set[i] = cur[i] > s_lightDrop.bytes[i]
-                     ? static_cast<uint8_t>(cur[i] - s_lightDrop.bytes[i])
-                     : 0;
-    }
     set[4] = cur[4];
     send_delta(s_base, kRegionLightDrop, -1, 0, kLightDropSize, set, clr);
     std::memcpy(s_lightDrop.bytes, cur, kLightDropSize);
@@ -2636,12 +2626,6 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
         if (msg.size != kLightDropSize) return;
         auto* cur = reinterpret_cast<uint8_t*>(&info->getSavedata().getPlayer().getLightDrop());
 
-        for (int i = 0; i < kLightDropCounts; ++i) {
-            const int sum = cur[i] + msg.set[i];
-            const uint8_t now = static_cast<uint8_t>(sum > 255 ? 255 : sum);
-            lift_light_drop_baseline(i, now - cur[i]);
-            cur[i] = now;
-        }
         cur[4] = static_cast<uint8_t>(cur[4] | msg.set[4]);
         if (s_lightDrop.have) s_lightDrop.bytes[4] = static_cast<uint8_t>(s_lightDrop.bytes[4] | msg.set[4]);
         break;

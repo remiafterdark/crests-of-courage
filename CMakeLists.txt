@@ -60,11 +60,14 @@ add_mod(coop_mod
              src/horses.cpp
              src/report.cpp
              src/lan.cpp
+             src/global.cpp
+             src/chat.cpp
+             src/chat_keys.cpp
     MOD_JSON mod.json
 )
 
 if (WIN32)
-    target_link_libraries(coop_mod PRIVATE ws2_32)
+    target_link_libraries(coop_mod PRIVATE ws2_32 user32)
 endif ()
 
 if (APPLE)

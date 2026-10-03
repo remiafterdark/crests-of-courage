@@ -116,10 +116,18 @@ const joiner = await open(`${SERVER}/join/${welcome.code.toLowerCase()}`);
 const jw = await joiner.next();
 const joinMapped = await stun(joinUdp, jw.stun);
 joiner.send(JSON.stringify({ op: "hello", v: 51, ep: joinMapped, port: joinUdp.address().port }));
-const [toHost, toJoiner] = await Promise.all([host.next(), joiner.next()]);
+
+const hostPeer = async () => {
+  for (;;) {
+    const m = await host.next();
+    if (m.op === "peer") return m;
+  }
+};
+const [toHost, toJoiner] = await Promise.all([hostPeer(), joiner.next()]);
 console.log("host introduced to:", toHost);
 console.log("joiner introduced to:", toJoiner);
 if (toHost.token !== toJoiner.token) throw new Error("tokens differ");
+if (!/^[0-9a-f]{64}$/.test(toHost.key) || toHost.key !== toJoiner.key) throw new Error("keys differ");
 
 const [a, b] = await Promise.all([
   punch(hostUdp, toHost.token, toHost.eps, "host"),

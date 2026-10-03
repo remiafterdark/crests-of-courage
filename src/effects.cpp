@@ -513,6 +513,7 @@ void flush_queues() {
         buffer[0] = static_cast<uint8_t>(s_soundCount);
         std::memcpy(buffer + 1, s_sounds, s_soundCount * sizeof(MsgSoundEntry));
         coop_net_send(kMsgSounds, buffer, 1 + s_soundCount * sizeof(MsgSoundEntry));
+        global_send_sounds(buffer, 1 + s_soundCount * sizeof(MsgSoundEntry));
         s_soundCount = 0;
     }
 
@@ -523,6 +524,7 @@ void flush_queues() {
                                        : s_particleEmitters[i];
         if (em != nullptr) capture_emitter_state(e, em);
     }
+    global_send_particles(s_particles, s_particleCount);
     int sent = 0;
     while (sent < s_particleCount) {
         int n = s_particleCount - sent;
@@ -636,7 +638,8 @@ bool local_in_cutscene() {
 
 void fx_update() {
     ++s_tick;
-    const bool connected = coop_net_connected();
+
+    const bool connected = coop_net_connected() || global_active();
     const CoopFeatureVars& vars = features_vars();
 
     const bool inCutscene = local_in_cutscene();

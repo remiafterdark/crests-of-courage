@@ -468,7 +468,7 @@ void draw_world_hearts(J2DPane* realGroup, dMeter2Draw_c* real, J2DGrafContext* 
 
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         const uint8_t id = static_cast<uint8_t>(i);
-        if (id == coop_net_local_id() || !coop_net_player_present(id)) continue;
+        if (id == coop_net_local_id() || (!coop_net_player_present(id) && !global_slot_present(id))) continue;
         const CoopPeer& p = features_peer_of(id);
         if (!p.present || !p.lifeKnown || p.maxLife < 5) continue;
         f32 u = 0.0f, v = 0.0f, cell = 0.0f, camDist = 0.0f;
@@ -533,7 +533,7 @@ void draw_squad() {
     const int myRoom = me != nullptr ? fopAcM_GetRoomNo(me) : -1;
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         const uint8_t id = static_cast<uint8_t>(i);
-        if (id == coop_net_local_id() || !coop_net_player_present(id)) continue;
+        if (id == coop_net_local_id() || (!coop_net_player_present(id) && !global_slot_present(id))) continue;
         const CoopPeer& p = features_peer_of(id);
         if (!p.present || !p.lifeKnown) continue;
         SquadMember& m = members[count++];
@@ -814,6 +814,47 @@ public:
 };
 SquadHudDlst s_dlst;
 
+}
+
+void grow_visible_bounds(J2DPane* pane, JGeometry::TBox2<f32>& out, bool& any) {
+    if (pane == nullptr || !pane->isVisible()) return;
+    const JGeometry::TBox2<f32>& box = pane->getGlbBounds();
+    if (box.f.y > box.i.y && box.f.x > box.i.x && std::isfinite(box.i.y) && std::isfinite(box.f.y)) {
+        if (!any) {
+            out = box;
+            any = true;
+        } else {
+            out.i.x = std::min(out.i.x, box.i.x);
+            out.i.y = std::min(out.i.y, box.i.y);
+            out.f.x = std::max(out.f.x, box.f.x);
+            out.f.y = std::max(out.f.y, box.f.y);
+        }
+    }
+    for (JSUTree<J2DPane>* child = pane->getFirstChild(); child != nullptr; child = child->getNextChild()) {
+        grow_visible_bounds(child->getObject(), out, any);
+    }
+}
+
+bool visible_bounds(CPaneMgr* mgr, JGeometry::TBox2<f32>* out) {
+    if (mgr == nullptr || mgr->getPanePtr() == nullptr || mgr->getAlphaRate() <= 0.0f) return false;
+    bool any = false;
+    grow_visible_bounds(mgr->getPanePtr(), *out, any);
+    return any;
+}
+
+bool squad_hud_corner(float* crossTop, float* heartsBottom) {
+    dMeter2_c* meter = live_meter();
+    if (meter == nullptr || meter->mpMeterDraw == nullptr) return false;
+    JGeometry::TBox2<f32> box;
+    bool cross = false;
+    if (visible_bounds(meter->mpMeterDraw->mpButtonCrossParent, &box)) {
+        *crossTop = box.i.y;
+        cross = true;
+    }
+    if (visible_bounds(meter->mpMeterDraw->mpLifeParent, &box)) {
+        *heartsBottom = box.f.y;
+    }
+    return cross;
 }
 
 void squad_hud_register_vars() {

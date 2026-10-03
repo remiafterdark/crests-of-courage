@@ -63,7 +63,7 @@ globalThis.WebSocketPair = class {
 };
 globalThis.Response = ShimResponse;
 
-const { default: worker, Room } = await import("./src/index.js");
+const { default: worker, Room, Global } = await import("./src/index.js");
 
 class RoomContext {
   constructor() {
@@ -79,7 +79,21 @@ class RoomContext {
 }
 
 const rooms = new Map();
+let lobby = null;
 const env = {
+  GLOBAL: {
+    idFromName: (name) => name,
+    get() {
+      if (!lobby) {
+        const ctx = new RoomContext();
+        const store = new Map();
+        ctx.storage = { get: async (k) => store.get(k), put: async (k, v) => void store.set(k, v) };
+        lobby = new Global(ctx, {});
+        lobby.__ctx = ctx;
+      }
+      return { fetch: (req) => lobby.fetch(req).then((r) => ((r.__room = lobby), r)) };
+    },
+  },
   ROOMS: {
     idFromName: (name) => name,
     get(name) {

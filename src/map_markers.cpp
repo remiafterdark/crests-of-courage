@@ -142,7 +142,7 @@ void to_map_space(int room, f32 x, f32 y, f32 z, s16 angle, Spot* out) {
 }
 
 bool other_player(uint8_t id) {
-    return id != coop_net_local_id() && coop_net_player_present(id);
+    return id != coop_net_local_id() && (coop_net_player_present(id) || global_slot_present(id));
 }
 
 bool spot_of(uint8_t id, Spot* out) {
@@ -401,6 +401,9 @@ struct Rect {
 };
 Rect s_minimapRect;
 
+f32 s_minimapTop = 0.0f;
+std::chrono::steady_clock::time_point s_minimapSeen;
+
 HookAction on_picture_draw_pre(ModContext*, void* args, void*, void*) {
     if (s_meterDrawing == nullptr) return HOOK_CONTINUE;
     if (mods::arg<J2DPicture*>(args, 0) != s_meterDrawing->mMapJ2DPicture) return HOOK_CONTINUE;
@@ -423,6 +426,10 @@ void on_meter_map_draw_post(ModContext*, void* args, void*, void*) {
     auto* self = mods::arg<dMeterMap_c*>(args, 0);
     if (!s_minimapRect.valid) return;
     if (self == nullptr || self->mMap == nullptr || !self->mMap->isDraw()) return;
+    if (self->mMapAlpha != 0) {
+        s_minimapTop = s_minimapRect.y;
+        s_minimapSeen = std::chrono::steady_clock::now();
+    }
     if (!coop_net_connected() || !cfg_bool(s_minimapVar, false)) return;
     dMap_c* map = self->mMap;
     const f32 spanX = map->field_0x8;
@@ -520,6 +527,12 @@ ConfigVarHandle register_int(const char* name, int64_t fallback) {
     return svc_config->register_var(mod_ctx, &desc, &handle) == MOD_OK ? handle : 0;
 }
 
+}
+
+bool map_markers_minimap_top(float* top) {
+    if (std::chrono::steady_clock::now() - s_minimapSeen > std::chrono::milliseconds(150)) return false;
+    *top = s_minimapTop;
+    return true;
 }
 
 void map_markers_init() {
