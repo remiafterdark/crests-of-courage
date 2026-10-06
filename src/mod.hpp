@@ -486,6 +486,7 @@ void colors_attach_puppet_model(J3DModel* model, uint8_t owner);
 void colors_protect_puppet_model(J3DModel* model, uint8_t owner);
 
 void coop_crash_trail(const char* step);
+std::string coop_crash_trail_path();
 
 bool private_arc_request(const char* name);
 class JKRHeap* private_arc_heap_peek();
@@ -689,6 +690,10 @@ void world_register_vars();
 void world_update();
 void world_on_connected();
 bool world_hold_story_flag(uint16_t flag);
+bool features_load_is_cutscene();
+void softlocks_update();
+void joinsync_catch_up(uint8_t player);
+void joinsync_on_catch_up(uint8_t type, const uint8_t* payload, size_t size, uint8_t from);
 void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t from);
 ConfigVarHandle world_dungeon_var();
 ConfigVarHandle world_story_var();
@@ -753,6 +758,7 @@ bool upnp_ready();
 
 uint32_t coop_udp_reopen_count();
 std::string coop_lan_address();
+std::string coop_tailscale_address();
 std::string upnp_external_address();
 
 std::string upnp_status();
@@ -796,6 +802,13 @@ void global_update();
 void global_shutdown();
 bool global_active();
 bool global_slot_present(uint8_t slot);
+ConfigVarHandle global_pvp_var();
+ConfigVarHandle global_pvp_only_var();
+bool global_pvp_on();
+bool global_slot_pvp(uint8_t slot);
+void global_send_pvp_hit(uint8_t slot, const MsgPvpHit& hit);
+bool pvp_with(uint8_t player);
+bool pvp_live();
 std::string global_status();
 void global_on_ws_event(const mods::ws::Event& event);
 bool global_on_datagram(const std::string& from, const uint8_t* data, size_t size);
@@ -822,6 +835,7 @@ ConfigVarHandle chat_show_var();
 ConfigVarHandle chat_size_var();
 ConfigVarHandle chat_fade_var();
 void chat_on_message(uint32_t id, const std::string& tag, const std::string& name, const std::string& text);
+void chat_on_lobby_message(uint8_t from, const uint8_t* payload, size_t size);
 void chat_on_rename(uint32_t id, const std::string& name);
 void chat_note(const std::string& text);
 void chat_open();

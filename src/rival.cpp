@@ -2,6 +2,7 @@
 
 #include "mod.hpp"
 #include "net/messages.hpp"
+#include "net/protocol.hpp"
 #include "print.hpp"
 
 #include "mods/svc/actor.h"
@@ -115,6 +116,29 @@ bool is_rival_hitter(fopAc_ac_c* hitter) {
     return true;
 }
 
+void send_hit(const MsgPvpHit& msg) {
+    if (coop_net_connected()) {
+        coop_net_send(kMsgPvpHit, &msg, sizeof(msg));
+    } else {
+        global_send_pvp_hit(msg.to, msg);
+    }
+}
+
+int predicted_damage(u8 player, const MsgPvpHit& msg) {
+    const u8 combat = puppet_hook_combat_of(player);
+    if ((combat & kCombatGuard) != 0) {
+        f32 x = 0.0f, y = 0.0f, z = 0.0f;
+        short angle = 0;
+        if (puppet_hook_get_pose_of(player, &x, &y, &z, &angle, nullptr, nullptr)) {
+            const cXyz at(x, y, z);
+            const cXyz from(msg.from[0], msg.from[1], msg.from[2]);
+            const s16 diff = static_cast<s16>(cLib_targetAngleY(&at, &from) - angle);
+            if (diff > -0x3000 && diff < 0x3000) return 0;
+        }
+    }
+    return pvp_predict_damage(msg, combat);
+}
+
 void send_to_rival(u8 player, dCcD_GObjInf& at, u8 kind, const cXyz& from, bool blocked, u8 cut) {
     MsgPvpHit msg{};
     msg.to = player;
@@ -126,11 +150,11 @@ void send_to_rival(u8 player, dCcD_GObjInf& at, u8 kind, const cXyz& from, bool 
     msg.se = at.GetAtSe();
     msg.blocked = blocked ? 1 : 0;
     msg.cut = cut;
-    features_guess_damage(player, pvp_predict_damage(msg, puppet_hook_combat_of(player)));
     msg.from[0] = from.x;
     msg.from[1] = from.y;
     msg.from[2] = from.z;
-    coop_net_send(kMsgPvpHit, &msg, sizeof(msg));
+    features_guess_damage(player, predicted_damage(player, msg));
+    send_hit(msg);
 }
 
 cPhs_Step daCoopRival_c::create() {
@@ -168,7 +192,7 @@ int daCoopRival_c::Execute() {
     daAlink_c* alink = daAlink_getAlinkActorClass();
     f32 x, y, z;
     short angle = 0;
-    const bool pvp = pvp_active();
+    const bool pvp = pvp_with(mPlayer);
     const u8 combat = puppet_hook_combat_of(mPlayer);
     const bool anchor = (combat & kCombatOnPeahat) != 0;
     if ((!pvp && !anchor) || alink == nullptr ||
@@ -222,7 +246,7 @@ int daCoopRival_c::Execute() {
         pin.to = mPlayer;
         pin.kind = kPvpPin;
         pin.atp = 0;
-        coop_net_send(kMsgPvpHit, &pin, sizeof(pin));
+        send_hit(pin);
         mNextPin = s_frame + 4;
         mPinning = true;
     } else if (!finishing && mPinning) {
@@ -230,7 +254,7 @@ int daCoopRival_c::Execute() {
         release.to = mPlayer;
         release.kind = kPvpPin;
         release.atp = kPinReleaseFrames;
-        coop_net_send(kMsgPvpHit, &release, sizeof(release));
+        send_hit(release);
         mPinning = false;
     }
 
@@ -244,11 +268,11 @@ int daCoopRival_c::Execute() {
         msg.spl = dCcG_At_Spl_UNK_1;
         msg.se = dCcD_SE_SWORD_STAB;
         msg.cut = daPy_py_c::CUT_TYPE_DOWN;
-        features_guess_damage(mPlayer, pvp_predict_damage(msg, puppet_hook_combat_of(mPlayer)));
         msg.from[0] = alink->current.pos.x;
         msg.from[1] = alink->current.pos.y;
         msg.from[2] = alink->current.pos.z;
-        coop_net_send(kMsgPvpHit, &msg, sizeof(msg));
+        features_guess_damage(mPlayer, predicted_damage(mPlayer, msg));
+        send_hit(msg);
         mNoFinishUntil = s_frame + kEndingBlowCooldown;
         coop_log::info("coop_mod: [PVP] ending blow on {}", mPlayer);
     }
@@ -320,7 +344,7 @@ int daCoopRival_c::Execute() {
 
     mBody.SetTgType(pvp ? kTakesEverything : AT_TYPE_HOOKSHOT);
 
-    if (s_frame < mInvulnUntil && (combat & kCombatDown) == 0) {
+    if ((s_frame < mInvulnUntil && (combat & kCombatDown) == 0) || (combat & kSnapNoHits) != 0) {
         mBody.OffTgSetBit();
         mBody.ClrTgHit();
     } else {
@@ -451,8 +475,8 @@ void rival_update() {
 
     const bool can = alink != nullptr && !dComIfGp_isEnableNextStage() &&
                      !sumo_hides_equipment(coop_net_local_id());
-    const bool on = pvp_active() && can;
     for (u8 id = 0; id < kCoopMaxPlayers; ++id) {
+        const bool on = pvp_with(id) && can;
         const bool here = id != coop_net_local_id() &&
                           puppet_hook_get_pose_of(id, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
         const bool anchor = here && (puppet_hook_combat_of(id) & kCombatOnPeahat) != 0;
@@ -496,7 +520,7 @@ bool rival_can_mortal_draw(fopAc_ac_c* target) {
 }
 
 bool rival_hooked_pos(uint8_t player, cXyz* pos) {
-    if (player >= kCoopMaxPlayers || !pvp_active()) return false;
+    if (player >= kCoopMaxPlayers || !pvp_with(player)) return false;
     daCoopRival_c* rival = rival_actor(player);
     if (rival == nullptr || fopAcM_checkHookCarryNow(rival) == 0) return false;
     if (fopAcM_CheckStatus(rival, fopAcStts_UNK_0x200000_e)) return false;

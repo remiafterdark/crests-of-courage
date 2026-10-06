@@ -39,6 +39,7 @@ enum GlobalType : uint8_t {
     kGlobalMidna = 7,
     kGlobalSounds = 8,
     kGlobalParticles = 9,
+    kGlobalPvpHit = 10,
 };
 
 const uint64_t kPunchForMs = 10000;
@@ -95,6 +96,9 @@ struct Peer {
     uint32_t lastMidnaTick = 0;
     uint32_t lastMidnaSeq = 0;
     bool haveMidnaSeq = false;
+
+    bool pvp = false;
+    bool hidden = false;
 };
 
 Peer s_peers[kCoopMaxPlayers];
@@ -121,6 +125,8 @@ uint64_t s_retryDelayMs = 5000;
 std::string s_status = "Off";
 uint32_t s_tick = 0;
 ConfigVarHandle s_enabledVar = 0;
+ConfigVarHandle s_pvpVar = 0;
+ConfigVarHandle s_pvpOnlyVar = 0;
 
 bool enabled() {
     return cfg_bool(s_enabledVar, false);
@@ -385,6 +391,7 @@ bool clean_presence(MsgPresence& m) {
     clean_word(m.stage, sizeof(m.stage));
     if (!sane_float(m.x) || !sane_float(m.y) || !sane_float(m.z)) return false;
     m.storyBits = 0;
+    m.flags &= 1;
     if (m.maxLife > 400) m.maxLife = 400;
     if (m.life > m.maxLife * 4 / 5 + 4) m.life = static_cast<uint16_t>(m.maxLife * 4 / 5);
     return true;
@@ -433,6 +440,8 @@ void on_sealed(int slot, const uint8_t* data, size_t size) {
     const uint8_t* payload = data + 1;
     const size_t len = size - 1;
     Peer& p = s_peers[slot];
+
+    if (p.hidden && (type == kGlobalMidna || type == kGlobalSounds || type == kGlobalParticles)) return;
     switch (type) {
     case kGlobalPresence: {
         if (len != sizeof(MsgPresence)) return;
@@ -444,12 +453,16 @@ void on_sealed(int slot, const uint8_t* data, size_t size) {
             std::memcpy(name, m.name, sizeof(m.name));
             p.name = name;
         }
+        if (p.pvp != ((m.flags & 1) != 0)) {
+            p.pvp = (m.flags & 1) != 0;
+            coop_log::info("coop_mod: [GLOBAL] player {} PvP {}", p.id, p.pvp ? "on" : "off");
+        }
         features_on_message(kMsgPresence, reinterpret_cast<const uint8_t*>(&m), sizeof(m),
             static_cast<uint8_t>(slot));
         break;
     }
     case kGlobalSnapshot: {
-        if (len != sizeof(PlayerSnapshot)) return;
+        if (len != sizeof(PlayerSnapshot) || p.hidden) return;
         PlayerSnapshot s;
         std::memcpy(&s, payload, sizeof(s));
         if (!clean_snapshot(s)) return;
@@ -482,7 +495,7 @@ void on_sealed(int slot, const uint8_t* data, size_t size) {
         features_on_message(kMsgColors, payload, len, static_cast<uint8_t>(slot));
         break;
     case kGlobalHorse: {
-        if (len != sizeof(HorseSnapshot)) return;
+        if (len != sizeof(HorseSnapshot) || p.hidden) return;
         HorseSnapshot h;
         std::memcpy(&h, payload, sizeof(h));
         if (h.magic != kHorseSnapshotMagic) return;
@@ -556,6 +569,18 @@ void on_sealed(int slot, const uint8_t* data, size_t size) {
             if (!clean_particle(e)) return;
         }
         fx_on_particles(payload, len, static_cast<uint8_t>(slot));
+        break;
+    }
+    case kGlobalPvpHit: {
+
+        if (len != sizeof(MsgPvpHit) || !p.pvp || p.hidden || !global_pvp_on()) return;
+        MsgPvpHit hit;
+        std::memcpy(&hit, payload, sizeof(hit));
+        if (hit.kind > kPvpPin || hit.atp > 40 || hit.spl > 16 || hit.mtrl > 16) return;
+        if (!sane_float(hit.from[0]) || !sane_float(hit.from[1]) || !sane_float(hit.from[2])) return;
+        hit.to = coop_net_local_id();
+        pvp_on_message(kMsgPvpHit, reinterpret_cast<const uint8_t*>(&hit), sizeof(hit),
+            static_cast<uint8_t>(slot));
         break;
     }
     case kGlobalBye:
@@ -750,6 +775,16 @@ void global_register_vars() {
     tags.type = CONFIG_VAR_BOOL;
     tags.default_bool = true;
     if (svc_config->register_var(mod_ctx, &tags, &s_tagsVar) != MOD_OK) s_tagsVar = 0;
+    ConfigVarDesc pvp = CONFIG_VAR_DESC_INIT;
+    pvp.name = "hyrule_online_pvp";
+    pvp.type = CONFIG_VAR_BOOL;
+    pvp.default_bool = false;
+    if (svc_config->register_var(mod_ctx, &pvp, &s_pvpVar) != MOD_OK) s_pvpVar = 0;
+    ConfigVarDesc pvpOnly = CONFIG_VAR_DESC_INIT;
+    pvpOnly.name = "hyrule_online_pvp_only";
+    pvpOnly.type = CONFIG_VAR_BOOL;
+    pvpOnly.default_bool = false;
+    if (svc_config->register_var(mod_ctx, &pvpOnly, &s_pvpOnlyVar) != MOD_OK) s_pvpOnlyVar = 0;
     ConfigVarDesc dist = CONFIG_VAR_DESC_INIT;
     dist.name = "hyrule_online_nametag_distance";
     dist.type = CONFIG_VAR_INT;
@@ -790,6 +825,8 @@ void global_set_blocked(const GlobalPlayer& who, bool on) {
             if (s.tag == who.tag) send_json("{\"op\":\"block\",\"id\":" + std::to_string(s.id) + "}");
         }
         chat_forget_player(who.tag);
+
+        chat_note("Blocked " + who.name + ". Undo it in Co-op > Hyrule Online > Players.");
         coop_log::info("coop_mod: [GLOBAL] blocked {}", who.tag);
         return;
     }
@@ -818,7 +855,29 @@ std::vector<GlobalPlayer> global_blocked_list() {
 }
 
 bool global_slot_present(uint8_t slot) {
-    return slot > 0 && slot < kCoopMaxPlayers && s_peers[slot].used && s_peers[slot].reached;
+    return slot > 0 && slot < kCoopMaxPlayers && s_peers[slot].used && s_peers[slot].reached &&
+           !s_peers[slot].hidden;
+}
+
+ConfigVarHandle global_pvp_var() {
+    return s_pvpVar;
+}
+
+ConfigVarHandle global_pvp_only_var() {
+    return s_pvpOnlyVar;
+}
+
+bool global_pvp_on() {
+    return global_active() && cfg_bool(s_pvpVar, false);
+}
+
+bool global_slot_pvp(uint8_t slot) {
+    return global_slot_present(slot) && s_peers[slot].pvp;
+}
+
+void global_send_pvp_hit(uint8_t slot, const MsgPvpHit& hit) {
+    if (!global_pvp_on() || !global_slot_pvp(slot)) return;
+    send_to(s_peers[slot], kGlobalPvpHit, &hit, sizeof(hit));
 }
 
 std::string global_status() {
@@ -885,6 +944,7 @@ bool global_on_datagram(const std::string& from, const uint8_t* data, size_t siz
                 coop_log::info("coop_mod: [GLOBAL] reached player {}", p.id);
                 MsgPresence presence{};
                 features_build_presence(&presence);
+                presence.flags = global_pvp_on() ? 1 : 0;
                 send_to(p, kGlobalPresence, &presence, sizeof(presence));
                 send_looks(p);
             }
@@ -1098,7 +1158,14 @@ void global_update() {
         if (s_tick % 30 == static_cast<uint32_t>(i)) {
             MsgPresence presence{};
             features_build_presence(&presence);
+            presence.flags = global_pvp_on() ? 1 : 0;
             send_to(p, kGlobalPresence, &presence, sizeof(presence));
+        }
+
+        const bool hide = cfg_bool(s_pvpOnlyVar, false) && !p.pvp;
+        if (hide != p.hidden) {
+            p.hidden = hide;
+            if (hide) puppet_hook_release_player(static_cast<uint8_t>(i));
         }
         if (s_tick % 300 == static_cast<uint32_t>(i) * 7) send_looks(p);
     }

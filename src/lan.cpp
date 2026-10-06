@@ -12,19 +12,21 @@
 #include <unistd.h>
 #endif
 
-std::string coop_lan_address() {
+namespace {
+
+uint32_t route_source(uint32_t towards) {
 #if defined(_WIN32)
     const SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (s == INVALID_SOCKET) return "";
+    if (s == INVALID_SOCKET) return 0;
 #else
     const int s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (s < 0) return "";
+    if (s < 0) return 0;
 #endif
-    std::string out;
+    uint32_t out = 0;
     sockaddr_in to{};
     to.sin_family = AF_INET;
     to.sin_port = htons(53);
-    to.sin_addr.s_addr = htonl(0x08080808u);
+    to.sin_addr.s_addr = htonl(towards);
     if (connect(s, reinterpret_cast<const sockaddr*>(&to), sizeof(to)) == 0) {
         sockaddr_in me{};
 #if defined(_WIN32)
@@ -32,16 +34,7 @@ std::string coop_lan_address() {
 #else
         socklen_t len = sizeof(me);
 #endif
-        if (getsockname(s, reinterpret_cast<sockaddr*>(&me), &len) == 0) {
-            const uint32_t ip = ntohl(me.sin_addr.s_addr);
-            const uint32_t a = ip >> 24;
-            const uint32_t b = (ip >> 16) & 0xFF;
-
-            if (a == 10 || (a == 192 && b == 168) || (a == 172 && b >= 16 && b <= 31)) {
-                out = std::to_string(a) + "." + std::to_string(b) + "." +
-                      std::to_string((ip >> 8) & 0xFF) + "." + std::to_string(ip & 0xFF);
-            }
-        }
+        if (getsockname(s, reinterpret_cast<sockaddr*>(&me), &len) == 0) out = ntohl(me.sin_addr.s_addr);
     }
 #if defined(_WIN32)
     closesocket(s);
@@ -49,5 +42,27 @@ std::string coop_lan_address() {
     close(s);
 #endif
     return out;
+}
+
+std::string dotted(uint32_t ip) {
+    return std::to_string(ip >> 24) + "." + std::to_string((ip >> 16) & 0xFF) + "." +
+           std::to_string((ip >> 8) & 0xFF) + "." + std::to_string(ip & 0xFF);
+}
+
+}
+
+std::string coop_lan_address() {
+    const uint32_t ip = route_source(0x08080808u);
+    const uint32_t a = ip >> 24;
+    const uint32_t b = (ip >> 16) & 0xFF;
+
+    if (a == 10 || (a == 192 && b == 168) || (a == 172 && b >= 16 && b <= 31)) return dotted(ip);
+    return "";
+}
+
+std::string coop_tailscale_address() {
+    const uint32_t ip = route_source(0x64646464u);
+    if ((ip >> 24) == 100 && ((ip >> 16) & 0xC0) == 64) return dotted(ip);
+    return "";
 }
 

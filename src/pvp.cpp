@@ -2,6 +2,7 @@
 
 #include "mod.hpp"
 #include "net/messages.hpp"
+#include "net/protocol.hpp"
 
 #include "mods/service.hpp"
 #include "mods/svc/config.h"
@@ -44,6 +45,7 @@ uint16_t local_damage_percent() {
 }
 
 uint16_t effective_damage_percent() {
+    if (!coop_net_connected()) return 100;
     return coop_net_is_host() ? local_damage_percent() : s_hostDamagePercent;
 }
 
@@ -172,7 +174,7 @@ const u32 kPinMax = 150;
 
 void apply_hit(const MsgPvpHit& hit) {
     daAlink_c* alink = daAlink_getAlinkActorClass();
-    if (alink == nullptr || !pvp_active()) return;
+    if (alink == nullptr || !pvp_live()) return;
     if (dComIfGp_event_runCheck()) return;
 
     if (sumo_hides_equipment(coop_net_local_id())) return;
@@ -276,7 +278,8 @@ void send_state() {
 }
 
 int pvp_predict_damage(const MsgPvpHit& hit, uint8_t combat) {
-    if (!pvp_active() || hit.kind != kPvpHit) return 0;
+    if (!pvp_live() || hit.kind != kPvpHit) return 0;
+    if ((combat & kSnapNoHits) != 0) return 0;
     const HitPower power = hit_power(hit);
     if ((combat & 2) != 0) return power.skill != nullptr ? power.dmg : 0;
     if ((combat & 4) != 0) return 0;
@@ -309,13 +312,13 @@ ConfigVarHandle pvp_damage_var() { return s_damageVar; }
 ConfigVarHandle pvp_lock_on_var() { return s_lockOnVar; }
 
 bool pvp_lock_on() {
-    return pvp_active() && cfg_bool(s_lockOnVar, true);
+    return pvp_live() && cfg_bool(s_lockOnVar, true);
 }
 
 void pvp_after_player(daAlink_c* alink) {
     trim_invincibility(alink);
     if (!s_pull.active) return;
-    if (alink == nullptr || !pvp_active() || dComIfGp_event_runCheck() || ++s_pull.frames > kPullMaxFrames) {
+    if (alink == nullptr || !pvp_live() || dComIfGp_event_runCheck() || ++s_pull.frames > kPullMaxFrames) {
         s_pull.active = false;
         return;
     }
@@ -338,6 +341,15 @@ void pvp_after_player(daAlink_c* alink) {
 bool pvp_active() {
     if (!coop_net_connected()) return false;
     return coop_net_is_host() ? cfg_bool(s_enabledVar, false) : s_hostEnabled;
+}
+
+bool pvp_with(uint8_t player) {
+    if (coop_net_connected()) return pvp_active();
+    return global_pvp_on() && global_slot_pvp(player);
+}
+
+bool pvp_live() {
+    return pvp_active() || global_pvp_on();
 }
 
 void pvp_update() {
@@ -397,7 +409,7 @@ void pvp_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t f
         if (size < sizeof(MsgPvpHit)) return;
         MsgPvpHit msg;
         std::memcpy(&msg, payload, sizeof(msg));
-        if (msg.to != coop_net_local_id() || !pvp_active()) return;
+        if (msg.to != coop_net_local_id() || !pvp_with(from)) return;
         if (msg.kind == kPvpPin) {
             daAlink_c* me = daAlink_getAlinkActorClass();
             if (me != nullptr && me->checkCameraLargeDamage()) {

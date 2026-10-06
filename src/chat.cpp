@@ -3,6 +3,8 @@
 #include "mod.hpp"
 #include "print.hpp"
 #include "util.hpp"
+#include "net/messages.hpp"
+#include "net/protocol.hpp"
 
 #include "mods/svc/hook.hpp"
 #include "mods/svc/ui.h"
@@ -55,6 +57,9 @@ std::deque<Line> s_lines;
 const size_t kLinesKept = 40;
 const size_t kChatMax = 100;
 
+const uint32_t kLobbyId = 0x80000000u;
+bool s_toldHow = false;
+
 ConfigVarHandle s_showVar = 0;
 ConfigVarHandle s_sizeVar = 0;
 ConfigVarHandle s_fadeVar = 0;
@@ -73,11 +78,27 @@ void push(Line line) {
     while (s_lines.size() > kLinesKept) s_lines.pop_front();
 }
 
+bool chat_live() {
+    return global_active() || coop_net_connected();
+}
+
 void send(std::string text) {
     while (!text.empty() && text.back() == ' ') text.pop_back();
     while (!text.empty() && text.front() == ' ') text.erase(text.begin());
     if (text.empty()) return;
     if (text.size() > kChatMax) text.resize(kChatMax);
+    if (coop_net_connected()) {
+
+        static Clock::time_point s_last{};
+        if (Clock::now() - s_last < std::chrono::seconds(2)) {
+            chat_note("Slow down a little.");
+            return;
+        }
+        s_last = Clock::now();
+        coop_net_send(kMsgChat, text.data(), text.size());
+        push(Line{kLobbyId + coop_net_local_id(), "", features_local_name(), text, Clock::now()});
+        return;
+    }
     if (!global_send_chat(text)) chat_note("Hyrule Online isn't connected.");
 }
 
@@ -117,7 +138,7 @@ ModResult build_tab(ModContext*, UiWindowHandle, UiElementHandle pane, UiElement
 
     int n = 0;
     for (auto it = s_lines.rbegin(); it != s_lines.rend() && n < 5; ++it) {
-        if (it->name.empty() || it->id == global_my_id() || it->tag.empty()) continue;
+        if (it->name.empty() || it->id == global_my_id() || it->tag.empty() || it->id >= kLobbyId) continue;
         bool listed = false;
         for (int k = 0; k < n; ++k) listed = listed || s_blockTargets[k].tag == it->tag;
         if (listed || global_blocked(it->tag)) continue;
@@ -302,13 +323,25 @@ void chat_on_rename(uint32_t id, const std::string& name) {
     }
 }
 
+void chat_on_lobby_message(uint8_t from, const uint8_t* payload, size_t size) {
+    if (payload == nullptr || size == 0 || from >= kCoopMaxPlayers) return;
+    std::string text;
+    for (size_t i = 0; i < size && i < kChatMax; ++i) {
+        const char c = static_cast<char>(payload[i]);
+        text.push_back(c >= 0x20 && c < 0x7F ? c : ' ');
+    }
+    const CoopPeer& peer = features_peer_of(from);
+    const std::string name = peer.name.empty() ? "Player " + std::to_string(from + 1) : peer.name;
+    push(Line{kLobbyId + from, "", name, text, Clock::now()});
+}
+
 void chat_note(const std::string& text) {
     push(Line{0, "", "", text, Clock::now()});
 }
 
 void chat_open() {
-    if (!global_active()) {
-        features_toast("Chat", "Turn on Hyrule Online first.");
+    if (!chat_live()) {
+        features_toast("Chat", "Join a co-op session or turn on Hyrule Online first.");
         return;
     }
     open_window();
@@ -319,9 +352,14 @@ void chat_update() {
         s_closeWindow = false;
         if (s_window != 0) svc_ui->window_close(mod_ctx, s_window);
     }
-    if (!global_active() || daAlink_getAlinkActorClass() == nullptr) {
+    if (!chat_live() || daAlink_getAlinkActorClass() == nullptr) {
         if (s_typing) stop_typing();
         return;
+    }
+
+    if (coop_net_connected() && !s_toldHow) {
+        s_toldHow = true;
+        features_toast("Chat", chat_how_text());
     }
     bool menuUp = false;
     if (svc_ui != nullptr && svc_ui->is_any_document_visible != nullptr) {
@@ -357,14 +395,13 @@ const char* chat_how_text() {
 void chat_first_online() {
     s_lines.erase(std::remove_if(s_lines.begin(), s_lines.end(), [](const Line& l) { return !l.name.empty(); }),
         s_lines.end());
-    static bool s_told = false;
-    if (s_told) return;
-    s_told = true;
-features_toast("Hyrule Online", chat_how_text());
+    if (s_toldHow) return;
+    s_toldHow = true;
+    features_toast("Hyrule Online", chat_how_text());
 }
 
 void chat_draw() {
-    if (!global_active() || !cfg_bool(s_showVar, true)) return;
+    if (!chat_live() || !cfg_bool(s_showVar, true)) return;
     if (s_lines.empty() && !s_typing) return;
     JUTFont* font = mDoExt_getMesgFont();
     if (font == nullptr) return;
@@ -455,8 +492,16 @@ void chat_draw() {
         }
         const u8 a = static_cast<u8>(255.0f * std::clamp(alpha, 0.0f, 1.0f));
         const std::string label = it->name.empty() ? "" : it->name + ": ";
-        const std::vector<std::string> rows = wrap(font, label + it->text, cell, lineW);
-        for (auto row = rows.rbegin(); row != rows.rend() && y >= highest; ++row) {
+        std::vector<std::string> rows = wrap(font, label + it->text, cell, lineW);
+
+        const int fitRows = 1 + static_cast<int>(std::max(0.0f, y - highest) / lineGap);
+        if (shown == 0 && static_cast<int>(rows.size()) > fitRows) {
+            std::vector<std::string> wide =
+                wrap(font, label + it->text, cell, std::min(width * 0.6f, 520.0f * scale));
+            if (wide.size() < rows.size()) rows = std::move(wide);
+        }
+        if (shown > 0 && (y < highest || static_cast<int>(rows.size()) > fitRows)) break;
+        for (auto row = rows.rbegin(); row != rows.rend(); ++row) {
             const bool first = row + 1 == rows.rend();
             if (first && !label.empty() && row->rfind(label, 0) == 0) {
                 shadowed(font, left, y, cell, label, JUtility::TColor(255, 214, 120, a));

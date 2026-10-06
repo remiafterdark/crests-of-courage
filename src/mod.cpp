@@ -358,6 +358,7 @@ bool stage_local_message(uint8_t type) {
     case kMsgObjectPush:
     case kMsgTorch:
     case kMsgAnimal:
+    case kMsgNpcTalk:
     case kMsgCarry:
     case kMsgGrassCut:
     case kMsgActorState:
@@ -555,18 +556,17 @@ void handle_tcp_event(const mods::net::Event& event) {
             g_ticksSinceRx = 0;
             if (event.data.empty()) break;
             PeerLink& link = g_links[id];
-
-            if (link.rx.size() + event.data.size() > (1u << 16)) {
-                mods::log::error("coop_mod: player {} overflowed the reliable channel", id);
-                drop_link(id, "reliable channel overflowed");
-                break;
-            }
             const uint8_t* bytes = reinterpret_cast<const uint8_t*>(event.data.data());
             g_traffic.rxBytes += event.data.size();
             ++g_traffic.rxPackets;
             link.rx.insert(link.rx.end(), bytes, bytes + event.data.size());
 
             process_tcp_rx(link, g_isHost ? static_cast<uint8_t>(id) : kCoopNoPlayer);
+
+            if (link.used && link.rx.size() > sizeof(MsgHeader) + kCoopMaxMessagePayload) {
+                mods::log::error("coop_mod: player {} overflowed the reliable channel", id);
+                drop_link(id, "reliable channel overflowed");
+            }
             break;
         }
         case NET_EVENT_DROPPED: {
@@ -993,13 +993,13 @@ bool handle_reliable_datagram(const mods::net::Event& event) {
     std::vector<uint8_t> delivered;
     link.rel.on_packet(h, payload, now, delivered);
     if (delivered.empty()) return true;
-    if (link.rx.size() + delivered.size() > (1u << 16)) {
-        mods::log::error("coop_mod: player {} overflowed the reliable channel", id);
-        drop_link(id, "reliable channel overflowed");
-        return true;
-    }
+
     link.rx.insert(link.rx.end(), delivered.begin(), delivered.end());
     process_tcp_rx(link, g_isHost ? static_cast<uint8_t>(id) : kCoopNoPlayer);
+    if (link.used && link.rx.size() > sizeof(MsgHeader) + kCoopMaxMessagePayload) {
+        mods::log::error("coop_mod: player {} overflowed the reliable channel", id);
+        drop_link(id, "reliable channel overflowed");
+    }
     return true;
 }
 
@@ -1471,7 +1471,11 @@ void send_local_snapshot() {
                                                (alink->checkCameraLargeDamage() ? 2 : 0) |
                                                (alink->mDamageTimer != 0 ? 4 : 0) |
                                                (onPeahat ? 8 : 0) |
-                                               (hiddenByScene ? kSnapHidden : 0));
+                                               (hiddenByScene ? kSnapHidden : 0) |
+                                               (dComIfGp_event_runCheck() ||
+                                                        sumo_hides_equipment(coop_net_local_id())
+                                                    ? kSnapNoHits
+                                                    : 0));
         for (int i = 0; i < 3; ++i) {
             snapshot.hat[i] = alink->field_0x302c[7 + i];
             snapshot.hat[3 + i] = alink->field_0x3040[7 + i];

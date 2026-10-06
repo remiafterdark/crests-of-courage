@@ -27,6 +27,7 @@
 #include "d/actor/d_a_itembase.h"
 #include "f_op/f_op_actor_mng.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -1106,6 +1107,8 @@ uint32_t shared_story_bits() {
 bool story_flag_applies_now(u16 flag) {
     if (flag == dSv_event_flag_c::M_023 && !dComIfGs_isDarkClearLV(0)) return false;
 
+    if (flag == dSv_event_flag_c::M_067 && !dComIfGs_isEventBit(dSv_event_flag_c::M_009)) return false;
+
     if ((flag == dSv_event_flag_c::M_071 || flag == dSv_event_flag_c::F_0250) &&
         !dComIfGs_isTransformLV(3)) {
         return false;
@@ -1130,29 +1133,31 @@ void take_shared_story_bits(uint32_t bits) {
     }
 }
 
-void repair_early_epona() {
-    if (rando_active() || daAlink_getAlinkActorClass() == nullptr) return;
-    if (!dComIfGs_isEventBit(dSv_event_flag_c::M_023) || dComIfGs_isDarkClearLV(0) ||
-        !dComIfGs_isEventBit(dSv_event_flag_c::M_014)) {
-        return;
+const u16 kOpening[] = {
+    dSv_event_flag_c::M_010,
+    dSv_event_flag_c::M_011,
+    dSv_event_flag_c::M_009,
+    dSv_event_flag_c::M_012,
+    dSv_event_flag_c::M_014,
+    dSv_event_flag_c::M_016,
+    dSv_event_flag_c::M_017,
+    dSv_event_flag_c::M_019,
+};
+
+void close_opening() {
+    if (rando_active() || daAlink_getAlinkActorClass() == nullptr || dComIfGp_event_runCheck()) return;
+    const int n = static_cast<int>(sizeof(kOpening) / sizeof(kOpening[0]));
+    int latest = -1;
+    for (int i = 0; i < n; ++i) {
+        if (dComIfGs_isEventBit(kOpening[i])) latest = i;
     }
-    dComIfGs_offEventBit(dSv_event_flag_c::M_023);
-    coop_log::info("coop_mod: [STORY] repair: M_023 cleared (set before Faron twilight)");
-}
-
-void repair_rutela_graveyard() {
-    if (daAlink_getAlinkActorClass() == nullptr || dComIfGp_event_runCheck() || rando_active()) return;
-    const char* stage = dComIfGp_getStartStageName();
-    if (stage == nullptr || std::strcmp(stage, "F_SP111") != 0) return;
-    if (dComIfGs_isEventBit(dSv_event_flag_c::M_037) || !dComIfGs_isSwitch(102, 0)) return;
-    dComIfGs_onEventBit(dSv_event_flag_c::M_037);
-    coop_log::info("coop_mod: [STORY] repair: M_037 set (graveyard switch 102 without it)");
-    coop_notify_c(kNotifyOther, "Graveyard fixed", "Leave the graveyard and come back in.");
-}
-
-bool in_ordon(const char* stage) {
-    return std::strcmp(stage, "F_SP103") == 0 || std::strcmp(stage, "F_SP104") == 0 ||
-           std::strcmp(stage, "F_SP00") == 0 || std::strcmp(stage, "R_SP01") == 0;
+    for (int i = 0; i < latest; ++i) {
+        if (dComIfGs_isEventBit(kOpening[i])) continue;
+        if (world_hold_story_flag(kOpening[i])) {
+            coop_log::info("coop_mod: [STORY] repair: {:#06x} queued, a later opening scene is already done",
+                kOpening[i]);
+        }
+    }
 }
 
 bool teleport_in_progress();
@@ -1179,6 +1184,25 @@ void* find_near(void* proc, void* data) {
         break;
     }
     return nullptr;
+}
+
+void log_hitch() {
+    using namespace std::chrono;
+    static steady_clock::time_point s_last{};
+    static steady_clock::time_point s_lastLog{};
+    static int s_logged = 0;
+    const steady_clock::time_point now = steady_clock::now();
+    const steady_clock::time_point prev = s_last;
+    s_last = now;
+    daAlink_c* alink = daAlink_getAlinkActorClass();
+    if (prev == steady_clock::time_point{} || alink == nullptr || dComIfGp_isEnableNextStage()) return;
+    const auto ms = duration_cast<milliseconds>(now - prev).count();
+    if (ms < 100 || s_logged >= 40 || now - s_lastLog < seconds(5)) return;
+    s_lastLog = now;
+    ++s_logged;
+    coop_log::info("coop_mod: [HITCH] {} ms frame, proc {} equip {:#x} event {} | {}", ms,
+        static_cast<int>(alink->mProcID), static_cast<int>(alink->mEquipItem),
+        dComIfGp_event_runCheck() ? 1 : 0, coop_mem_status());
 }
 
 void log_hurt() {
@@ -1237,6 +1261,50 @@ void log_events() {
         partner != nullptr ? static_cast<int>(fopAcM_GetName(partner)) : -1,
         static_cast<int>(dComIfGp_getEvent()->getMode()), alink->current.pos.x, alink->current.pos.y,
         alink->current.pos.z, s_repeats >= 2 ? " REPEATING" : "");
+
+    if (s_repeats >= 2 && coop_net_connected()) {
+        static uint32_t s_toldAt = 0;
+        if (s_toldAt == 0 || s_ticks - s_toldAt > 36000) {
+            s_toldAt = s_ticks;
+            features_toast("Stuck?", "Co-op > Players > Catch up takes another player's progress.");
+        }
+    }
+
+    if (name != nullptr && std::strcmp(name, "NEED_YOUR_HELP") == 0 && s_repeats >= 1 &&
+        !dComIfGs_isEventBit(dSv_event_flag_c::F_0037)) {
+        dComIfGs_onEventBit(dSv_event_flag_c::F_0037);
+        coop_log::info("coop_mod: [STORY] repair: Jaggle's hill talk looped, F_0037 set");
+    }
+}
+
+bool movement_event(const char* name) {
+    if (name == nullptr) return true;
+    const std::string n = name;
+    return n.empty() || n == "-" || n == "NO DATA" || n == "DEFAULT_START" || n == "demo38_01" ||
+           n == "SCENE_EXIT" || n == "OLD_DOOR_IN" || n == "door_i" || n == "SAVEREQ" || n == "POTAL_WARPIN" ||
+           n == "MHINT_TALK" || n == "NORMAL_COMEBACK" || n.find("DOOR") != std::string::npos;
+}
+
+bool s_nextStageSeen = false;
+bool s_loadFromScene = false;
+
+void watch_next_stage() {
+    if (!dComIfGp_isEnableNextStage()) {
+        s_nextStageSeen = false;
+        return;
+    }
+    if (s_nextStageSeen) return;
+    s_nextStageSeen = true;
+    const bool running = dComIfGp_event_runCheck() != 0;
+    const char* name = running ? dComIfGp_getPEvtManager()->getRunEventName() : nullptr;
+    s_loadFromScene = running && !movement_event(name);
+    if (s_loadFromScene) coop_log::info("coop_mod: [STORY] '{}' is changing stage", name != nullptr ? name : "?");
+}
+
+bool load_is_cutscene() {
+    const bool scene = s_loadFromScene;
+    s_loadFromScene = false;
+    return scene;
 }
 
 void catch_up_story() {
@@ -1297,16 +1365,6 @@ void place_epona_after_rescue() {
         fopAcM_GetRoomNo(alink));
     horse->setHorsePosAndAngle(&pos, alink->shape_angle.y);
     coop_log::info("coop_mod: [HORSE] M_023 from a peer, horse placed at ({:.0f},{:.0f},{:.0f})", pos.x, pos.y, pos.z);
-}
-
-void repair_midna_shadows() {
-    if (daAlink_getAlinkActorClass() == nullptr || dComIfGp_event_runCheck()) return;
-    const char* stage = dComIfGp_getStartStageName();
-    if (stage == nullptr || stage[0] == '\0' || coop_on_title_screen() || in_ordon(stage)) return;
-    if (!dComIfGs_isEventBit(dSv_event_flag_c::F_0800)) return;
-    dComIfGs_offEventBit(dSv_event_flag_c::F_0800);
-    coop_log::info("coop_mod: [STORY] repair: F_0800 cleared in {:.8}", stage);
-    coop_notify_c(kNotifyOther, "Midna is back", "She can be called again.");
 }
 
 void log_state() {
@@ -1908,6 +1966,31 @@ void on_skin_choices(const uint8_t* payload, size_t size, uint8_t from) {
     if (changed) puppet_hook_peer_skin_changed(from);
 }
 
+void repair_skin_tpose() {
+    daAlink_c* me = daAlink_getAlinkActorClass();
+    if (me == nullptr || me->mpLinkModel == nullptr || me->mpLinkFaceModel == nullptr ||
+        me->mpLinkHatModel == nullptr || me->field_0x1f20 == nullptr) {
+        return;
+    }
+    if (dComIfGp_event_runCheck() || dComIfGp_isEnableNextStage() || me->mClothesChangeWaitTimer != 0 ||
+        me->mShieldChangeWaitTimer != 0 || me->checkNoResetFlg2(daPy_py_c::FLG2_STATUS_WINDOW_DRAW)) {
+        return;
+    }
+    J3DModelData* body = me->mpLinkModel->getModelData();
+    if (!models_is_skin(body) || body->getJointNum() < 17) return;
+    if (body->getJointNodePointer(0)->getMtxCalc() == static_cast<J3DMtxCalc*>(me->field_0x1f20)) return;
+    static int s_logged = 0;
+    if (s_logged++ < 10) {
+        coop_log::info("coop_mod: [SKIN-ANM] body lost its animation in {:.8}, hooked again ({})",
+            dComIfGp_getStartStageName(), me->checkWolf() ? "wolf" : "human");
+    }
+    if (me->checkWolf()) {
+        me->changeModelDataDirectWolf(0);
+    } else {
+        me->changeModelDataDirect(0);
+    }
+}
+
 void features_update() {
 
     {
@@ -1919,11 +2002,12 @@ void features_update() {
         static uint32_t s_eponaTick = 0;
         log_state();
         log_events();
+        watch_next_stage();
         log_hurt();
+        log_hitch();
         if (++s_eponaTick % 60 == 0) {
-            repair_early_epona();
-            repair_rutela_graveyard();
-            repair_midna_shadows();
+            close_opening();
+            softlocks_update();
             place_epona_after_rescue();
             catch_up_story();
         }
@@ -1941,6 +2025,7 @@ void features_update() {
         }
         models_note_worn(worn, n);
     }
+    repair_skin_tpose();
     found_update();
     voices_update();
     local_skin_colors_update();
@@ -2136,6 +2221,7 @@ bool should_log_breadcrumb(uint8_t type) {
     case kMsgParticles:
     case kMsgHorse:
     case kMsgAnimal:
+    case kMsgNpcTalk:
     case kMsgTorch:
     case kMsgEnemyState:
     case kMsgEnemyTargets:
@@ -2191,6 +2277,9 @@ void features_on_message(uint8_t type, const uint8_t* payload, size_t size, uint
         if (size >= sizeof(MsgPause)) coop_net_set_player_paused(from, payload[0] != 0);
         break;
     case kMsgPresence: on_presence(payload, size, from); break;
+    case kMsgChat: chat_on_lobby_message(from, payload, size); break;
+    case kMsgCatchUpWant:
+    case kMsgCatchUp: joinsync_on_catch_up(type, payload, size, from); break;
     case kMsgSharedStory:
         if (size >= sizeof(MsgSharedStory)) {
             MsgSharedStory story;
@@ -2245,6 +2334,7 @@ void features_on_message(uint8_t type, const uint8_t* payload, size_t size, uint
     case kMsgObjectPush:
     case kMsgTorch:
     case kMsgAnimal:
+    case kMsgNpcTalk:
     case kMsgRoomClaim:
     case kMsgRoomOwner:
     case kMsgEnemyTargets: enemies_on_message(type, payload, size, from); break;
@@ -2504,4 +2594,8 @@ uint16_t features_shown_life(uint8_t playerId) {
     }
     const int shown = static_cast<int>(p.life) - g.pending;
     return static_cast<uint16_t>(shown > 0 ? shown : 0);
+}
+
+bool features_load_is_cutscene() {
+    return load_is_cutscene();
 }

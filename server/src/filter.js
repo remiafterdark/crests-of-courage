@@ -1,86 +1,67 @@
 
 
-const SWAPS = {
-  "0": "o", "1": "i", "!": "i", "|": "i", "3": "e", "4": "a", "@": "a", "5": "s", "$": "s",
-  "7": "t", "+": "t", "8": "b", "9": "g", "6": "g", "2": "z",
-};
+import {
+  DataSet, RegExpMatcher, englishDataset, englishRecommendedTransformers, pattern,
+} from "obscenity";
 
-const ROOTS = [
-  "fuck", "fuk", "fck", "shit", "cunt", "nigg", "niga", "nigga", "faggot", "fagot", "retard",
-  "bitch", "whore", "slut", "dildo", "jizz", "wank", "rapist", "pussy", "motherf", "asshole",
-  "bastard", "kike", "tranny", "penis", "vagina", "porn", "boner", "titty", "titties", "blowjob",
-  "handjob", "cumshot", "dickhead", "douche", "chode", "twat", "spastic",
-];
+const WHITELIST = ["cockpit", "cockpits", "penistone", "hancock", "dickens", "dickinson"];
 
-const WORDS = new Set([
-  "ass", "asses", "arse", "arses", "dick", "dicks", "cock", "cocks", "cum", "cums", "coon",
-  "coons", "fag", "fags", "hoe", "hoes", "tit", "tits", "piss", "pissed", "prick", "pricks",
-  "rape", "raped", "raping", "spic", "spics", "chink", "chinks", "dyke", "dykes", "kys",
-  "nazi", "nazis", "wtf", "stfu", "gtfo", "boob", "boobs", "butthole", "anal", "sex", "sexy",
-  "nude", "nudes", "horny", "cuck", "simp", "bollocks", "bugger",
-].map((w) => squeeze(w)));
+const dataset = new DataSet()
+  .addAll(englishDataset)
+  .addPhrase((p) => p.setMetadata({ originalWord: "kys" }).addPattern(pattern`|kys|`))
+  .addPhrase((p) => p.setMetadata({ originalWord: "spic" }).addPattern(pattern`|spic|`)
+    .addPattern(pattern`|spics|`));
 
-const ALLOW = new Set([
-  "therapist", "therapists", "scunthorpe", "shitake", "shiitake", "niggle", "niggles", "niggled",
-  "niggling", "snigger", "sniggers", "sniggered", "sniggering", "penistone", "matsushita",
-  "cockpit", "hancock", "dickens", "dickinson", "titmouse", "bitchute",
-].map((w) => squeeze(w)));
+const matcher = new RegExpMatcher({
+  ...dataset.build(),
+  ...englishRecommendedTransformers,
+  whitelistedTerms: [...dataset.build().whitelistedTerms, ...WHITELIST],
+});
 
 const PHRASES = ["killyourself", "killurself", "kilyourself", "goddie", "hangyourself"];
 
-function squeeze(word) {
-  return word.replace(/(.)\1+/g, "$1");
-}
-
-function plain(word) {
-  let out = "";
-  for (const c of word.toLowerCase()) out += SWAPS[c] || c;
-  return squeeze(out.replace(/[^a-z]/g, ""));
-}
-
-function bad(word) {
-  const p = plain(word);
-  if (p.length === 0 || ALLOW.has(p)) return false;
-  if (WORDS.has(p)) return true;
-  for (const root of ROOTS) {
-    if (p.includes(squeeze(root))) return true;
-  }
-  return false;
-}
-
 const stars = (s) => "*".repeat(s.length);
+const flat = (s) => s.toLowerCase().replace(/[^a-z]/g, "").replace(/(.)\1+/g, "$1");
 
 export function cleanChat(text) {
+  const out = text.split("");
+  const starRange = (from, to) => {
+    for (let i = from; i < to; ++i) if (!/\s/.test(out[i])) out[i] = "*";
+  };
 
-  const parts = text.split(/(\s+)/);
-  const words = parts.map((p, i) => ({ p, i, space: /^\s+$/.test(p) }));
-  const out = parts.slice();
-
-  for (const w of words) {
-    if (!w.space && bad(w.p)) out[w.i] = stars(w.p);
+  for (const m of matcher.getAllMatches(text)) {
+    let from = m.startIndex;
+    let to = m.endIndex + 1;
+    while (from > 0 && !/\s/.test(text[from - 1])) --from;
+    while (to < text.length && !/\s/.test(text[to])) ++to;
+    starRange(from, to);
   }
 
-  const letters = words.filter((w) => !w.space);
-  for (let start = 0; start < letters.length; ) {
+  const words = [];
+  for (const m of text.matchAll(/\S+/g)) words.push({ w: m[0], at: m.index });
+  const letters = (w) => w.replace(/[^a-z0-9@$!|]/gi, "");
+
+  for (let start = 0; start < words.length; ) {
     let end = start;
-    while (end < letters.length && plain(letters[end].p).length === 1) ++end;
-    if (end - start >= 3 && bad(letters.slice(start, end).map((w) => w.p).join(""))) {
-      for (let k = start; k < end; ++k) out[letters[k].i] = stars(letters[k].p);
+    while (end < words.length && letters(words[end].w).length === 1) ++end;
+    if (end - start >= 3 && matcher.hasMatch(words.slice(start, end).map((x) => x.w).join(""))) {
+      starRange(words[start].at, words[end - 1].at + words[end - 1].w.length);
     }
     start = end > start ? end : start + 1;
   }
-  for (const w of letters) {
 
-    if (/^[a-z0-9@$!|]([.\-_*][a-z0-9@$!|]){2,}$/i.test(w.p) && bad(w.p)) out[w.i] = stars(w.p);
+  for (const { w, at } of words) {
+    if (/^[a-z0-9@$!|]([.\-_*][a-z0-9@$!|]){2,}$/i.test(w) && matcher.hasMatch(letters(w))) {
+      starRange(at, at + w.length);
+    }
   }
 
   let result = out.join("");
-  const flat = plain(result);
-  for (const phrase of PHRASES) {
-    if (!flat.includes(squeeze(phrase))) continue;
+  const whole = flat(result);
+  if (PHRASES.some((p) => whole.includes(flat(p)))) {
 
-    result = result.replace(/\b(kill|kil|hang|go)\b(\s*)(\w+)(\s*)(self|yourself|urself|die)?/gi,
-      (m) => stars(m));
+    result = result.replace(/\b(k+i+l+|h+a+n+g+|g+o+)\b(\s*)(\w+)(\s*)(self|yourself|urself|die)?/gi,
+      (m) => m.replace(/\S/g, "*"));
   }
   return result;
 }

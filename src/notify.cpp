@@ -362,6 +362,13 @@ void coop_notify(NotifyKind kind, const std::string& title, const std::string& b
         engine_toast(title, body, ms);
         return;
     }
+
+    for (Note& waiting : s_notes) {
+        if (waiting.preview || waiting.title != title || waiting.body != body) continue;
+        waiting.lifeMs = ms;
+        if (waiting.shownAt != Clock::time_point{}) waiting.shownAt = Clock::now();
+        return;
+    }
     Note n;
     n.kind = kind;
     n.title = title;

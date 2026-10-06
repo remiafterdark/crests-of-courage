@@ -18,6 +18,7 @@
 #include "d/actor/d_a_cstaF.h"
 #include "d/actor/d_a_crod.h"
 #include "d/actor/d_a_obj_carry.h"
+#include "d/actor/d_a_obj_stone.h"
 #include "d/d_lib.h"
 #include "f_pc/f_pc_manager.h"
 #include "d/actor/d_a_obj_lv6FurikoTrap.h"
@@ -1620,6 +1621,17 @@ void read_enemy_decision(fopAc_ac_c* actor, int16_t& action, int16_t& mode) {
 
 void write_enemy_timers(fopAc_ac_c* actor, const int16_t* in, uint8_t count, int age);
 
+void settle_after_decision(fopAc_ac_c* actor) {
+    if (fopAcM_GetName(actor) == fpcNm_E_GE_e) {
+        auto* ge = static_cast<daE_GE_c*>(actor);
+        if (ge->field_0xb8a <= 0) ge->field_0xb8a = 8;
+    }
+    if (fopAcM_GetName(actor) == fpcNm_E_MM_e) {
+        auto* mm = reinterpret_cast<e_mm_class*>(actor);
+        if (mm->action != 10) mm->field_0xb99 &= ~8;
+    }
+}
+
 bool apply_enemy_decision(fopAc_ac_c* actor, int16_t action, int16_t mode, Tracked* t,
                           const int16_t* timers, uint8_t timerCount, int age) {
     if (actor == nullptr || t == nullptr || action == kEnemyNoAction) return false;
@@ -1633,6 +1645,7 @@ bool apply_enemy_decision(fopAc_ac_c* actor, int16_t action, int16_t mode, Track
     if (l->modeSize != 0) write_sized(actor, l->modeOffset, l->modeSize, mode);
 
     write_enemy_timers(actor, timers, timerCount, age);
+    settle_after_decision(actor);
     return true;
 }
 
@@ -1653,6 +1666,9 @@ const EnemyStateLayout kEnemyState[] = {
 
     { (int16_t)0x1BD, (uint16_t)offsetof(daE_SM_c, mCoreAction),
       (uint8_t)sizeof(((daE_SM_c*)nullptr)->mCoreAction), kStateMirror, (int8_t)0 },
+
+    { (int16_t)0x1DD, (uint16_t)offsetof(e_mm_class, field_0x672),
+      (uint8_t)sizeof(((e_mm_class*)nullptr)->field_0x672), kStateLatch, (int8_t)0 },
 };
 
 const EnemyStateLayout* state_layout_for(int16_t procName) {
@@ -2586,11 +2602,13 @@ HookAction on_proc_execute_pre(ModContext*, void* args, void*, void*) {
 }
 
 bool repin_after_execute(base_process_class* proc);
+void npc_talk_after_execute(base_process_class* proc);
 
 void on_proc_execute_post(ModContext*, void* args, void*, void*) {
     if (s_execDepth > 0) --s_execDepth;
 
     repin_after_execute(mods::arg<base_process_class*>(args, 0));
+    npc_talk_after_execute(mods::arg<base_process_class*>(args, 0));
     if (--s_lieDepth != 0) return;
     lie_end();
 }
@@ -4316,10 +4334,26 @@ void apply_remote_carry() {
             continue;
         }
         const bool isPot = fopAcM_GetName(actor) == fpcNm_Obj_Carry_e;
+        const bool isRock = fopAcM_GetName(actor) == fpcNm_Obj_Stone_e;
+
+        if (isRock && msg.state != kCarryGone) {
+            auto* rock = static_cast<daObjStone_c*>(actor);
+            if (rock->field_0x0908 == 0) {
+                rock->createItem();
+                rock->field_0x0908 = 1;
+                coop_log::info("coop_mod: [CARRY] rock {:#x} lifted remotely, its item spawned", msg.key);
+            }
+        }
 
         switch (msg.state) {
         case kCarryGone:
             coop_log::info("coop_mod: [CARRY] {:#x} broke remotely, breaking local", msg.key);
+
+            if (isRock) {
+                static_cast<daObjStone_c*>(actor)->init_modeBreak();
+                r = RemoteCarry{};
+                break;
+            }
 
             if (isPot) static_cast<daObjCarry_c*>(actor)->obj_break(true, true, true);
             fopAcM_delete(actor);
@@ -4582,7 +4616,8 @@ void torch_on_message(const MsgTorch& msg) {
 
 bool is_animal(fopAc_ac_c* actor) {
     const s16 name = fopAcM_GetName(actor);
-    return name == fpcNm_NI_e;
+    return name == fpcNm_NI_e || name == fpcNm_SQ_e || name == fpcNm_DO_e || name == fpcNm_NPC_NE_e ||
+           name == fpcNm_BD_e;
 }
 
 struct AnimalSteer {
@@ -4627,6 +4662,8 @@ AnimalSteer* animal_steer_for(fopAc_ac_c* actor, uint32_t key) {
 }
 
 void tick_animals() {
+
+    if (dComIfGp_event_runCheck()) return;
     AnimalScan scan;
     fopAcM_Search(scan_animals, &scan);
     daAlink_c* me = daAlink_getAlinkActorClass();
@@ -4707,9 +4744,95 @@ void animal_on_message(const MsgAnimal& msg) {
     slot->heardTick = s_tick;
 }
 
+struct NpcTalkHold {
+    bool used = false;
+    MsgNpcTalk msg{};
+    fpc_ProcID id = fpcM_ERROR_PROCESS_ID_e;
+    uint32_t heardTick = 0;
+};
+NpcTalkHold s_npcTalk[kCoopMaxPlayers];
+const uint32_t kNpcTalkFreshTicks = 30;
+
+struct NpcTalkSearch {
+    const MsgNpcTalk* msg;
+    fopAc_ac_c* found;
+};
+
+void* find_talk_npc(void* proc, void* data) {
+    auto* w = static_cast<NpcTalkSearch*>(data);
+    auto* a = static_cast<fopAc_ac_c*>(proc);
+    if (a == nullptr || w->found != nullptr || fopAcM_GetName(a) != w->msg->procName) return nullptr;
+    if (fopAcM_GetRoomNo(a) != w->msg->room) return nullptr;
+    const cXyz home(w->msg->home[0], w->msg->home[1], w->msg->home[2]);
+    if (compute_placement_key(a) == w->msg->key || (a->home.pos - home).abs() < 30.0f) w->found = a;
+    return nullptr;
+}
+
+void tick_npc_talk() {
+
+    fopAc_ac_c* npc = dComIfGp_event_runCheck() ? dComIfGp_event_getTalkPartner() : nullptr;
+    if (npc != nullptr && fopAcM_GetGroup(npc) == fopAc_NPC_e && s_tick % 6 == 0) {
+        const uint32_t key = compute_placement_key(npc);
+        if (key != 0) {
+            MsgNpcTalk msg{};
+            msg.key = key;
+            msg.room = static_cast<int8_t>(fopAcM_GetRoomNo(npc));
+            msg.procName = fopAcM_GetName(npc);
+            msg.angleY = npc->shape_angle.y;
+            msg.home[0] = npc->home.pos.x;
+            msg.home[1] = npc->home.pos.y;
+            msg.home[2] = npc->home.pos.z;
+            msg.pos[0] = npc->current.pos.x;
+            msg.pos[1] = npc->current.pos.y;
+            msg.pos[2] = npc->current.pos.z;
+            coop_net_send(kMsgNpcTalk, &msg, sizeof(msg));
+        }
+    }
+
+    for (NpcTalkHold& h : s_npcTalk) {
+        if (!h.used) continue;
+        if (s_tick - h.heardTick > kNpcTalkFreshTicks) {
+            h = NpcTalkHold{};
+            continue;
+        }
+        if (fopAcM_SearchByID(h.id) != nullptr) continue;
+        NpcTalkSearch want{&h.msg, nullptr};
+        fopAcM_Search(find_talk_npc, &want);
+        h.id = want.found != nullptr ? fopAcM_GetID(want.found) : fpcM_ERROR_PROCESS_ID_e;
+    }
+}
+
+void npc_talk_on_message(const MsgNpcTalk& msg, uint8_t from) {
+    if (from >= kCoopMaxPlayers) return;
+    NpcTalkHold& h = s_npcTalk[from];
+    if (!h.used || h.msg.key != msg.key || h.msg.room != msg.room) h.id = fpcM_ERROR_PROCESS_ID_e;
+    h.used = true;
+    h.msg = msg;
+    h.heardTick = s_tick;
+}
+
+void npc_talk_after_execute(base_process_class* proc) {
+    if (proc == nullptr) return;
+    for (NpcTalkHold& h : s_npcTalk) {
+        if (!h.used || h.id != proc->id) continue;
+
+        if (dComIfGp_event_runCheck()) return;
+        auto* npc = static_cast<fopAc_ac_c*>(fopAcM_SearchByID(proc->id));
+        if (npc == nullptr) return;
+        const cXyz to(h.msg.pos[0], h.msg.pos[1], h.msg.pos[2]);
+        const cXyz gap = to - npc->current.pos;
+        place(npc, gap.abs() > kAnimalSnapDist ? to : npc->current.pos + gap * 0.3f);
+        const s16 turn = static_cast<s16>(h.msg.angleY - npc->shape_angle.y);
+        npc->shape_angle.y = static_cast<s16>(npc->shape_angle.y + turn / 4);
+        npc->current.angle.y = npc->shape_angle.y;
+        return;
+    }
+}
+
 void reset_animals_and_torches() {
     for (AnimalSteer& a : s_animals) a = AnimalSteer{};
     for (TorchSeen& t : s_torches) t = TorchSeen{};
+    for (NpcTalkHold& h : s_npcTalk) h = NpcTalkHold{};
 }
 
 bool carry_driven_here(int8_t room, uint32_t key) {
@@ -5061,6 +5184,7 @@ void on_collision_move_post(ModContext*, void*, void*, void*) {
         capture_carried();
         capture_torches();
         tick_animals();
+        tick_npc_talk();
     }
     if (!enemiesOn && !objectsOn) return;
     const bool hits = real_hits_enabled();
@@ -5929,7 +6053,7 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
         if (!enemies_setting_on() && !bosses_setting_on()) return;
     } else if (type == kMsgObjectHit || type == kMsgObjectMove || type == kMsgCarry ||
                type == kMsgCageBars || type == kMsgRotBridge ||
-               type == kMsgTorch || type == kMsgAnimal) {
+               type == kMsgTorch || type == kMsgAnimal || type == kMsgNpcTalk) {
         if (!breakables_enabled() && !movers_enabled()) return;
     } else if (!enemies_setting_on()) {
         return;
@@ -6180,6 +6304,13 @@ void enemies_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8
         MsgAnimal msg;
         std::memcpy(&msg, payload, sizeof(msg));
         animal_on_message(msg);
+        return;
+    }
+    case kMsgNpcTalk: {
+        if (size < sizeof(MsgNpcTalk) || !carry_live()) return;
+        MsgNpcTalk msg;
+        std::memcpy(&msg, payload, sizeof(msg));
+        npc_talk_on_message(msg, from);
         return;
     }
     case kMsgObjectMove: {

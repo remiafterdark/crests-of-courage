@@ -28,6 +28,8 @@ struct SurfaceHandles {
     UiElementHandle net = 0;
     UiElementHandle netPeers = 0;
     UiListHandle players = 0;
+    UiListHandle catchUp = 0;
+    std::vector<std::string> catchUpLabels;
     std::string lastStatus;
     std::string lastPeer;
     std::string lastModels;
@@ -361,6 +363,7 @@ void push_players(SurfaceHandles& h) {
     h.listPushed = true;
     if (h.rowIds.empty()) {
         svc_ui->list_set_items(mod_ctx, h.players, nullptr, 0);
+        if (h.catchUp != 0) svc_ui->list_set_items(mod_ctx, h.catchUp, nullptr, 0);
         return;
     }
     std::vector<UiListItem> items;
@@ -372,6 +375,17 @@ void push_players(SurfaceHandles& h) {
         items.push_back(item);
     }
     svc_ui->list_set_items(mod_ctx, h.players, items.data(), items.size());
+    if (h.catchUp == 0) return;
+    h.catchUpLabels.clear();
+    for (uint8_t id : h.rowIds) h.catchUpLabels.push_back("Catch up to " + features_peer_of(id).name);
+    std::vector<UiListItem> catchUp;
+    for (size_t i = 0; i < h.rowIds.size(); ++i) {
+        UiListItem item = UI_LIST_ITEM_INIT;
+        item.key = h.rowIds[i];
+        item.label = h.catchUpLabels[i].c_str();
+        catchUp.push_back(item);
+    }
+    svc_ui->list_set_items(mod_ctx, h.catchUp, catchUp.data(), catchUp.size());
 }
 
 void sort_presets(SurfaceHandles& h);
@@ -648,6 +662,12 @@ void build_global(UiElementHandle pane, SurfaceHandles& h) {
     add_toggle(pane, "Hyrule Online", global_enabled_var(),
         "Other players can see your IP address while this is on.");
 
+    svc_ui->pane_add_section(mod_ctx, pane, "PvP");
+    add_toggle(pane, "PvP", global_pvp_var(),
+        "Fight other players who have it on too. Their names show in red.");
+    add_toggle(pane, "Only show PvP players", global_pvp_only_var(),
+        "Hides everyone who doesn't have PvP on.");
+
     svc_ui->pane_add_section(mod_ctx, pane, "Name tags");
     add_toggle(pane, "Show their names", global_nametags_var(),
         "Only for Hyrule Online. Off in Local > Name tags hides these too.");
@@ -662,6 +682,11 @@ void build_global(UiElementHandle pane, SurfaceHandles& h) {
 
     svc_ui->pane_add_section(mod_ctx, pane, "Players");
     svc_ui->pane_add_text(mod_ctx, pane, "Press someone to block them. Press again to unblock.", nullptr);
+    add_button(pane, "Unblock everyone", [](ModContext*, void*) {
+        for (const GlobalPlayer& p : global_blocked_list()) global_set_blocked(p, false);
+        s_window.blockListPushed = false;
+        push_block_list(s_window);
+    }, nullptr, "Everyone you blocked can be seen and heard again.");
     UiListDesc list = UI_LIST_DESC_INIT;
     list.on_pressed = on_block_pressed;
     if (svc_ui->pane_add_list(mod_ctx, pane, &list, &h.blockList) != MOD_OK) h.blockList = 0;
@@ -683,7 +708,7 @@ void build_connect(UiElementHandle pane, SurfaceHandles& h, UiElementHandle deta
     add_button(pane, "Join", [](ModContext*, void*) { coop_net_join_code(); }, net_active);
     add_button(pane, "Disconnect", [](ModContext*, void*) { coop_net_disconnect(); }, net_idle);
     add_button(pane, "Chat", [](ModContext*, void*) { chat_open(); }, nullptr,
-        "Needs Hyrule Online on.");
+        "Talk to everyone in your session.");
 
     add_group_or_section(pane, detail, "Advanced", group_advanced);
     add_group_or_section(pane, detail, "How to play together", build_online_guide);
@@ -699,6 +724,16 @@ void build_players(UiElementHandle pane, SurfaceHandles& h) {
     if (svc_ui->pane_add_list(mod_ctx, pane, &list, &h.players) != MOD_OK) {
         h.players = 0;
     }
+
+    svc_ui->pane_add_section(mod_ctx, pane, "Stuck?");
+    svc_ui->pane_add_text(mod_ctx, pane,
+        "Takes their story and progress and puts you next to them. Your rupees, ammo and hearts stay yours.",
+        nullptr);
+    UiListDesc catchUp = UI_LIST_DESC_INIT;
+    catchUp.on_pressed = [](ModContext*, UiListHandle, uint64_t key, void*) {
+        if (key < kCoopMaxPlayers) joinsync_catch_up(static_cast<uint8_t>(key));
+    };
+    if (svc_ui->pane_add_list(mod_ctx, pane, &catchUp, &h.catchUp) != MOD_OK) h.catchUp = 0;
     h.listPushed = false;
     push_players(h);
 }
@@ -1244,6 +1279,21 @@ ModResult group_colors(ModContext*, UiElementHandle pane, void* data, ModError*)
     const int index = static_cast<int>(reinterpret_cast<intptr_t>(data));
     if (index < 0 || index >= static_cast<int>(s_colorGroups.size())) return MOD_OK;
     add_panel_header(pane, s_colorGroups[index].c_str());
+
+    UiControlDesc reset = UI_CONTROL_DESC_INIT;
+    reset.kind = UI_CONTROL_BUTTON;
+    reset.label = "Reset to default";
+    reset.user_data = data;
+    reset.on_pressed = [](ModContext*, void* group) {
+        const int g = static_cast<int>(reinterpret_cast<intptr_t>(group));
+        if (g < 0 || g >= static_cast<int>(s_colorGroups.size())) return;
+        for (int i = 0; i < colors_slot_count(); ++i) {
+            if (s_colorGroups[g] == colors_slot_group(i) && colors_slot_var(i) != 0) {
+                svc_config->set_string(mod_ctx, colors_slot_var(i), "");
+            }
+        }
+    };
+    add_control(pane, reset);
     for (int i = 0; i < colors_slot_count(); ++i) {
         if (s_colorGroups[index] != colors_slot_group(i)) continue;
         add_color(pane, colors_slot_label(i), colors_slot_var(i));

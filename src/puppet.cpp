@@ -644,10 +644,11 @@ void breadcrumb(const char* step) {
     if (file.is_open() && written > kCap) file.close();
     if (!file.is_open()) {
 
+        const std::filesystem::path path = std::filesystem::u8path(coop_crash_trail_path());
         std::error_code ec;
-        const auto size = std::filesystem::file_size("coop-crash-trail.txt", ec);
+        const auto size = std::filesystem::file_size(path, ec);
         const bool fresh = written > kCap || (!ec && size > kCap);
-        file.open("coop-crash-trail.txt", fresh ? std::ios::trunc : std::ios::app);
+        file.open(path, fresh ? std::ios::trunc : std::ios::app);
         if (!file.is_open()) return;
         written = 0;
         file << "--- session start ---" << std::endl;
@@ -1905,11 +1906,24 @@ const HeldItemRes kHeldItemRes[kPuppetHeldCount] = {
       {0xFFFF, 0, nullptr, kItemSrcRideArc},
 };
 
+bool get_item_arc_in_use_elsewhere(const char* arc) {
+    for (const Puppet& q : s_puppetSlots) {
+        if (&q == &pup()) continue;
+        if (std::strcmp(q.getItemArc, arc) == 0 || std::strcmp(q.getItemArcOld, arc) == 0) return true;
+    }
+    return false;
+}
+
+void release_get_item_arc(const char* arc) {
+    if (arc[0] == '\0' || get_item_arc_in_use_elsewhere(arc)) return;
+    unloadObjectArchive(arc);
+}
+
 void retire_get_item_arc() {
     if (pup().getItemArc[0] == '\0') return;
     if (pup().getItemArcOld[0] != '\0' &&
         std::strcmp(pup().getItemArcOld, pup().getItemArc) != 0) {
-        unloadObjectArchive(pup().getItemArcOld);
+        release_get_item_arc(pup().getItemArcOld);
     }
     std::memcpy(pup().getItemArcOld, pup().getItemArc, sizeof(pup().getItemArcOld));
     pup().getItemArcOldTimer = 60;
@@ -1918,7 +1932,17 @@ void retire_get_item_arc() {
 
 J3DModelData* get_field_item_data(u8 itemNo) {
     PuppetItemData& slot = pup().itemData[kPuppetHeldGetItem];
-    if (slot.data != nullptr && pup().getItemNoCached == itemNo) return slot.data;
+
+    if (slot.data != nullptr && pup().getItemNoCached == itemNo) {
+        const char* heldArc = dItem_data::getArcName(itemNo);
+        const s16 heldBmd = dItem_data::getBmdName(itemNo);
+        if (heldArc != nullptr && heldBmd >= 0 &&
+            dComIfG_getObjectRes(heldArc, heldBmd) == static_cast<void*>(slot.data)) {
+            return slot.data;
+        }
+        coop_log::info("coop_mod: [GETITEM] item {:#x} model data went away, rebuilding",
+            static_cast<int>(itemNo));
+    }
     if (slot.data != nullptr) {
         slot.data = nullptr;
         drop_slot_models_of_kind(kPuppetHeldGetItem);
@@ -3573,7 +3597,8 @@ public:
         const f32 shadow = cell * 0.08f;
         font->setCharColor(JUtility::TColor(0, 0, 0, static_cast<u8>(mAlpha * 0.7f)));
         font->drawString_scale(x + shadow, y + shadow, cell, cell, mName, true);
-        font->setCharColor(JUtility::TColor(255, 255, 255, mAlpha));
+
+        font->setCharColor(mPvp ? JUtility::TColor(255, 110, 90, mAlpha) : JUtility::TColor(255, 255, 255, mAlpha));
         font->drawString_scale(x, y, cell, cell, mName, true);
 
         if (J2DGrafContext* port = dComIfGp_getCurrentGrafPort()) {
@@ -3609,6 +3634,7 @@ public:
     bool mVisible = false;
 
     bool mStranger = false;
+    bool mPvp = false;
     f32 mStrangerDist = 8000.0f;
 
     bool mEdge = false;
@@ -3650,6 +3676,7 @@ void queue_puppet_nametag(daAlink_c* alink) {
     std::strncpy(tag.mBaseName, pup().nametagName, sizeof(tag.mBaseName) - 1);
     tag.mBaseName[sizeof(tag.mBaseName) - 1] = '\0';
     tag.mStranger = global_slot_present(s_pupId);
+    tag.mPvp = global_slot_pvp(s_pupId);
 
     if (tag.mStranger && !cfg_bool(global_nametags_var(), true)) return;
     tag.mStrangerDist = static_cast<f32>(std::clamp<int64_t>(cfg_int(global_nametag_distance_var(), 8000), 500, 30000));
@@ -3767,7 +3794,7 @@ void update_one_puppet(daAlink_c* alink) {
     net_clock_tick();
     horse_idle_tick();
     if (pup().getItemArcOld[0] != '\0' && --pup().getItemArcOldTimer <= 0) {
-        unloadObjectArchive(pup().getItemArcOld);
+        release_get_item_arc(pup().getItemArcOld);
         pup().getItemArcOld[0] = '\0';
     }
 

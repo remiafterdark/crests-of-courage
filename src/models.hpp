@@ -21,6 +21,8 @@ void models_reset_for_game(J3DModelData* data, const char* what);
 
 void models_note_worn(J3DModelData* const* worn, int count);
 
+bool models_is_skin(J3DModelData* data);
+
 void models_link_rebuilding();
 J3DModel* modelFromData(J3DModelData* data, cXyz scale);
 

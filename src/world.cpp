@@ -1740,6 +1740,9 @@ struct BundleTrack {
     uint8_t sw[kMemSwitchEnd - kMemSwitchFirst] = {};
     uint8_t newEv[kEventSize] = {};
     uint8_t newSw[kMemSwitchEnd - kMemSwitchFirst] = {};
+
+    uint8_t offEv[kEventSize] = {};
+    uint8_t offSw[kMemSwitchEnd - kMemSwitchFirst] = {};
     bool open = false;
 
     uint8_t keys = 0;
@@ -1807,16 +1810,45 @@ void bundle_close() {
             ++switches;
         }
     }
+
+    int offs = 0;
+    int swOffs = 0;
+    for (int b = 0; b < kEventSize; ++b) {
+        for (int bit = 0; bit < 8; ++bit) {
+            if ((s_bundle.offEv[b] & (1u << bit)) == 0) continue;
+            const uint16_t flag = static_cast<uint16_t>((b << 8) | (1u << bit));
+            const StoryFlagInfo* f = story_flag_info(flag);
+            if (f == nullptr || (f->policy != kStoryShare && f->policy != kStoryLayer)) continue;
+            if (offs < kBundleOff) msg.off[offs] = flag;
+            ++offs;
+        }
+    }
+    for (int i = 0; i < kMemSwitchEnd - kMemSwitchFirst; ++i) {
+        for (int bit = 0; bit < 8; ++bit) {
+            if ((s_bundle.offSw[i] & (1u << bit)) == 0) continue;
+            if (swOffs < kBundleOff) msg.swOff[swOffs] = static_cast<uint8_t>((i / 4) * 32 + (3 - i % 4) * 8 + bit);
+            ++swOffs;
+        }
+    }
     std::memset(s_bundle.newEv, 0, sizeof(s_bundle.newEv));
     std::memset(s_bundle.newSw, 0, sizeof(s_bundle.newSw));
-    if (flags == 0 || switches == 0 || flags > kBundleFlags || switches > kBundleSwitches) return;
+    std::memset(s_bundle.offEv, 0, sizeof(s_bundle.offEv));
+    std::memset(s_bundle.offSw, 0, sizeof(s_bundle.offSw));
+
+    if (flags == 0 || flags > kBundleFlags || switches > kBundleSwitches || offs > kBundleOff ||
+        swOffs > kBundleOff) {
+        return;
+    }
     msg.flagCount = static_cast<uint8_t>(flags);
     msg.swCount = static_cast<uint8_t>(switches);
+    msg.offCount = static_cast<uint8_t>(offs);
+    msg.swOffCount = static_cast<uint8_t>(swOffs);
     coop_net_send(kMsgStoryBundle, &msg, sizeof(msg));
     char name[9] = {};
     std::memcpy(name, s_bundle.stage, 8);
-    coop_log::info("coop_mod: [STORY] bundle sent stage={} flags={} first={:#06x} {} switches={} first={}",
-        name, msg.flagCount, msg.flags[0], story_flag_name(msg.flags[0]), msg.swCount, msg.sw[0]);
+    coop_log::info("coop_mod: [STORY] scene sent stage={} flags={} first={:#06x} {} off={} switches={}/{}",
+        name, msg.flagCount, msg.flags[0], story_flag_name(msg.flags[0]), msg.offCount, msg.swCount,
+        msg.swOffCount);
 }
 
 void bundle_track() {
@@ -1859,13 +1891,26 @@ void bundle_track() {
         const uint8_t on = static_cast<uint8_t>(ev[b] & ~s_bundle.ev[b] & ~story_private(b));
         if (on != 0) {
             s_bundle.newEv[b] = static_cast<uint8_t>(s_bundle.newEv[b] | on);
+            s_bundle.offEv[b] = static_cast<uint8_t>(s_bundle.offEv[b] & ~on);
             fresh = true;
+        }
+
+        const uint8_t off = static_cast<uint8_t>(s_bundle.ev[b] & ~ev[b] & ~story_private(b));
+        if (off != 0 && (s_bundle.open || local_mid_sequence())) {
+            s_bundle.offEv[b] = static_cast<uint8_t>(s_bundle.offEv[b] | off);
+            s_bundle.newEv[b] = static_cast<uint8_t>(s_bundle.newEv[b] & ~off);
         }
         s_bundle.ev[b] = ev[b];
     }
     for (int i = 0; i < kMemSwitchEnd - kMemSwitchFirst; ++i) {
+        const uint8_t swOff = static_cast<uint8_t>(s_bundle.sw[i] & ~sw[i]);
+        if (swOff != 0 && (s_bundle.open || local_mid_sequence()) && overworld_switch_byte(stage, kMemSwitchFirst + i)) {
+            s_bundle.offSw[i] = static_cast<uint8_t>(s_bundle.offSw[i] | swOff);
+            s_bundle.newSw[i] = static_cast<uint8_t>(s_bundle.newSw[i] & ~swOff);
+        }
         const uint8_t on = static_cast<uint8_t>(sw[i] & ~s_bundle.sw[i]);
         if (on != 0 && overworld_switch_byte(stage, kMemSwitchFirst + i)) {
+            s_bundle.offSw[i] = static_cast<uint8_t>(s_bundle.offSw[i] & ~on);
             s_bundle.newSw[i] = static_cast<uint8_t>(s_bundle.newSw[i] | on);
             fresh = true;
             if (keyJustSpent) {
@@ -1888,8 +1933,15 @@ void bundle_track() {
 
 void bundle_on_message(const MsgStoryBundle& msg) {
     if (msg.saveNo < 0 || msg.saveNo >= dSv_save_c::STAGE_MAX) return;
-    if (msg.flagCount == 0 || msg.flagCount > kBundleFlags || msg.swCount == 0 ||
-        msg.swCount > kBundleSwitches) {
+    if (msg.flagCount == 0 || msg.flagCount > kBundleFlags || msg.swCount > kBundleSwitches ||
+        msg.offCount > kBundleOff || msg.swOffCount > kBundleOff) {
+        return;
+    }
+
+    bool ours = true;
+    for (int i = 0; i < msg.flagCount && ours; ++i) ours = dComIfGs_isEventBit(msg.flags[i]) != 0;
+    if (ours) {
+        coop_log::info("coop_mod: [STORY] scene from {:.8} already played here, left alone", msg.stage);
         return;
     }
     PendingBundle& p = s_pendingBundles[s_pendingBundleNext];
@@ -1933,8 +1985,35 @@ void bundle_apply_ready() {
             }
             ++turned;
         }
-        coop_log::info("coop_mod: [STORY] bundle applied stage={} flag={:#06x} {} switches on={} live={}",
-            name, p.msg.flags[0], story_flag_name(p.msg.flags[0]), turned, sameSlot);
+        for (int i = 0; i < p.msg.swOffCount; ++i) {
+            const uint8_t sw = p.msg.swOff[i];
+            if (sw >= 0x80) continue;
+            const int byte = kMemSwitchFirst + 4 * (sw >> 5) + (3 - ((sw & 31) >> 3));
+            if (!overworld_switch_byte(name, byte)) continue;
+            const uint8_t bit = static_cast<uint8_t>(1u << (sw & 7));
+            if ((target[byte] & bit) == 0) continue;
+            target[byte] = static_cast<uint8_t>(target[byte] & ~bit);
+            if (sameSlot && s_bundle.have) {
+                s_bundle.sw[byte - kMemSwitchFirst] = static_cast<uint8_t>(s_bundle.sw[byte - kMemSwitchFirst] & ~bit);
+            }
+            ++turned;
+        }
+
+        uint8_t* ev = info->getSavedata().getEvent().mEvent;
+        int cleared = 0;
+        for (int i = 0; i < p.msg.offCount; ++i) {
+            const uint16_t flag = p.msg.off[i];
+            const StoryFlagInfo* f = story_flag_info(flag);
+            if (f == nullptr || (f->policy != kStoryShare && f->policy != kStoryLayer)) continue;
+            const int b = flag >> 8;
+            const uint8_t bit = static_cast<uint8_t>(flag & 0xFF);
+            if (b >= kEventSize || (story_private(b) & bit) != 0 || (ev[b] & bit) == 0) continue;
+            ev[b] = static_cast<uint8_t>(ev[b] & ~bit);
+            if (s_bundle.have) s_bundle.ev[b] = static_cast<uint8_t>(s_bundle.ev[b] & ~bit);
+            ++cleared;
+        }
+        coop_log::info("coop_mod: [STORY] scene applied stage={} flag={:#06x} {} switches={} flags off={} live={}",
+            name, p.msg.flags[0], story_flag_name(p.msg.flags[0]), turned, cleared, sameSlot);
         p = PendingBundle{};
     }
 }
@@ -1969,15 +2048,66 @@ HookAction on_stage_load_pre(ModContext*, void*, void*, void*) {
         coop_log::info("coop_mod: [WORLD] stage load, transform/twilight flags {:#04x}/{:#04x}", cur[0], cur[1]);
         std::memset(s_statusBPending, 0, sizeof(s_statusBPending));
     }
+    if (features_load_is_cutscene() && s_storyPendingBits != 0) {
+        coop_log::info("coop_mod: [STORY] {} remote flags kept for the next load: this one is part of a scene",
+            s_storyPendingBits);
+        story_repair_companions(info->getSavedata().getEvent().mEvent);
+        return HOOK_CONTINUE;
+    }
     story_apply_pending(info);
     return HOOK_CONTINUE;
 }
+
+struct OwnScene {
+    uint16_t flag;
+    const char* stage;
+};
+const OwnScene kOwnScene[] = {
+    {dSv_event_flag_c::M_009, "R_SP107"},
+    {dSv_event_flag_c::M_014, "R_SP107"},
+    {dSv_event_flag_c::F_0550, "R_SP107"},
+    {dSv_event_flag_c::M_010, "R_SP107"},
+    {dSv_event_flag_c::M_011, "R_SP107"},
+    {dSv_event_flag_c::M_012, "R_SP107"},
+    {dSv_event_flag_c::M_016, "F_SP104"},
+    {dSv_event_flag_c::M_017, "F_SP108"},
+    {dSv_event_flag_c::M_019, "F_SP108"},
+};
 
 void story_apply_pending(dSv_info_c* info) {
     uint8_t* ev = info->getSavedata().getEvent().mEvent;
     if (s_storyPendingBits == 0) {
         story_repair_companions(ev);
         return;
+    }
+    uint8_t later[kEventSize] = {};
+    const char* here = dComIfGp_getStartStageName();
+
+    for (const PendingBundle& p : s_pendingBundles) {
+        if (!p.used || here == nullptr || std::strncmp(here, p.msg.stage, 8) != 0) continue;
+        bool layer = false;
+        for (int i = 0; i < p.msg.flagCount && !layer; ++i) {
+            const StoryFlagInfo* f = story_flag_info(p.msg.flags[i]);
+            layer = f != nullptr && f->policy == kStoryLayer;
+        }
+        if (!layer) continue;
+        for (int i = 0; i < p.msg.flagCount; ++i) {
+            const int b = p.msg.flags[i] >> 8;
+            const uint8_t bit = static_cast<uint8_t>(p.msg.flags[i] & 0xFF);
+            if (b >= kEventSize || (s_storyPending[b] & bit) == 0) continue;
+            later[b] = static_cast<uint8_t>(later[b] | bit);
+            s_storyPending[b] = static_cast<uint8_t>(s_storyPending[b] & ~bit);
+        }
+        coop_log::info("coop_mod: [STORY] scene from {:.8} kept for later: it changes this stage", here);
+    }
+    for (const OwnScene& o : kOwnScene) {
+        const int b = o.flag >> 8;
+        const uint8_t bit = static_cast<uint8_t>(o.flag & 0xFF);
+        if (here == nullptr || std::strncmp(here, o.stage, 8) != 0 || (s_storyPending[b] & bit) == 0) continue;
+        later[b] = static_cast<uint8_t>(later[b] | bit);
+        s_storyPending[b] = static_cast<uint8_t>(s_storyPending[b] & ~bit);
+        coop_log::info("coop_mod: [STORY] flag {:#06x} {} kept for later, its own scene is in {:.8}", o.flag,
+            story_flag_name(o.flag), here);
     }
 
     for (int b = 0; b < kEventSize; ++b) {
@@ -1995,10 +2125,38 @@ void story_apply_pending(dSv_info_c* info) {
         ev[b] = static_cast<uint8_t>(ev[b] | s_storyPending[b]);
 
         if (s_base.haveEvent) s_base.event[b] = static_cast<uint8_t>(s_base.event[b] | s_storyPending[b]);
+        if (s_bundle.have) s_bundle.ev[b] = static_cast<uint8_t>(s_bundle.ev[b] | s_storyPending[b]);
     }
     coop_log::info("coop_mod: [STORY] stage load, applying {} remote flags", s_storyPendingBits);
+
+    for (PendingBundle& p : s_pendingBundles) {
+        if (!p.used || p.msg.offCount == 0) continue;
+        bool all = true;
+        for (int i = 0; i < p.msg.flagCount && all; ++i) {
+            const int b = p.msg.flags[i] >> 8;
+            all = b < kEventSize && (ev[b] & (p.msg.flags[i] & 0xFF)) != 0;
+        }
+        if (!all) continue;
+        for (int i = 0; i < p.msg.offCount; ++i) {
+            const uint16_t flag = p.msg.off[i];
+            const StoryFlagInfo* f = story_flag_info(flag);
+            if (f == nullptr || (f->policy != kStoryShare && f->policy != kStoryLayer)) continue;
+            const int b = flag >> 8;
+            const uint8_t bit = static_cast<uint8_t>(flag & 0xFF);
+            if (b >= kEventSize || (story_private(b) & bit) != 0) continue;
+            ev[b] = static_cast<uint8_t>(ev[b] & ~bit);
+            if (s_bundle.have) s_bundle.ev[b] = static_cast<uint8_t>(s_bundle.ev[b] & ~bit);
+            if (s_base.haveEvent) s_base.event[b] = static_cast<uint8_t>(s_base.event[b] & ~bit);
+        }
+        coop_log::info("coop_mod: [STORY] scene offs applied at the load ({} flags)", p.msg.offCount);
+        p.msg.offCount = 0;
+    }
     std::memset(s_storyPending, 0, sizeof(s_storyPending));
     s_storyPendingBits = 0;
+    for (int b = 0; b < kEventSize; ++b) {
+        s_storyPending[b] = later[b];
+        s_storyPendingBits += bit_count(later[b]);
+    }
     story_repair_companions(ev);
 }
 

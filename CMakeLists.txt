@@ -25,6 +25,8 @@ add_mod(coop_mod
              src/online.cpp
              src/skipvote.cpp
              src/drops.cpp
+             src/softlocks.cpp
+             src/storytest.cpp
              src/twilight.cpp
              src/skills.cpp
              src/rando.cpp

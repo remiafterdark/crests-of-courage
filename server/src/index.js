@@ -52,6 +52,8 @@ const isIpv4 = (s) => typeof s === "string" && IPV4.test(s);
 const isPrivateIpv4 = (s) =>
   isIpv4(s) && (/^10\./.test(s) || /^192\.168\./.test(s) || /^172\.(1[6-9]|2\d|3[01])\./.test(s));
 
+const isTailscaleIpv4 = (s) => isIpv4(s) && /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(s);
+
 function isEndpoint(s) {
   if (typeof s !== "string") return false;
   const at = s.lastIndexOf(":");
@@ -114,6 +116,8 @@ function candidates(info, sameNet = false, otherLan = "") {
   if (isEndpoint(info.ep)) add(info.ep);
   if (isIpv4(info.ip) && isPort(info.port)) add(`${info.ip}:${info.port}`);
   if (sameNet && isPort(info.port) && (!lan || info.lan === otherLan)) add(`127.0.0.1:${info.port}`);
+
+  if (isTailscaleIpv4(info.ts) && isPort(info.port)) add(`${info.ts}:${info.port}`);
   return out;
 }
 
@@ -258,6 +262,7 @@ export class Room {
           port: isPort(msg.port) ? msg.port : 0,
           upnp: isEndpoint(msg.upnp) ? msg.upnp : "",
           lan: isPrivateIpv4(msg.lan) ? msg.lan : "",
+          ts: isTailscaleIpv4(msg.ts) ? msg.ts : "",
         };
         ws.serializeAttachment(me);
 
@@ -278,6 +283,7 @@ export class Room {
       ep: isEndpoint(msg.ep) ? msg.ep : "",
       port: isPort(msg.port) ? msg.port : 0,
       lan: isPrivateIpv4(msg.lan) ? msg.lan : "",
+      ts: isTailscaleIpv4(msg.ts) ? msg.ts : "",
     };
     ws.serializeAttachment(me);
     const host = this.host();

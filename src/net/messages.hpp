@@ -117,18 +117,27 @@ enum CoopMsgType : uint8_t {
     kMsgJoinSyncWant = 72,
     kMsgShopSoldOut = 73,
     kMsgStoryBundle = 74,
+    kMsgNpcTalk = 75,
+    kMsgChat = 76,
+    kMsgCatchUpWant = 77,
+    kMsgCatchUp = 78,
 };
 
-const int kBundleFlags = 8;
+const int kBundleFlags = 16;
 const int kBundleSwitches = 16;
+const int kBundleOff = 8;
 struct MsgStoryBundle {
     char stage[8];
     int8_t saveNo;
     uint8_t flagCount;
     uint8_t swCount;
-    uint8_t pad;
+    uint8_t offCount;
     uint16_t flags[kBundleFlags];
+    uint16_t off[kBundleOff];
     uint8_t sw[kBundleSwitches];
+    uint8_t swOff[kBundleOff];
+    uint8_t swOffCount;
+    uint8_t pad[3];
 };
 
 struct MsgShopSoldOut {
@@ -234,6 +243,25 @@ struct MsgTbox2 {
     uint8_t pad;
     int16_t procName;
     float home[3];
+};
+
+struct MsgNpcTalk {
+    uint32_t key;
+    int8_t room;
+    int16_t procName;
+    int16_t angleY;
+    float home[3];
+    float pos[3];
+};
+
+struct MsgCatchUpWant {
+    uint8_t to;
+    uint8_t pad[3];
+};
+struct MsgCatchUpHeader {
+    uint8_t to;
+    uint8_t pad;
+    uint16_t size;
 };
 
 struct MsgAnimal {
@@ -462,6 +490,8 @@ struct MsgPresence {
     uint16_t maxLife;
 
     uint8_t storyBits;
+
+    uint8_t flags;
 };
 
 struct MsgItem {

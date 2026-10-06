@@ -136,6 +136,8 @@ struct AnmSlotSnapshot {
 
 const uint8_t kSnapHidden = 0x80;
 
+const uint8_t kSnapNoHits = 0x10;
+
 struct PlayerSnapshot {
     uint32_t seq;
 

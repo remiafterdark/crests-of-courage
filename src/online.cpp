@@ -263,6 +263,9 @@ void say_hello() {
     const std::string lan = coop_lan_address();
     if (!lan.empty()) hello += ",\"lan\":\"" + lan + "\"";
     coop_log::info("coop_mod: [ONLINE] local address {}", lan.empty() ? "unknown" : "known");
+    const std::string ts = coop_tailscale_address();
+    if (!ts.empty()) hello += ",\"ts\":\"" + ts + "\"";
+    coop_log::info("coop_mod: [ONLINE] tailscale {}", ts.empty() ? "off" : "on");
     if (s_host) {
         s_sentUpnp = upnp_external_address();
         hello += ",\"upnp\":\"" + json_escape(s_sentUpnp) + "\"";

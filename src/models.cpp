@@ -245,6 +245,8 @@ struct FreshState {
 };
 std::unordered_map<J3DModelData*, FreshState> s_fresh;
 
+int s_resetLogs = 0;
+
 std::unordered_set<J3DModelData*> s_worn;
 
 void remember_own_anms(J3DModelData* data) {
@@ -403,8 +405,8 @@ void models_reset_for_game(J3DModelData* data, const char* what) {
         if (f.hidden[i]) shape->hide(); else shape->show();
     }
     if (patterns + foreign + joints + shapes > 0) {
-        static int s_logCount = 0;
-        if (s_logCount++ < 40) {
+
+        if (s_resetLogs++ < 12) {
             coop_log::info("coop_mod: [SKIN-ANM] '{}' reset: patterns={} anmSlots={} jointHooks={} shapes={}", what != nullptr ? what : "?", patterns, foreign, joints,
                 shapes);
         }
@@ -420,6 +422,11 @@ void models_note_worn(J3DModelData* const* worn, int count) {
 
 void models_link_rebuilding() {
     s_worn.clear();
+    s_resetLogs = 0;
+}
+
+bool models_is_skin(J3DModelData* data) {
+    return data != nullptr && s_fresh.count(data) != 0;
 }
 
 J3DModelData* load_bmd_with_warp(const char* path, const char* who) {

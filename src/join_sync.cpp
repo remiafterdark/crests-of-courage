@@ -297,7 +297,7 @@ PendingSession s_session;
 
 const uint32_t kSessionGiveUpTicks = 600;
 
-void load_host_save(dSv_info_c* info, const uint8_t* blob) {
+void load_host_save(dSv_info_c* info, const uint8_t* blob, uint8_t at = kCoopHostId) {
     dSv_save_c& mine = info->getSavedata();
     static dSv_save_c result;
     std::memcpy(&result, blob, kSaveSize);
@@ -360,7 +360,7 @@ void load_host_save(dSv_info_c* info, const uint8_t* blob) {
     features_reset_sync_baselines();
     world_on_connected();
 
-    s_session.active = features_reload_at_player(kCoopHostId);
+    s_session.active = features_reload_at_player(at);
     s_session.waitedTicks = 0;
     if (!s_session.active) {
         coop_log::warn("coop_mod: [JOIN] host position unknown, keeping local gear and position");
@@ -503,6 +503,84 @@ std::string joinsync_backup_summary() {
            ". " + std::to_string(all.size()) + " kept. The oldest is your first one.";
 }
 
+namespace {
+
+std::vector<uint8_t> s_catchUp;
+uint8_t s_catchUpFrom = kCoopNoPlayer;
+uint32_t s_catchUpAskedTick = 0;
+uint32_t s_catchUpTick = 0;
+
+void send_catch_up(uint8_t to) {
+    dSv_info_c* info = dComIfGs_getSaveInfo();
+    if (info == nullptr) return;
+    std::vector<uint8_t> buffer(sizeof(MsgCatchUpHeader) + kSaveSize);
+    MsgCatchUpHeader header{};
+    header.to = to;
+    header.size = static_cast<uint16_t>(kSaveSize);
+    std::memcpy(buffer.data(), &header, sizeof(header));
+    std::memcpy(buffer.data() + sizeof(header), &info->getSavedata(), kSaveSize);
+    const int slot = current_save_slot();
+    if (slot >= 0) {
+        const size_t slotOffset = offsetof(dSv_save_c, mSave) + slot * sizeof(dSv_memory_c);
+        std::memcpy(buffer.data() + sizeof(header) + slotOffset, &info->getMemory(), sizeof(dSv_memory_c));
+    }
+    coop_net_send_to(to, kMsgCatchUp, buffer.data(), buffer.size());
+    coop_log::info("coop_mod: [JOIN] sent our save to player {} to catch up", to);
+}
+
+void apply_catch_up() {
+    dSv_info_c* info = dComIfGs_getSaveInfo();
+    if (info == nullptr || s_catchUp.size() != kSaveSize || s_catchUpFrom >= kCoopMaxPlayers) return;
+    if (!in_gameplay_settled() || dComIfGp_event_runCheck()) return;
+    const CoopPeer& peer = features_peer_of(s_catchUpFrom);
+    load_host_save(info, s_catchUp.data(), s_catchUpFrom);
+    s_carryingJoinedWorld = true;
+    coop_log::info("coop_mod: [JOIN] caught up with player {}", s_catchUpFrom);
+    features_toast(("Caught up with " + (peer.present ? peer.name : std::string("them"))).c_str(),
+        "You have their story now.");
+    s_catchUp.clear();
+    s_catchUpFrom = kCoopNoPlayer;
+}
+
+}
+
+void joinsync_catch_up(uint8_t player) {
+    if (!coop_net_connected() || player >= kCoopMaxPlayers || player == coop_net_local_id() ||
+        !coop_net_player_present(player)) {
+        return;
+    }
+    if (!rando_join_sync_allowed()) {
+        features_toast("Can't catch up", "You're on different randomizer seeds.");
+        return;
+    }
+    MsgCatchUpWant want{};
+    want.to = player;
+    coop_net_send_to(player, kMsgCatchUpWant, &want, sizeof(want));
+    s_catchUpAskedTick = s_catchUpTick != 0 ? s_catchUpTick : 1;
+    s_catchUpFrom = player;
+    features_toast("Catching up", "Asking for their save...");
+    coop_log::info("coop_mod: [JOIN] asking player {} for their save to catch up", player);
+}
+
+void joinsync_on_catch_up(uint8_t type, const uint8_t* payload, size_t size, uint8_t from) {
+    if (from >= kCoopMaxPlayers) return;
+    if (type == kMsgCatchUpWant) {
+        if (size < sizeof(MsgCatchUpWant) || payload[0] != coop_net_local_id()) return;
+        send_catch_up(from);
+        return;
+    }
+    if (size < sizeof(MsgCatchUpHeader)) return;
+    MsgCatchUpHeader header;
+    std::memcpy(&header, payload, sizeof(header));
+    if (header.to != coop_net_local_id()) return;
+
+    if (s_catchUpAskedTick == 0 || from != s_catchUpFrom) return;
+    if (header.size != kSaveSize || size < sizeof(header) + kSaveSize) return;
+    s_catchUp.assign(payload + sizeof(header), payload + sizeof(header) + kSaveSize);
+    s_catchUpAskedTick = 0;
+    coop_log::info("coop_mod: [JOIN] save from player {} received, catching up", from);
+}
+
 bool joinsync_ready_to_share() {
     return coop_net_is_host() || s_joinerApplied;
 }
@@ -534,7 +612,17 @@ void joinsync_on_connected() {
 void joinsync_update() {
 
     apply_pending_session();
-    if (!coop_net_connected()) return;
+    ++s_catchUpTick;
+    if (!coop_net_connected()) {
+        s_catchUp.clear();
+        s_catchUpAskedTick = 0;
+        return;
+    }
+    if (!s_catchUp.empty()) apply_catch_up();
+    if (s_catchUpAskedTick != 0 && s_catchUpTick - s_catchUpAskedTick > 600) {
+        s_catchUpAskedTick = 0;
+        features_toast("Couldn't catch up", "They didn't answer. Try again in a moment.");
+    }
     if (coop_net_is_host()) {
         if (!in_gameplay_settled()) return;
         for (int i = 0; i < kCoopMaxPlayers; ++i) {

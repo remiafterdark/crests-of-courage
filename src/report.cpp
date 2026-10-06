@@ -76,7 +76,7 @@ std::string previous_log(int back = 1, size_t keep = kKeepBytes) {
 }
 
 std::string crash_trail_tail(size_t keep = 16u * 1024u) {
-    std::ifstream in("coop-crash-trail.txt", std::ios::binary);
+    std::ifstream in(std::filesystem::u8path(coop_crash_trail_path()), std::ios::binary);
     if (!in) return "(no crash trail)\n";
     std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     if (all.size() > keep) {
@@ -585,4 +585,10 @@ void report_hint_update() {
     if (++s_hintTicks < 120) return;
     coop_notify_c(kNotifyOther, "Found a bug?", "Report bugs in CO-OP > Report Bug");
     svc_config->set_bool(mod_ctx, s_hintVar, true);
+}
+
+std::string coop_crash_trail_path() {
+    const std::filesystem::path dir = log_dir();
+    const auto u8 = (dir.empty() ? std::filesystem::path("coop-crash-trail.txt") : dir / "coop-crash-trail.txt").u8string();
+    return std::string(u8.begin(), u8.end());
 }
