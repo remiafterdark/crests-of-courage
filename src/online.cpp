@@ -140,6 +140,7 @@ bool s_named = false;
 Phase s_phase = Phase::Idle;
 std::string s_status;
 std::string s_code;
+bool s_roomTaken = false;
 std::string s_serverUrl;
 int s_localPort = 0;
 mods::ws::Connection s_ws;
@@ -476,6 +477,7 @@ void on_server_message(const std::string& text) {
         const std::string why = error_text(msg.str("why"), msg.str("detail"));
         if (s_host && msg.str("why") == "taken" && s_reconnects == 0) {
 
+            s_roomTaken = true;
             close_ws();
             set_phase(Phase::Failed, why);
             s_reconnectAtMs = 0;
@@ -587,8 +589,13 @@ std::string host_path() {
     return "/host?code=" + s_code + (s_named ? "&strict=1" : "") + "&" + key;
 }
 
+bool online_room_taken() {
+    return s_roomTaken;
+}
+
 void online_host_begin(int udpPort, const std::string& name) {
     online_stop();
+    s_roomTaken = false;
     s_host = true;
     s_localPort = udpPort;
     s_reconnects = 0;

@@ -528,11 +528,30 @@ void send_catch_up(uint8_t to) {
     coop_log::info("coop_mod: [JOIN] sent our save to player {} to catch up", to);
 }
 
+void keep_own_items(dSv_save_c& theirs, const dSv_save_c& mine) {
+    dSv_player_item_c& item = theirs.mPlayer.mItem;
+    const dSv_player_item_c& myItem = mine.mPlayer.mItem;
+    int kept = 0;
+    for (int i = 0; i < 24; ++i) {
+        if (item.mItems[i] == dItemNo_NONE_e && myItem.mItems[i] != dItemNo_NONE_e) {
+            item.mItems[i] = myItem.mItems[i];
+            ++kept;
+        }
+    }
+    if (kept != 0) item.setLineUpItem();
+    dSv_player_get_item_c& get = theirs.mPlayer.mGetItem;
+    const dSv_player_get_item_c& myGet = mine.mPlayer.mGetItem;
+    for (int i = 0; i < 8; ++i) get.mItemFlags[i] = static_cast<u32>(get.mItemFlags[i]) | static_cast<u32>(myGet.mItemFlags[i]);
+    for (int i = 0; i < 8; ++i) theirs.mPlayer.mCollect.mItem[i] |= mine.mPlayer.mCollect.mItem[i];
+    if (kept != 0) coop_log::info("coop_mod: [JOIN] catch up kept {} own item slot(s)", kept);
+}
+
 void apply_catch_up() {
     dSv_info_c* info = dComIfGs_getSaveInfo();
     if (info == nullptr || s_catchUp.size() != kSaveSize || s_catchUpFrom >= kCoopMaxPlayers) return;
     if (!in_gameplay_settled() || dComIfGp_event_runCheck()) return;
     const CoopPeer& peer = features_peer_of(s_catchUpFrom);
+    keep_own_items(*reinterpret_cast<dSv_save_c*>(s_catchUp.data()), info->getSavedata());
     load_host_save(info, s_catchUp.data(), s_catchUpFrom);
     s_carryingJoinedWorld = true;
     coop_log::info("coop_mod: [JOIN] caught up with player {}", s_catchUpFrom);
@@ -601,7 +620,9 @@ void joinsync_forget_player(uint8_t id) {
 void joinsync_on_connected() {
     s_session = PendingSession{};
     for (int i = 0; i < kCoopMaxPlayers; ++i) s_hostSentTo[i] = false;
-    s_joinerApplied = false;
+
+    s_joinerApplied = coop_net_migrating();
+    if (s_joinerApplied) coop_log::info("coop_mod: [JOIN] rejoined after a host handover, keeping our world");
     s_havePending = false;
     s_pending.clear();
     s_settledTicks = 0;

@@ -3,31 +3,45 @@ online co op for twilight princess. 2 to 16 players in one world.
 put crests_of_courage.dusk in dusklight's mods folder. a co op tab shows up in the menu bar.
 one player presses host and reads out the room, everyone else types it and presses join.
 
-for dusklight 2.0.3. everyone has to update: it only connects to 1.9.0.
+for dusklight 2.0.3. everyone has to update: it only connects to 1.10.0.
 
 this build:
-- added chat in private lobbies
-- added pvp to hyrule online, with an option to only see pvp players
-- pvp players have red names
-- hearts only drop on hits that actually land
-- added catch up: co op > players, if you get stuck
-- story scenes now sync whole, flags turned off included
-- fixed being stuck on zelda's tower
-- fixed midna not breaking the chain in the prison
-- fixed midna stopping you forever after faron's shadow beasts
-- fixed rutela's graveyard locking up
-- fixed zelda only saying hello
-- fixed jaggle's hill talk looping
-- fixed a crash with players holding items
-- fixed a guay crash
-- fixed helmasaurs you couldn't hurt
-- fixed t-pose with custom models
-- fixed disconnects from the reliable channel overflowing
-- notifications don't pile up anymore
-- room codes work over tailscale
-- lifting rocks drops their item for everyone
-- npcs turn to whoever is talking to them
-- squirrels, dogs, cats and birds are synced
-- chat fits with the hd hud
-- reset to default for colours
-- unblock everyone button
+- added voice chat
+- voice is directional and gets quieter with distance
+- added a mute key and muting players
+- mac and phones can only listen for now
+- talking and muted icons over names
+- shows mic on or off for a moment when you change it
+- pick your own name tag colour
+- new hyrule online page
+- added an optional hyrule online box on screen
+- players show on the minimap
+- chat can scroll up
+- the game keeps going if the host leaves or crashes
+- asks to send a crash report after a crash, or sends it by itself if you turn that on
+- better connections on bad networks
+- fixed the customisation menu with a controller
+- fixed the hyrule online player list being invisible
+- fixed blocking sometimes hitting the wrong player
+- fixed / and ? opening the debug console in chat
+- fixed ordon being on the wrong day
+- fixed the sky book not finishing
+- fixed epona being invisible
+- fixed wolf senses not unlocking
+- fixed bo's hallway in rando
+- fixed bo's talk looping
+- fixed the kakariko bomb house cutscene softlock
+- fixed staying a wolf after faron
+- fixed rando swords skipping a level
+- fixed double milk and oil bottles
+- fixed light sword not syncing
+- fixed the light sword glow being in the floor
+- fixed double poe souls
+- fixed other players' spike traps hurting you in the temple of time
+- fixed a stuck helmasaur
+- fixed the forest temple plant freezing you
+- fixed a crash putting on the magic armor
+- fixed a boomerang crash
+- fixed a crash when someone gets an item
+- fixed a crash hitting rocks
+- fixed running out of memory with other players

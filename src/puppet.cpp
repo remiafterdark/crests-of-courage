@@ -46,6 +46,10 @@
 #include "res/Object/Alink.h"
 #include "res/Object/Wmdl.h"
 
+#include <gx.h>
+
+#include "voice_icons.inc"
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -133,6 +137,8 @@ struct PuppetAnimCacheEntry {
     mDoExt_bckAnm* bck = nullptr;
 
     u8* buf = nullptr;
+
+    J3DAnmTransform* anm = nullptr;
     u32 lastUsed = 0;
 
     u32 usedFrame = 0;
@@ -1776,8 +1782,10 @@ mDoExt_bckAnm* get_or_load_puppet_anim(daAlink_c* alink, u16 resIdx) {
             return nullptr;
         }
         if (s_puppetAnimCache[lruIdx].bck != nullptr) JKR_DELETE(s_puppetAnimCache[lruIdx].bck);
+        if (s_puppetAnimCache[lruIdx].anm != nullptr) JKR_DELETE(s_puppetAnimCache[lruIdx].anm);
         if (s_puppetAnimCache[lruIdx].buf != nullptr) JKRFreeToSysHeap(s_puppetAnimCache[lruIdx].buf);
         s_puppetAnimCache[lruIdx].buf = nullptr;
+        s_puppetAnimCache[lruIdx].anm = nullptr;
         s_puppetAnimCache[lruIdx].resIdx = resIdx;
         s_puppetAnimCache[lruIdx].bck = bck;
         s_puppetAnimCache[lruIdx].lastUsed = ++s_puppetAnimCacheClock;
@@ -1827,9 +1835,13 @@ mDoExt_bckAnm* get_or_load_puppet_anim(daAlink_c* alink, u16 resIdx) {
     if (s_puppetAnimCache[lruIdx].bck != nullptr) {
         JKR_DELETE(s_puppetAnimCache[lruIdx].bck);
     }
+    if (s_puppetAnimCache[lruIdx].anm != nullptr) {
+        JKR_DELETE(s_puppetAnimCache[lruIdx].anm);
+    }
     if (s_puppetAnimCache[lruIdx].buf != nullptr) {
         JKRFreeToSysHeap(s_puppetAnimCache[lruIdx].buf);
     }
+    s_puppetAnimCache[lruIdx].anm = anm;
     s_puppetAnimCache[lruIdx].buf = buf;
     s_puppetAnimCache[lruIdx].resIdx = resIdx;
     s_puppetAnimCache[lruIdx].bck = bck;
@@ -2575,6 +2587,26 @@ T* item_anim_res(const char* arc, s16 idx) {
     return static_cast<T*>(dComIfG_getObjectRes(arc, idx));
 }
 
+bool tev_ids_fit(J3DAnmTevRegKey* anm, u16 matNum) {
+    for (u16 i = 0; i < anm->getCRegUpdateMaterialNum(); ++i) {
+        if (!anm->isValidCRegUpdateMaterialID(i)) continue;
+        if (anm->getCRegUpdateMaterialID(i) >= matNum || anm->getAnmCRegKeyTable()[i].mColorId >= 4) return false;
+    }
+    for (u16 i = 0; i < anm->getKRegUpdateMaterialNum(); ++i) {
+        if (!anm->isValidKRegUpdateMaterialID(i)) continue;
+        if (anm->getKRegUpdateMaterialID(i) >= matNum || anm->getAnmKRegKeyTable()[i].mColorId >= 4) return false;
+    }
+    return true;
+}
+
+template <typename T>
+bool anm_ids_fit(T* anm, u16 matNum) {
+    for (u16 i = 0; i < anm->getUpdateMaterialNum(); ++i) {
+        if (anm->isValidUpdateMaterialID(i) && anm->getUpdateMaterialID(i) >= matNum) return false;
+    }
+    return true;
+}
+
 void render_get_item(J3DModel* model, const Mtx world, u8 item) {
     J3DModelData* data = model->getModelData();
     GetItemAnims& a = s_getItemAnims;
@@ -2612,6 +2644,10 @@ void render_get_item(J3DModel* model, const Mtx world, u8 item) {
         const f32 max = static_cast<f32>(anm->getFrameMax());
         return max > 0.0f ? a.frame - max * static_cast<f32>(static_cast<int>(a.frame / max)) : 0.0f;
     };
+    const u16 matNum = data != nullptr ? data->getMaterialNum() : 0;
+    if (a.btk != nullptr && !anm_ids_fit(a.btk, matNum)) a.btk = nullptr;
+    if (a.brk != nullptr && !tev_ids_fit(a.brk, matNum)) a.brk = nullptr;
+    if (a.btp != nullptr && !anm_ids_fit(a.btp, matNum)) a.btp = nullptr;
     if (data != nullptr && a.btk != nullptr) {
         data->entryTexMtxAnimator(a.btk);
         savedBtk = a.btk->getFrame();
@@ -3439,6 +3475,48 @@ void update_puppet_vfx(daAlink_c* alink) {
     }
 }
 
+void draw_voice_icon(f32 x, f32 baseline, f32 size, u8 alpha, bool muted) {
+    GXTexObj tex{};
+    GXInitTexObj(&tex, const_cast<unsigned char*>(muted ? kVoiceIconMuted : kVoiceIconSpeaking), kVoiceIconSize, kVoiceIconSize,
+        GX_TF_RGBA8, GX_CLAMP, GX_CLAMP, GX_FALSE);
+    GXInitTexObjLOD(&tex, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f, 0.0f, GX_FALSE, GX_FALSE, GX_ANISO_1);
+    GXLoadTexObj(&tex, GX_TEXMAP0);
+    GXClearVtxDesc();
+    GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
+    GXSetVtxDesc(GX_VA_CLR0, GX_DIRECT);
+    GXSetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+    GXSetNumChans(1);
+    GXSetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX, GX_LIGHT_NULL, GX_DF_NONE, GX_AF_NONE);
+    GXSetNumTexGens(1);
+    GXSetTexCoordGen2(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY, GX_FALSE, GX_PTIDENTITY);
+    GXSetNumTevStages(1);
+    GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+    GXSetTevOp(GX_TEVSTAGE0, GX_MODULATE);
+    GXSetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+    GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_SET);
+    GXSetAlphaCompare(GX_GREATER, 0, GX_AOP_AND, GX_ALWAYS, 0);
+    GXSetCullMode(GX_CULL_NONE);
+
+    const f32 left = x, right = x + size, top = baseline - size * 0.82f, bottom = top + size;
+    GXBegin(GX_QUADS, GX_VTXFMT0, 4);
+    GXPosition3f32(left, top, 0.0f);
+    GXColor4u8(255, 255, 255, alpha);
+    GXTexCoord2f32(0.0f, 0.0f);
+    GXPosition3f32(right, top, 0.0f);
+    GXColor4u8(255, 255, 255, alpha);
+    GXTexCoord2f32(1.0f, 0.0f);
+    GXPosition3f32(right, bottom, 0.0f);
+    GXColor4u8(255, 255, 255, alpha);
+    GXTexCoord2f32(1.0f, 1.0f);
+    GXPosition3f32(left, bottom, 0.0f);
+    GXColor4u8(255, 255, 255, alpha);
+    GXTexCoord2f32(0.0f, 1.0f);
+    GXEnd();
+}
+
 class PuppetNametagDlst : public dDlst_base_c {
 public:
 
@@ -3598,8 +3676,14 @@ public:
         font->setCharColor(JUtility::TColor(0, 0, 0, static_cast<u8>(mAlpha * 0.7f)));
         font->drawString_scale(x + shadow, y + shadow, cell, cell, mName, true);
 
-        font->setCharColor(mPvp ? JUtility::TColor(255, 110, 90, mAlpha) : JUtility::TColor(255, 255, 255, mAlpha));
+        font->setCharColor(mPvp ? JUtility::TColor(255, 110, 90, mAlpha)
+                                : JUtility::TColor(mNameR, mNameG, mNameB, mAlpha));
         font->drawString_scale(x, y, cell, cell, mName, true);
+
+        if (mVoice != 0 && !mEdge) {
+            const f32 size = std::clamp(cell * 1.25f, 14.0f, 22.0f);
+            draw_voice_icon(x + textWidth + cell * 0.28f, y, size, mAlpha, mVoice == 2);
+        }
 
         if (J2DGrafContext* port = dComIfGp_getCurrentGrafPort()) {
             port->setPort();
@@ -3635,6 +3719,8 @@ public:
 
     bool mStranger = false;
     bool mPvp = false;
+    u8 mVoice = 0;
+    u8 mNameR = 255, mNameG = 255, mNameB = 255;
     f32 mStrangerDist = 8000.0f;
 
     bool mEdge = false;
@@ -3676,7 +3762,13 @@ void queue_puppet_nametag(daAlink_c* alink) {
     std::strncpy(tag.mBaseName, pup().nametagName, sizeof(tag.mBaseName) - 1);
     tag.mBaseName[sizeof(tag.mBaseName) - 1] = '\0';
     tag.mStranger = global_slot_present(s_pupId);
+    tag.mVoice = !cfg_bool(voice_enabled_var(), false) ? 0
+                 : voice_peer_muted(s_pupId)           ? 2
+                 : voice_peer_speaking(s_pupId)        ? 1
+                                                       : 0;
     tag.mPvp = global_slot_pvp(s_pupId);
+    tag.mNameR = tag.mNameG = tag.mNameB = 255;
+    colors_name_rgb(s_pupId, &tag.mNameR, &tag.mNameG, &tag.mNameB);
 
     if (tag.mStranger && !cfg_bool(global_nametags_var(), true)) return;
     tag.mStrangerDist = static_cast<f32>(std::clamp<int64_t>(cfg_int(global_nametag_distance_var(), 8000), 500, 30000));
@@ -6813,4 +6905,8 @@ bool puppet_hook_joint_mtx(uint8_t playerId, int joint, float out[3][4]) {
         for (int c = 0; c < 4; ++c) out[r][c] = m[r][c];
     }
     return true;
+}
+
+void coop_draw_voice_icon(f32 x, f32 baseline, f32 size, u8 alpha, bool muted) {
+    draw_voice_icon(x, baseline, size, alpha, muted);
 }

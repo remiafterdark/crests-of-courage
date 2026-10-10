@@ -179,6 +179,8 @@ void apply_hit(const MsgPvpHit& hit) {
 
     if (sumo_hides_equipment(coop_net_local_id())) return;
 
+    if ((hit.atType & AT_TYPE_800) != 0) return;
+
     const HitPower power = hit_power(hit);
     const int atp = power.atp;
     const u8 spl = power.spl;

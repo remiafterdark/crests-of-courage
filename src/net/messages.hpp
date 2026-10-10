@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <string>
 
-const uint16_t kCoopProtocolVersion = 73;
+const uint16_t kCoopProtocolVersion = 74;
 
 #ifndef COOP_MOD_VERSION
 #define COOP_MOD_VERSION "0.0.0"
@@ -437,7 +437,8 @@ enum CoopEnemyFlags : uint8_t {
     kEnemyFlagCarried = 1 << 1,
 };
 
-const int kCoopColorSlots = 18;
+const int kCoopColorSlots = 19;
+const int kCoopColorName = 18;
 
 enum CoopBottleEvent : uint8_t {
     kBottleFillEmpty = 0,
@@ -492,6 +493,10 @@ struct MsgPresence {
     uint8_t storyBits;
 
     uint8_t flags;
+
+    float mapX, mapY, mapZ;
+    int16_t mapAngleY;
+    uint8_t mapValid;
 };
 
 struct MsgItem {

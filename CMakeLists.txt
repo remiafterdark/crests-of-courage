@@ -12,6 +12,44 @@ endif ()
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 add_subdirectory("${DUSK_DIR}/sdk" dusk-sdk EXCLUDE_FROM_ALL)
 
+include(FetchContent)
+set(COOP_VOICE ON)
+set(COOP_VOICE_SDL OFF)
+if (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(COOP_VOICE_SDL ON)
+endif ()
+if (COOP_VOICE)
+    block()
+        set(BUILD_SHARED_LIBS OFF)
+        set(OPUS_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+        set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+        set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+        set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+        set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(coop_opus
+            GIT_REPOSITORY https://github.com/xiph/opus.git
+            GIT_TAG v1.5.2
+            GIT_SHALLOW TRUE)
+        FetchContent_MakeAvailable(coop_opus)
+        set_target_properties(opus PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    endblock()
+endif ()
+if (COOP_VOICE_SDL)
+    file(GLOB COOP_SDL3_HINTS "${DUSK_DIR}/build/*/_deps/sdl3_prebuilt-src/include"
+                              "${DUSK_DIR}/build/*/_deps/sdl3-src/include")
+    find_path(COOP_SDL3_INCLUDE_DIR SDL3/SDL_audio.h HINTS ${COOP_SDL3_HINTS} NO_DEFAULT_PATH)
+    if (NOT COOP_SDL3_INCLUDE_DIR)
+        FetchContent_Declare(coop_sdl3_headers
+            URL "https://github.com/libsdl-org/SDL/archive/refs/tags/release-3.4.10.tar.gz"
+            DOWNLOAD_EXTRACT_TIMESTAMP FALSE)
+        FetchContent_GetProperties(coop_sdl3_headers)
+        if (NOT coop_sdl3_headers_POPULATED)
+            FetchContent_Populate(coop_sdl3_headers)
+        endif ()
+        set(COOP_SDL3_INCLUDE_DIR "${coop_sdl3_headers_SOURCE_DIR}/include")
+    endif ()
+endif ()
+
 add_mod(coop_mod
     FEATURES game fmt
     SOURCES  src/mod.cpp
@@ -64,9 +102,26 @@ add_mod(coop_mod
              src/lan.cpp
              src/global.cpp
              src/chat.cpp
+             src/crash_guard.cpp
+             src/global_hud.cpp
              src/chat_keys.cpp
+             src/voice.cpp
+             src/voice_io.cpp
     MOD_JSON mod.json
 )
+
+if (COOP_VOICE)
+    target_link_libraries(coop_mod PRIVATE opus)
+    target_compile_definitions(coop_mod PRIVATE COOP_VOICE=1)
+endif ()
+if (COOP_VOICE_SDL)
+    target_include_directories(coop_mod PRIVATE "${COOP_SDL3_INCLUDE_DIR}")
+    target_compile_definitions(coop_mod PRIVATE COOP_VOICE_SDL=1)
+elseif (APPLE)
+    target_link_libraries(coop_mod PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
+elseif (ANDROID)
+    target_link_libraries(coop_mod PRIVATE aaudio)
+endif ()
 
 if (WIN32)
     target_link_libraries(coop_mod PRIVATE ws2_32 user32)

@@ -135,6 +135,7 @@ bool s_inGrant = false;
 bool s_haveAfter = false;
 bool s_grantIsDuplicate = false;
 std::string s_grantName;
+bool s_grantMaybeBottle = false;
 
 std::unordered_map<std::string, uint8_t> s_collectedBy;
 
@@ -177,6 +178,7 @@ HookAction on_grant_pre(ModContext*, void*, void*, void*) {
     s_inGrant = dComIfGs_getSaveInfo() != nullptr;
     s_haveAfter = false;
     s_grantIsDuplicate = false;
+    s_grantMaybeBottle = false;
     s_grantName.clear();
     if (s_inGrant) take_photo(s_before);
     return HOOK_CONTINUE;
@@ -188,9 +190,22 @@ void on_item_func_post(ModContext*, void*, void*, void*) {
     s_haveAfter = true;
 }
 
+int bottle_count(const GrantPhoto& photo) {
+    const auto* save = reinterpret_cast<const dSv_save_c*>(photo.save);
+    int n = 0;
+    for (int i = SLOT_11; i <= SLOT_14; ++i) n += save->mPlayer.mItem.mItems[i] != dItemNo_NONE_e;
+    return n;
+}
+
 void on_grant_post(ModContext*, void* args, void*, void*) {
     if (!s_inGrant) return;
     s_inGrant = false;
+    if (s_grantMaybeBottle && s_haveAfter && bottle_count(s_after) > bottle_count(s_before)) {
+        undo_grant();
+        coop_log::info("coop_mod: [CHECKS] '{}' already collected by peer, its bottle came by relay, game's one taken back",
+            s_grantName);
+        return;
+    }
     if (!s_grantIsDuplicate || !s_haveAfter) return;
     undo_grant();
     const uint8_t item = mods::arg<u8>(args, 0);
@@ -221,6 +236,7 @@ void on_give(ModContext*, const ItemGiveInfo* info, void*) {
                                   MOD_OK &&
                               r.was_resolved;
         s_grantIsDuplicate = resolved && s_ledger.count(name) != 0;
+        s_grantMaybeBottle = !resolved && s_ledger.count(name) != 0 && features_bottles_relay();
 
         if (!s_haveAfter) {
             take_photo(s_after);
@@ -363,6 +379,53 @@ void checks_init() {
         func ? "attached" : "not hookable - using the grant observer");
 }
 
+struct NearPoe {
+    cXyz at;
+    int sw = 0xFF;
+    f32 dist = 300.0f;
+};
+
+void* find_near_poe(void* proc, void* data) {
+    auto* actor = static_cast<fopAc_ac_c*>(proc);
+    auto* near = static_cast<NearPoe*>(data);
+    if (actor == nullptr || actor->health > 0) return nullptr;
+    const int sw = poe_switch(actor);
+    if (sw == 0xFF) return nullptr;
+    const f32 d = (actor->current.pos - near->at).abs();
+    if (d < near->dist) {
+        near->dist = d;
+        near->sw = sw;
+    }
+    return nullptr;
+}
+
+void watch_own_poe_souls() {
+    static int s_souls = -1;
+    static int s_nearSw = 0xFF;
+    daAlink_c* alink = daAlink_getAlinkActorClass();
+    const char* stage = dComIfGp_getStartStageName();
+
+    if (alink == nullptr || stage == nullptr || rando_active()) {
+        s_souls = -1;
+        return;
+    }
+    const int souls = dComIfGs_getPohSpiritNum();
+    if (s_souls >= 0 && souls > s_souls && s_nearSw != 0xFF) {
+        const std::string name = "poe:" + std::string(stage) + ":" + std::to_string(s_nearSw);
+        if (note(name)) {
+            save_ledger();
+            if (coop_net_connected()) send_one(name, 0);
+            coop_log::info("coop_mod: [CHECKS] collected '{}' (soul)", name);
+        }
+    }
+    s_souls = souls;
+
+    NearPoe near;
+    near.at = alink->current.pos;
+    fopAcM_Search(find_near_poe, &near);
+    s_nearSw = near.sw;
+}
+
 void checks_update() {
     ++s_tick;
     const bool inGame = daAlink_getAlinkActorClass() != nullptr;
@@ -380,6 +443,7 @@ void checks_update() {
     }
     if (inGame && s_tick % 15 == 0) sweep_taken_pickups();
     if (inGame && s_tick % 15 == 7) sweep_taken_poes();
+    if (inGame) watch_own_poe_souls();
     if (s_tick % 300 == 0) save_ledger();
 }
 

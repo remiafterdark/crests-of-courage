@@ -237,9 +237,19 @@ bool overworld_switch_byte(const char* stage, int byte) {
     return byte >= kMemSwitchFirst && byte < kMemSwitchEnd && !dungeon_stage(stage);
 }
 
+const int kKakarikoSlot = 3;
+const int kBombHouseGoneSw = 65;
+int bomb_house_byte() { return 0x08 + 4 * (kBombHouseGoneSw >> 5) + (3 - ((kBombHouseGoneSw & 31) >> 3)); }
+uint8_t bomb_house_bit() { return static_cast<uint8_t>(1 << (kBombHouseGoneSw & 7)); }
+bool in_kakariko_slot() {
+    stage_stag_info_class* info = dComIfGp_getStageStagInfo();
+    return info != nullptr && dStage_stagInfo_GetSaveTbl(info) == kKakarikoSlot;
+}
+
 uint8_t mem_local_mask(const char* stage, int byte) {
     if (overworld_switch_byte(stage, byte)) return 0xFF;
     uint8_t mask = 0;
+    if (byte == bomb_house_byte() && in_kakariko_slot()) mask |= bomb_house_bit();
     for (int i = 0; i < s_localSwCount; ++i) {
         const int sw = s_localSw[i].sw;
         if (sw >= 0x80) continue;
@@ -285,6 +295,12 @@ void keep_local_bits(uint8_t* bytes, const uint8_t* before, int size, Mask mask_
         const uint8_t m = mask_of(b);
         if (m != 0) bytes[b] = static_cast<uint8_t>((bytes[b] & ~m) | (before[b] & m));
     }
+}
+
+void keep_bomb_house(int saveNo, uint8_t* mem, const uint8_t* before) {
+    if (saveNo != kKakarikoSlot) return;
+    const int byte = bomb_house_byte();
+    mem[byte] = static_cast<uint8_t>((mem[byte] & ~bomb_house_bit()) | (before[byte] & bomb_house_bit()));
 }
 
 void keep_mem_local(const char* stage, uint8_t* mem, const uint8_t* before) {
@@ -669,7 +685,8 @@ void diff_light_drop(dSv_info_c* info) {
 
 bool collect_item_only(int i) {
     if (i == kCollectPohIndex) return true;
-    return rando_active() && (i == 0   || i == 9   || i == 10  );
+
+    return rando_active() && (i == COLLECT_SWORD || i == 9   || i == 10  );
 }
 
 void diff_collect(dSv_info_c* info) {
@@ -1464,6 +1481,7 @@ void handle_full(const MsgWorldFull& msg) {
             dungeon_stage(stage));
         mem[kKeyOffset] = keyPending ? localKeys : msg.data[kKeyOffset];
         keep_mem_local(stage, mem, memBefore);
+        keep_bomb_house(saveNo, mem, memBefore);
         if (baselineValid) keep_mem_local(stage, s_base.mem, memBefore);
         open_chests_from_bits(newlySet);
         remove_collected_from_bits(newlySet);
@@ -1775,6 +1793,7 @@ void send_switch_bits(const char stage[8], int saveNo, const uint8_t* bits, cons
 struct PendingBundle {
     bool used = false;
     MsgStoryBundle msg{};
+    int heldLoads = 0;
 };
 const int kPendingBundles = 64;
 PendingBundle s_pendingBundles[kPendingBundles];
@@ -1973,6 +1992,7 @@ void bundle_apply_ready() {
         for (int i = 0; i < p.msg.swCount; ++i) {
             const uint8_t sw = p.msg.sw[i];
             if (sw >= 0x80) continue;
+            if (p.msg.saveNo == kKakarikoSlot && sw == kBombHouseGoneSw) continue;
             const int byte = kMemSwitchFirst + 4 * (sw >> 5) + (3 - ((sw & 31) >> 3));
             if (!overworld_switch_byte(name, byte)) continue;
             const uint8_t bit = static_cast<uint8_t>(1u << (sw & 7));
@@ -2065,7 +2085,7 @@ struct OwnScene {
 const OwnScene kOwnScene[] = {
     {dSv_event_flag_c::M_009, "R_SP107"},
     {dSv_event_flag_c::M_014, "R_SP107"},
-    {dSv_event_flag_c::F_0550, "R_SP107"},
+
     {dSv_event_flag_c::M_010, "R_SP107"},
     {dSv_event_flag_c::M_011, "R_SP107"},
     {dSv_event_flag_c::M_012, "R_SP107"},
@@ -2073,6 +2093,9 @@ const OwnScene kOwnScene[] = {
     {dSv_event_flag_c::M_017, "F_SP108"},
     {dSv_event_flag_c::M_019, "F_SP108"},
 };
+
+const int kMaxHeldLoads = 3;
+int s_ownSceneHeld[sizeof(kOwnScene) / sizeof(kOwnScene[0])] = {};
 
 void story_apply_pending(dSv_info_c* info) {
     uint8_t* ev = info->getSavedata().getEvent().mEvent;
@@ -2083,14 +2106,16 @@ void story_apply_pending(dSv_info_c* info) {
     uint8_t later[kEventSize] = {};
     const char* here = dComIfGp_getStartStageName();
 
-    for (const PendingBundle& p : s_pendingBundles) {
+    for (PendingBundle& p : s_pendingBundles) {
         if (!p.used || here == nullptr || std::strncmp(here, p.msg.stage, 8) != 0) continue;
+        if (p.heldLoads >= kMaxHeldLoads) continue;
         bool layer = false;
         for (int i = 0; i < p.msg.flagCount && !layer; ++i) {
             const StoryFlagInfo* f = story_flag_info(p.msg.flags[i]);
             layer = f != nullptr && f->policy == kStoryLayer;
         }
         if (!layer) continue;
+        ++p.heldLoads;
         for (int i = 0; i < p.msg.flagCount; ++i) {
             const int b = p.msg.flags[i] >> 8;
             const uint8_t bit = static_cast<uint8_t>(p.msg.flags[i] & 0xFF);
@@ -2100,14 +2125,36 @@ void story_apply_pending(dSv_info_c* info) {
         }
         coop_log::info("coop_mod: [STORY] scene from {:.8} kept for later: it changes this stage", here);
     }
-    for (const OwnScene& o : kOwnScene) {
+    for (size_t k = 0; k < sizeof(kOwnScene) / sizeof(kOwnScene[0]); ++k) {
+        const OwnScene& o = kOwnScene[k];
         const int b = o.flag >> 8;
         const uint8_t bit = static_cast<uint8_t>(o.flag & 0xFF);
-        if (here == nullptr || std::strncmp(here, o.stage, 8) != 0 || (s_storyPending[b] & bit) == 0) continue;
+        if (here == nullptr || std::strncmp(here, o.stage, 8) != 0 || (s_storyPending[b] & bit) == 0) {
+            s_ownSceneHeld[k] = 0;
+            continue;
+        }
+        if (++s_ownSceneHeld[k] > kMaxHeldLoads) {
+            s_ownSceneHeld[k] = 0;
+            coop_log::info("coop_mod: [STORY] flag {:#06x} {} held {} loads, taken now", o.flag,
+                story_flag_name(o.flag), kMaxHeldLoads);
+            continue;
+        }
         later[b] = static_cast<uint8_t>(later[b] | bit);
         s_storyPending[b] = static_cast<uint8_t>(s_storyPending[b] & ~bit);
         coop_log::info("coop_mod: [STORY] flag {:#06x} {} kept for later, its own scene is in {:.8}", o.flag,
             story_flag_name(o.flag), here);
+    }
+
+    for (int b = 0; b < kEventSize; ++b) {
+        for (int bit = 0; bit < 8; ++bit) {
+            const uint8_t m = static_cast<uint8_t>(1u << bit);
+            if ((s_storyPending[b] & m) == 0) continue;
+            const uint16_t flag = static_cast<uint16_t>((b << 8) | m);
+            if (features_story_flag_applies_now(flag)) continue;
+            later[b] = static_cast<uint8_t>(later[b] | m);
+            s_storyPending[b] = static_cast<uint8_t>(s_storyPending[b] & ~m);
+            coop_log::info("coop_mod: [STORY] flag {:#06x} {} kept, too early here", flag, story_flag_name(flag));
+        }
     }
 
     for (int b = 0; b < kEventSize; ++b) {
@@ -2319,6 +2366,7 @@ void on_shop_sold_out_post(ModContext*, void*, void*, void*) {
 void apply_shop_sold_out(const MsgShopSoldOut& msg) {
     if (!coop_session(kSessDungeon, cfg_bool(s_dungeonVar, true))) return;
     if (msg.saveNo < 0 || msg.saveNo >= dSv_save_c::STAGE_MAX || msg.sw >= 0x80) return;
+    if (msg.saveNo == kKakarikoSlot && msg.sw == kBombHouseGoneSw) return;
     char name[9] = {};
     std::memcpy(name, msg.stage, 8);
     const int byte = kMemSwitchFirst + 4 * (msg.sw >> 5) + (3 - ((msg.sw & 31) >> 3));
@@ -2719,6 +2767,7 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
         for (int b = kMemSwitchFirst; b < kMemSwitchEnd; ++b) {
             if (overworld_switch_byte(msg.stage, b)) target[b] = memBefore[b];
         }
+        keep_bomb_house(msg.saveNo, target, memBefore);
         if (sameSlot) {
             keep_mem_local(stage, target, memBefore);
             if (slotBaselineValid) keep_mem_local(stage, s_base.mem, memBefore);

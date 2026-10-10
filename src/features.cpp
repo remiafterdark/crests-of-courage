@@ -185,6 +185,8 @@ bool item_is_relayed(uint8_t item) {
     case dItemNo_BOMB_BAG_LV2_e:
     case dItemNo_BOMB_BAG_LV1_e:
     case dItemNo_LIGHT_ARROW_e:
+
+    case dItemNo_LIGHT_SWORD_e:
     case dItemNo_LURE_ROD_e:
     case dItemNo_EMPTY_BOTTLE_e:
     case dItemNo_RAFRELS_MEMO_e:
@@ -1008,7 +1010,10 @@ void scan_bottles() {
 }
 
 void apply_remote_bottle(uint8_t event, uint8_t item, uint8_t from) {
-    if (!coop_session(kSessItems, cfg_bool(s_vars.syncInventory, true)) || !in_gameplay()) return;
+    if (!coop_session(kSessItems, cfg_bool(s_vars.syncInventory, true)) || !in_gameplay()) {
+        coop_log::info("coop_mod: [INV] bottle event={} item={:#x} from {} ignored (items off or not in play)", event, item, from);
+        return;
+    }
     if (item == dItemNo_NONE_e) return;
     if (is_empty_bottle(item) && event != kBottleNewFilled) return;
 
@@ -1039,6 +1044,9 @@ void apply_remote_bottle(uint8_t event, uint8_t item, uint8_t from) {
 
     read_bottles(s_lastBottles);
     s_haveBottles = true;
+
+    coop_log::info("coop_mod: [INV] bottle event={} item={:#x} from {}: {} (slots {:02x} {:02x} {:02x} {:02x})",
+        event, item, from, applied ? "applied" : "no slot for it", now[0], now[1], now[2], now[3]);
 
     if (applied && cfg_bool(s_vars.notifyItems, true)) {
         const std::string who = sender_name(from);
@@ -1158,6 +1166,20 @@ void close_opening() {
                 kOpening[i]);
         }
     }
+}
+
+void finish_sky_book() {
+    if (rando_active() || daAlink_getAlinkActorClass() == nullptr || dComIfGp_event_runCheck()) return;
+    if (dComIfGs_getItem(SLOT_22, false) != dItemNo_AIR_LETTER_e) return;
+    static const u16 kLetters[] = {dSv_event_flag_c::F_0791, dSv_event_flag_c::F_0792, dSv_event_flag_c::F_0793,
+        dSv_event_flag_c::F_0794, dSv_event_flag_c::F_0795, dSv_event_flag_c::F_0812};
+    for (u16 flag : kLetters) {
+        if (!dComIfGs_isEventBit(flag)) return;
+    }
+    dComIfGs_setItem(SLOT_22, dItemNo_ANCIENT_DOCUMENT2_e);
+    dComIfGs_onEventBit(dSv_event_flag_c::F_0796);
+    coop_log::info("coop_mod: [STORY] repair: sky book finished, all six characters were in");
+    features_toast("Ancient Sky Book", "All six characters are in. The book is complete.");
 }
 
 bool teleport_in_progress();
@@ -1350,6 +1372,8 @@ void place_epona_after_rescue() {
         return;
     }
     if (has && !s_had) s_owed = true;
+
+    if (has && std::strncmp(dComIfGs_getHorseRestartStageName(), "coop", 8) == 0) s_owed = true;
     s_had = has;
     if (!s_owed || dComIfGp_event_runCheck()) return;
     if (alink->checkHorseRide()) {
@@ -1364,6 +1388,8 @@ void place_epona_after_rescue() {
     dComIfGs_setHorseRestart(dComIfGp_getStartStageName(), pos, alink->shape_angle.y,
         fopAcM_GetRoomNo(alink));
     horse->setHorsePosAndAngle(&pos, alink->shape_angle.y);
+
+    horse->offNoDrawWait();
     coop_log::info("coop_mod: [HORSE] M_023 from a peer, horse placed at ({:.0f},{:.0f},{:.0f})", pos.x, pos.y, pos.z);
 }
 
@@ -1414,6 +1440,8 @@ void send_presence() {
 
 }
 
+bool features_story_flag_applies_now(uint16_t flag) { return story_flag_applies_now(flag); }
+
 void features_build_presence(MsgPresence* out) {
     MsgPresence msg{};
     copy_name(msg.name, features_local_name());
@@ -1433,6 +1461,7 @@ void features_build_presence(MsgPresence* out) {
         msg.y = alink->current.pos.y;
         msg.z = alink->current.pos.z;
         msg.angleY = alink->shape_angle.y;
+        if (map_markers_local_pose(&msg.mapX, &msg.mapY, &msg.mapZ, &msg.mapAngleY)) msg.mapValid = 1;
         msg.life = dComIfGs_getLife();
         msg.maxLife = dComIfGs_getMaxLife();
     }
@@ -1506,6 +1535,8 @@ void on_presence(const uint8_t* payload, size_t size, uint8_t from) {
     if (size < sizeof(MsgPresence)) return;
     MsgPresence msg;
     std::memcpy(&msg, payload, sizeof(msg));
+
+    if (std::strncmp(peer_slot(from).stage, msg.stage, 8) != 0) peer_slot(from).mapValid = false;
     peer_slot(from).present = true;
     peer_slot(from).name = wire_name(msg.name);
     remember_name(from, peer_slot(from).name);
@@ -1520,6 +1551,13 @@ void on_presence(const uint8_t* payload, size_t size, uint8_t from) {
     peer_slot(from).y = msg.y;
     peer_slot(from).z = msg.z;
     peer_slot(from).angleY = msg.angleY;
+    if (msg.mapValid != 0) {
+        peer_slot(from).mapValid = true;
+        peer_slot(from).mapX = msg.mapX;
+        peer_slot(from).mapY = msg.mapY;
+        peer_slot(from).mapZ = msg.mapZ;
+        peer_slot(from).mapAngleY = msg.mapAngleY;
+    }
     take_shared_story_bits(msg.storyBits);
 
     if (peer_slot(from).skinStamp != msg.skinStamp) {
@@ -1811,6 +1849,7 @@ void features_register_vars() {
     s_vars.debugShiftX = register_var("debug_shift_x", CONFIG_VAR_INT, false, 0, nullptr);
     s_vars.debugShiftZ = register_var("debug_shift_z", CONFIG_VAR_INT, false, 0, nullptr);
     colors_register_vars();
+    global_hud_register_vars();
     horse_register_vars();
     squad_hud_register_vars();
     pvp_register_vars();
@@ -2007,6 +2046,7 @@ void features_update() {
         log_hitch();
         if (++s_eponaTick % 60 == 0) {
             close_opening();
+            finish_sky_book();
             softlocks_update();
             place_epona_after_rescue();
             catch_up_story();
@@ -2025,6 +2065,7 @@ void features_update() {
         }
         models_note_worn(worn, n);
     }
+    coop_stage("skins");
     repair_skin_tpose();
     found_update();
     voices_update();
@@ -2044,20 +2085,32 @@ void features_update() {
     run_debug_shift();
     update_death_link();
     announce_item_taken();
+    coop_stage("colors");
     colors_update();
+    coop_stage("projectiles");
     projectiles_update();
+    coop_stage("fx");
     fx_update();
+    coop_stage("pvp");
     pvp_update();
+    coop_stage("spawns");
     spawns_update();
+    coop_stage("boss");
     boss_update();
+    coop_stage("world");
     world_update();
+    coop_stage("enemies");
     enemies_update();
+    coop_stage("horse");
     horse_update();
+    coop_stage("grass");
     grass_update();
+    coop_stage("joinsync");
     joinsync_update();
     skipvote_update();
     skills_update();
     twilight_update();
+    coop_stage("puppets");
     const bool connected = coop_net_connected();
 
     const bool nametagsOn = cfg_bool(s_vars.nametags, true);
@@ -2598,4 +2651,8 @@ uint16_t features_shown_life(uint8_t playerId) {
 
 bool features_load_is_cutscene() {
     return load_is_cutscene();
+}
+
+bool features_bottles_relay() {
+    return coop_net_connected() && coop_session(kSessItems, cfg_bool(s_vars.syncInventory, true));
 }

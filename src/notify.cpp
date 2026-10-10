@@ -124,6 +124,16 @@ class NotifyDlst : public dDlst_base_c {
 public:
     virtual void draw() {
         chat_draw();
+        {
+
+            const f32 hx = mDoGph_gInf_c::getMinXF(), hy = mDoGph_gInf_c::getMinYF();
+            const f32 hw = mDoGph_gInf_c::getWidthF(), hh = mDoGph_gInf_c::getHeightF();
+            J2DOrthoGraph hint(0.0f, 0.0f, static_cast<f32>(FB_WIDTH), static_cast<f32>(FB_HEIGHT), -1.0f, 1.0f);
+            hint.setOrtho(hx, hy, hw, hh, -1.0f, 1.0f);
+            hint.setPort();
+            global_hud_draw(hint, hx, hy, hw, hh);
+            voice_draw_mute_hint(hx, hy, hw, hh);
+        }
         if (s_notes.empty()) return;
         static bool s_loggedDrawing = false;
         if (!s_loggedDrawing) {

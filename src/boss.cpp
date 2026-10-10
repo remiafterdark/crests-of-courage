@@ -1892,12 +1892,17 @@ void apply_bomb_eat(const MsgBossBombEat& msg) {
     BossList list;
     collect(list);
     fopAc_ac_c* actor = find(list, kBossKindTentacle, msg.index);
-    if (actor == nullptr) return;
+
+    if (actor == nullptr) {
+        coop_log::info("coop_mod: [BOSS] remote Bombling into head {}: no such head here", static_cast<int>(msg.index));
+        return;
+    }
     auto* t = reinterpret_cast<b_bh_class*>(actor);
 
     if (bh_action_is_eating(t->mAction)) {
         EatWatch* w = eat_slot(msg.index);
         if (w != nullptr) w->eating = true;
+        coop_log::info("coop_mod: [BOSS] remote Bombling into head {}: already eating here", static_cast<int>(msg.index));
         return;
     }
 
@@ -2127,7 +2132,11 @@ void boss_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t 
     if (type == kMsgBossBombEat) {
 
         if (size < sizeof(MsgBossBombEat)) return;
-        if (!boss_sync_on() || !in_gameplay()) return;
+        if (!boss_sync_on() || !in_gameplay()) {
+            coop_log::info("coop_mod: [BOSS] remote Bombling ignored: sync={} gameplay={}", boss_sync_on() ? 1 : 0,
+                in_gameplay() ? 1 : 0);
+            return;
+        }
         MsgBossBombEat msg;
         std::memcpy(&msg, payload, sizeof(msg));
         apply_bomb_eat(msg);

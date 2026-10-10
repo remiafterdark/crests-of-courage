@@ -35,6 +35,7 @@ struct ChatKeys {
     bool enter = false;
     bool escape = false;
     bool paste = false;
+    int scroll = 0;
 };
 bool chat_keys_supported();
 void chat_keys_begin();
@@ -54,7 +55,7 @@ struct Line {
     Clock::time_point at;
 };
 std::deque<Line> s_lines;
-const size_t kLinesKept = 40;
+const size_t kLinesKept = 100;
 const size_t kChatMax = 100;
 
 const uint32_t kLobbyId = 0x80000000u;
@@ -66,6 +67,7 @@ ConfigVarHandle s_fadeVar = 0;
 
 bool s_typing = false;
 std::string s_typed;
+int s_scroll = 0;
 
 UiWindowHandle s_window = 0;
 UiElementHandle s_input = 0;
@@ -154,6 +156,16 @@ ModResult build_tab(ModContext*, UiWindowHandle, UiElementHandle pane, UiElement
         svc_ui->pane_add_control(mod_ctx, pane, &button, nullptr);
         ++n;
     }
+
+    if (!s_lines.empty()) {
+        svc_ui->pane_add_section(mod_ctx, pane, "Messages");
+        static std::vector<std::string> s_shownLines;
+        s_shownLines.clear();
+        for (auto it = s_lines.rbegin(); it != s_lines.rend(); ++it) {
+            s_shownLines.push_back(it->name.empty() ? it->text : it->name + ": " + it->text);
+        }
+        for (const std::string& line : s_shownLines) svc_ui->pane_add_text(mod_ctx, pane, line.c_str(), nullptr);
+    }
     return MOD_OK;
 }
 
@@ -184,12 +196,20 @@ void open_window() {
 void start_typing() {
     s_typing = true;
     s_typed.clear();
+    s_scroll = 0;
     chat_keys_begin();
+    static bool s_toldBlock = false;
+    if (!chat_keys_block(true) && !s_toldBlock) {
+        s_toldBlock = true;
+        coop_log::info("coop_mod: [CHAT] key block missing");
+    }
 }
 
 void stop_typing() {
     s_typing = false;
     s_typed.clear();
+    s_scroll = 0;
+    chat_keys_block(false);
 }
 
 void type_update() {
@@ -199,6 +219,7 @@ void type_update() {
         stop_typing();
         return;
     }
+    s_scroll = std::clamp(s_scroll + keys.scroll, 0, std::max(0, static_cast<int>(s_lines.size()) - 1));
     for (int i = 0; i < keys.backspaces && !s_typed.empty(); ++i) s_typed.pop_back();
     s_typed += keys.typed;
     if (keys.paste && svc_ui != nullptr && svc_ui->get_clipboard_text != nullptr) {
@@ -347,6 +368,10 @@ void chat_open() {
     open_window();
 }
 
+bool chat_is_typing() {
+    return s_typing;
+}
+
 void chat_update() {
     if (s_closeWindow) {
         s_closeWindow = false;
@@ -441,7 +466,7 @@ void chat_draw() {
         }
         const f32 ty = top + pad + cell * 0.85f;
         if (s_typed.empty()) {
-            shadowed(font, textX, ty, cell, "Say something...  (Enter to send, Esc to close)",
+            shadowed(font, textX, ty, cell, "Say something...  (Enter to send, Esc to close, PgUp to scroll)",
                 JUtility::TColor(150, 156, 168, 255));
         } else {
             shadowed(font, textX, ty, cell, shown + (caretOn ? "_" : ""),
@@ -483,7 +508,14 @@ void chat_draw() {
     const int most = s_typing ? 10 : 5;
     int shown = 0;
     font->setGX();
-    for (auto it = s_lines.rbegin(); it != s_lines.rend() && shown < most; ++it) {
+
+    auto first = s_lines.rbegin();
+    if (s_typing && s_scroll > 0) {
+        first += std::min<size_t>(static_cast<size_t>(s_scroll), s_lines.size());
+        shadowed(font, left, y, cell, "Older messages. PgDn for newer.", JUtility::TColor(150, 156, 168, 255));
+        y -= lineGap;
+    }
+    for (auto it = first; it != s_lines.rend() && shown < most; ++it) {
         float alpha = 1.0f;
         if (!s_typing) {
             const float age = std::chrono::duration<float>(now - it->at).count();

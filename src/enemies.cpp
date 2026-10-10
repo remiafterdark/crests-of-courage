@@ -1629,6 +1629,8 @@ void settle_after_decision(fopAc_ac_c* actor) {
     if (fopAcM_GetName(actor) == fpcNm_E_MM_e) {
         auto* mm = reinterpret_cast<e_mm_class*>(actor);
         if (mm->action != 10) mm->field_0xb99 &= ~8;
+
+        if (mm->action == 2 && mm->mode == 1) mm->mode = 0;
     }
 }
 
@@ -1638,6 +1640,14 @@ bool apply_enemy_decision(fopAc_ac_c* actor, int16_t action, int16_t mode, Track
     const EnemyActLayout* l = act_layout_for(fopAcM_GetName(actor));
     if (l == nullptr) return false;
     if (t->decisionKnown && t->lastAction == action && t->lastMode == mode) return false;
+
+    if (fopAcM_GetName(actor) == fpcNm_E_HZ_e) {
+        auto* hz = static_cast<daE_HZ_c*>(actor);
+        if (hz->mReadyNewAction) return false;
+        if (hz->eventInfo.checkCommandDemoAccrpt() && !(hz->mAction == 1 && (hz->mMode == 4 || hz->mMode == 5))) {
+            dComIfGp_event_reset();
+        }
+    }
     t->decisionKnown = true;
     t->lastAction = action;
     t->lastMode = mode;
@@ -2630,6 +2640,15 @@ void for_each_tg_collider(fopAc_ac_c* actor, int count, Fn visit) {
     }
 }
 
+struct TgHitAttacker : dCcD_GObjInf {
+    static void set(dCcD_GObjInf* inf, fopAc_ac_c* by) {
+        if (inf == nullptr || by == nullptr) return;
+        dCcD_GObjTg& tg = static_cast<TgHitAttacker*>(inf)->mGObjTg;
+        tg.mApid = fopAcM_GetID(by);
+        tg.mAc = nullptr;
+    }
+};
+
 bool is_local_blow(fopAc_ac_c* attacker) {
     fopAc_ac_c* player = dComIfGp_getPlayer(0);
     if (attacker == nullptr || player == nullptr) return false;
@@ -2825,6 +2844,7 @@ void inject_pending_hits(EnemyList& list) {
             inf->SetTgHit(&blow);
 
             inf->OnTgHitNoActor();
+            TgHitAttacker::set(inf, stand_in);
             cXyz where(msg.at[0], msg.at[1], msg.at[2]);
             inf->SetTgHitPos(where);
             cXyz away(actor->current.pos.x - msg.from[0], 0.0f, actor->current.pos.z - msg.from[2]);
@@ -5138,6 +5158,7 @@ void inject_pending_object_hits() {
             if (firstTg == nullptr) firstTg = inf;
             inf->SetTgHit(&blow);
             inf->OnTgHitNoActor();
+            TgHitAttacker::set(inf, stand_in);
             cXyz where(msg.at[0], msg.at[1], msg.at[2]);
             inf->SetTgHitPos(where);
             cXyz away(actor->current.pos.x - msg.from[0], 0.0f, actor->current.pos.z - msg.from[2]);
@@ -5815,6 +5836,7 @@ void apply_pending_cages() {
         s_cageBlow.SetR(10.0f);
         box.SetTgHit(&s_cageBlow);
         box.OnTgHitNoActor();
+        TgHitAttacker::set(&box, stand_in);
         box.SetTgHitPos(at);
         coop_log::info("coop_mod: [OBJ] cage room={} breaking bar {} (remote {:#04x})",
             static_cast<int>(p.msg.room), bar, static_cast<int>(p.msg.mask));

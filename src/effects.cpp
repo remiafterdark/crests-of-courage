@@ -462,6 +462,11 @@ void apply_emitter_state(const MsgParticleEntry& e, JPABaseEmitter* em) {
     }
 }
 
+bool is_light_sword_effect(u16 id) {
+    return id == ID_ZI_J_LK_SWL_A || id == ID_ZI_J_LK_SWL_B || id == ID_ZI_J_LK_SWL_C ||
+           id == dPa_RM(ID_ZI_S_LK_SWL_GET_A);
+}
+
 void emit_particle(dPa_control_c* particles, daAlink_c* alink, const MsgParticleEntry& e, f32 x,
     f32 y, f32 z, KeySlot* slot) {
     const cXyz pos(x + e.rel[0], y + e.rel[1], z + e.rel[2]);
@@ -490,6 +495,11 @@ void emit_particle(dPa_control_c* particles, daAlink_c* alink, const MsgParticle
                     keyed->setLocalTranslation(JGeometry::TVec3<f32>(68.0f, 0.0f, 0.0f));
                 }
             }
+        }
+
+        if (keyed != nullptr && is_light_sword_effect(e.id)) {
+            Mtx sword;
+            if (puppet_hook_sword_mtx(slot->sender, sword, nullptr)) keyed->setGlobalRTMatrix(sword);
         }
 
         if (keyed != nullptr && e.id == ID_ZI_J_WTOA_B) {

@@ -207,7 +207,10 @@ int daCoopRival_c::Execute() {
         fopAc_ac_c* hitter = mBody.GetTgHitAc();
         const bool clawshotAt = at != nullptr && (at->GetAtType() & AT_TYPE_HOOKSHOT) != 0;
 
-        if (at != nullptr && is_rival_hitter(hitter) && s_frame >= mNextHit && pvp && !(anchor && clawshotAt)) {
+        const bool trapAt = at != nullptr && (at->GetAtType() & AT_TYPE_800) != 0;
+
+        if (at != nullptr && !trapAt && is_rival_hitter(hitter) && s_frame >= mNextHit && pvp &&
+            !(anchor && clawshotAt)) {
             const bool clawshot = clawshotAt;
 
             cXyz from = (clawshot || hitter == nullptr) ? alink->current.pos

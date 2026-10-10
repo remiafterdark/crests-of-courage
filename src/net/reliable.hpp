@@ -45,6 +45,8 @@ constexpr uint64_t kDeadAfterMs = 20000;
 
 constexpr uint64_t kHeartbeatMs = 250;
 
+constexpr int kMaxSendsPerFlush = 64;
+
 class Channel {
 public:
 
@@ -52,8 +54,10 @@ public:
     void flush(uint64_t nowMs, SendFn&& send) {
         segment_pending();
         bool sentAny = false;
+        int sends = 0;
         std::vector<uint8_t> packet;
         for (Segment& s : m_inflight) {
+            if (sends >= kMaxSendsPerFlush) break;
             if (s.acked) continue;
             if (s.sends != 0 && nowMs - s.lastSentMs < retransmit_after(s.sends)) continue;
             build(packet, kKindData, s.seq, s.data.data(), s.data.size());
@@ -61,6 +65,7 @@ public:
             if (s.sends != 0) ++m_resends;
             s.lastSentMs = nowMs;
             ++s.sends;
+            ++sends;
             sentAny = true;
         }
         if (sentAny) {

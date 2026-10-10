@@ -21,7 +21,11 @@ in game, so the credit travels with the model.
 ## Code
 
 - **Fimmel**, the puppet and model loading code the other players' models are built on.
-- **thyherooftime**, who made the base of Hyrule Online.
+- **thyherooftime**, who made the base of Hyrule Online, and the Hyrule Online page from his
+  Heroes of Twilight.
+- **Dragonberri**, UI design of the Hyrule Online page.
+- **Opus** (Xiph.Org and contributors), the voice codec, under the BSD licence in
+  [res/OPUS_LICENSE.txt](res/OPUS_LICENSE.txt).
 - **The Dusklight team**, for the port and the mod SDK.
 - The Twilight Princess decompilation.
 

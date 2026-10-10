@@ -123,6 +123,10 @@ bool s_needSend = false;
 
 SlotColor s_peer[kCoopMaxPlayers][kSlotCount];
 
+ConfigVarHandle s_nameVar = 0;
+SlotColor s_peerName[kCoopMaxPlayers];
+SlotColor s_nameLastSent;
+
 bool parse_hex_color(const std::string& in, SlotColor& out) {
     std::string s = in;
     if (!s.empty() && s[0] == '#') s.erase(s.begin());
@@ -673,6 +677,9 @@ const int kMaxPuppetTextures = 8;
 struct PuppetModelColors {
     J3DModel* model = nullptr;
 
+    J3DModelData* data = nullptr;
+    J3DMatPacket* packets = nullptr;
+
     bool mine = false;
     uint8_t owner = kCoopNoPlayer;
     unsigned char* shadow = nullptr;
@@ -735,7 +742,8 @@ void apply_puppet_texture(PuppetModelColors& m, PuppetTexture& t) {
 
 void release_model_colors(PuppetModelColors& m) {
 
-    if (m.model != nullptr && coop_ptr_looks_live(m.model)) {
+    if (m.model != nullptr && coop_ptr_looks_live(m.model) && m.model->getModelData() == m.data &&
+        m.model->getMatPacket(0) == m.packets) {
         J3DModelData* data = m.model->getModelData();
         if (coop_ptr_looks_live(data)) {
             J3DTexture* original = data->getTexture();
@@ -773,6 +781,13 @@ bool coop_config_json_value(const char* key, std::string* out) {
 }
 
 void colors_register_vars() {
+    {
+        ConfigVarDesc desc = CONFIG_VAR_DESC_INIT;
+        desc.name = "color_name_tag";
+        desc.type = CONFIG_VAR_STRING;
+        desc.default_string = "";
+        if (svc_config->register_var(mod_ctx, &desc, &s_nameVar) != MOD_OK) s_nameVar = 0;
+    }
     for (int i = 0; i < kSlotCount; ++i) {
         ConfigVarDesc desc = CONFIG_VAR_DESC_INIT;
         desc.name = kSlots[i].var;
@@ -837,15 +852,14 @@ void colors_update() {
             current[i] = effective_local(i);
             if (current[i] != s_lastSent[i]) changed = true;
         }
+        SlotColor name;
+        parse_hex_color(get_var_string(s_nameVar), name);
+        if (name != s_nameLastSent) changed = true;
         if (changed) {
             MsgColorEntry entries[kCoopColorSlots] = {};
-            for (int i = 0; i < kSlotCount && i < kCoopColorSlots; ++i) {
-                entries[i].set = current[i].set ? 1 : 0;
-                entries[i].r = current[i].r;
-                entries[i].g = current[i].g;
-                entries[i].b = current[i].b;
-                s_lastSent[i] = current[i];
-            }
+            colors_build_local(entries);
+            for (int i = 0; i < kSlotCount; ++i) s_lastSent[i] = current[i];
+            s_nameLastSent = name;
             coop_net_send(kMsgColors, entries, sizeof(entries));
             s_needSend = false;
         }
@@ -869,10 +883,13 @@ void colors_resend() {
 void colors_forget_player(uint8_t id) {
     if (id >= kCoopMaxPlayers) return;
     for (SlotColor& c : s_peer[id]) c = SlotColor{};
+    s_peerName[id] = SlotColor{};
 }
 
 void colors_on_disconnected() {
     for (auto& row : s_peer) for (SlotColor& c : row) c = SlotColor{};
+    for (SlotColor& c : s_peerName) c = SlotColor{};
+    s_nameLastSent = SlotColor{};
     for (SlotColor& c : s_lastSent) c = SlotColor{};
 }
 
@@ -884,20 +901,50 @@ void colors_build_local(MsgColorEntry* out) {
         out[i].g = c.g;
         out[i].b = c.b;
     }
+    SlotColor name;
+    parse_hex_color(get_var_string(s_nameVar), name);
+    out[kCoopColorName].set = name.set ? 1 : 0;
+    out[kCoopColorName].r = name.r;
+    out[kCoopColorName].g = name.g;
+    out[kCoopColorName].b = name.b;
+}
+
+ConfigVarHandle colors_name_var() { return s_nameVar; }
+
+bool colors_name_rgb(uint8_t player, uint8_t* r, uint8_t* g, uint8_t* b) {
+    if (player >= kCoopMaxPlayers || !s_peerName[player].set) return false;
+    *r = s_peerName[player].r;
+    *g = s_peerName[player].g;
+    *b = s_peerName[player].b;
+    return true;
 }
 
 void colors_on_message(const uint8_t* payload, size_t size, uint8_t from) {
     if (from >= kCoopMaxPlayers) return;
     const size_t count = size / sizeof(MsgColorEntry);
+    bool changed = false;
     for (size_t i = 0; i < count && i < static_cast<size_t>(kSlotCount); ++i) {
         MsgColorEntry entry;
         std::memcpy(&entry, payload + i * sizeof(MsgColorEntry), sizeof(entry));
-        s_peer[from][i].set = entry.set != 0;
-        s_peer[from][i].r = entry.r;
-        s_peer[from][i].g = entry.g;
-        s_peer[from][i].b = entry.b;
+        SlotColor c;
+        c.set = entry.set != 0;
+        c.r = entry.r;
+        c.g = entry.g;
+        c.b = entry.b;
+        if (c != s_peer[from][i]) changed = true;
+        s_peer[from][i] = c;
+    }
+    s_peerName[from] = SlotColor{};
+    if (count > static_cast<size_t>(kCoopColorName)) {
+        MsgColorEntry entry;
+        std::memcpy(&entry, payload + kCoopColorName * sizeof(MsgColorEntry), sizeof(entry));
+        s_peerName[from].set = entry.set != 0;
+        s_peerName[from].r = entry.r;
+        s_peerName[from].g = entry.g;
+        s_peerName[from].b = entry.b;
     }
 
+    if (!changed) return;
     for (PuppetModelColors& m : s_models) {
         if (m.model == nullptr || m.mine || m.owner != from) continue;
         for (int i = 0; i < m.count; ++i) m.tex[i].registered = false;
@@ -987,6 +1034,8 @@ void colors_attach_model(J3DModel* model, bool mine, uint8_t owner = kCoopNoPlay
     *slot = m;
     for (int i = 0; i < slot->count; ++i) apply_puppet_texture(*slot, slot->tex[i]);
 
+    slot->data = data;
+    slot->packets = model->getMatPacket(0);
     const u16 matNum = data->getMaterialNum();
     for (u16 i = 0; i < matNum; ++i) {
         model->getMatPacket(i)->setTexture(reinterpret_cast<J3DTexture*>(slot->shadow));

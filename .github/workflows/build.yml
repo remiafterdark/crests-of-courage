@@ -120,6 +120,16 @@ jobs:
           path: build/mods/*.dusk
           if-no-files-found: error
 
+      # the symbols of exactly this build, so a crash report's mod.dll+rva frames can be named
+      - name: upload symbols
+        if: ${{matrix.msvc_arch != ''}}
+        uses: actions/upload-artifact@v4
+        with:
+          name: symbols-${{matrix.platform}}
+          path: build/**/*.pdb
+          if-no-files-found: ignore
+          retention-days: 90
+
   combine:
     name: combine
     needs: build

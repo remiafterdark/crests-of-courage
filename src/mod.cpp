@@ -84,6 +84,21 @@ ConfigVarHandle g_joinAddressVar = 0;
 ConfigVarHandle g_joinPortVar = 0;
 ConfigVarHandle g_autoConnectVar = 0;
 ConfigVarHandle g_upnpVar = 0;
+ConfigVarHandle g_migrateVar = 0;
+
+std::string g_sessionCode;
+std::string g_hostNameOverride;
+struct Migration {
+    bool active = false;
+    bool hostIt = false;
+    std::string code;
+    std::string hostName;
+    uint64_t nextMs = 0;
+    int tries = 0;
+    int takenTimes = 0;
+};
+Migration g_migr;
+bool g_rejoinIsMigration = false;
 ConfigVarHandle g_roomCodeVar = 0;
 ConfigVarHandle g_roomServerVar = 0;
 ConfigVarHandle g_roomsVar = 0;
@@ -145,7 +160,6 @@ struct PeerLink {
     bool sealed = false;
     uint8_t key[32] = {};
     uint32_t keyId = 0;
-    uint64_t sealCounter = 0;
     seal::Window sealSeen;
     uint64_t helloSentMs = 0;
     uint64_t createdMs = 0;
@@ -161,12 +175,38 @@ struct PeerLink {
 };
 PeerLink g_links[kCoopMaxPlayers];
 
+struct KeyCounter {
+    uint32_t keyId = 0;
+    uint64_t used = 0;
+};
+KeyCounter g_keyCounters[kCoopMaxPlayers * 2];
+int g_keyCounterNext = 0;
+
+uint64_t next_seal_counter(uint32_t keyId) {
+    for (KeyCounter& k : g_keyCounters) {
+        if (k.used != 0 && k.keyId == keyId) return ++k.used;
+    }
+
+    const int count = static_cast<int>(sizeof(g_keyCounters) / sizeof(g_keyCounters[0]));
+    for (int tries = 0; tries < count; ++tries) {
+        KeyCounter& slot = g_keyCounters[g_keyCounterNext];
+        g_keyCounterNext = (g_keyCounterNext + 1) % count;
+        bool live = false;
+        for (const PeerLink& link : g_links) live = live || (slot.used != 0 && link.used && link.sealed && link.keyId == slot.keyId);
+        if (live) continue;
+        slot.keyId = keyId;
+        slot.used = 1;
+        return 1;
+    }
+    return 0;
+}
+
 void udp_send(std::string_view endpoint, std::span<const std::byte> bytes) {
     for (PeerLink& link : g_links) {
         if (!link.used || !link.sealed || link.udpEndpoint != endpoint) continue;
         std::vector<std::byte> packet(bytes.size() + seal::kOverhead);
         seal::wrap(link.key, link.keyId, g_isHost ? seal::kFromHost : seal::kFromJoiner,
-            ++link.sealCounter, reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(),
+            next_seal_counter(link.keyId), reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(),
             reinterpret_cast<uint8_t*>(packet.data()));
         udp_send_plain(endpoint, packet);
         return;
@@ -430,6 +470,84 @@ int lowest_free_id() {
 }
 
 void drop_link(int id, const char* why);
+void disconnect_quietly();
+ModResult start_hosting(int64_t port);
+ModResult start_joining_code(const std::string& typed);
+
+void begin_migration(CoopRoster before, uint8_t me) {
+    if (g_sessionCode.empty() || !cfg_bool(g_migrateVar, true) || me == kCoopHostId) return;
+    int successor = -1;
+    for (int i = 1; i < kCoopMaxPlayers; ++i) {
+        if ((before & (1u << i)) != 0) {
+            successor = i;
+            break;
+        }
+    }
+    if (successor < 0) return;
+    g_migr = Migration{};
+    g_migr.active = true;
+    g_migr.hostIt = successor == me;
+    g_migr.code = g_sessionCode;
+    g_migr.hostName = g_migr.hostIt ? std::string() : features_peer_of(static_cast<uint8_t>(successor)).name;
+
+    g_migr.nextMs = steady_ms() + (g_migr.hostIt ? 1500 : 4000);
+    g_rejoinIsMigration = true;
+    coop_log::info("coop_mod: [MIGRATE] host gone, successor player {}{}, room {}", successor,
+        g_migr.hostIt ? " (us)" : "", g_migr.code);
+    if (g_migr.hostIt) {
+        coop_toast("The host left", ("You're the host now. Room " + g_migr.code + " carries on.").c_str());
+    } else {
+        coop_toast("The host left", ((g_migr.hostName.empty() ? std::string("Another player") : g_migr.hostName) +
+                                        " is taking over. Rejoining...").c_str());
+    }
+}
+
+void migration_update() {
+    if (!g_migr.active) return;
+    const uint64_t now = steady_ms();
+    if (g_peerConnected) {
+        coop_log::info("coop_mod: [MIGRATE] back in the session");
+        g_migr = Migration{};
+        g_rejoinIsMigration = false;
+        return;
+    }
+    if (g_migr.hostIt && g_isHost && g_listener) {
+        if (online_room_taken()) {
+
+            ++g_migr.takenTimes;
+            coop_log::info("coop_mod: [MIGRATE] room {} still taken ({})", g_migr.code, g_migr.takenTimes);
+            disconnect_quietly();
+            if (g_migr.takenTimes >= 3) g_migr.hostIt = false;
+            g_migr.nextMs = now + 4000;
+            return;
+        }
+
+        if (online_room_code() == g_migr.code) {
+            coop_log::info("coop_mod: [MIGRATE] hosting room {} again", g_migr.code);
+            g_migr.active = false;
+            g_rejoinIsMigration = false;
+        }
+        return;
+    }
+    if (g_connecting || now < g_migr.nextMs) return;
+    if (++g_migr.tries > 15) {
+        coop_log::info("coop_mod: [MIGRATE] gave up on room {}", g_migr.code);
+        coop_toast("Couldn't carry on", ("Room " + g_migr.code + " didn't come back. Host or join again.").c_str());
+        g_migr = Migration{};
+        g_rejoinIsMigration = false;
+        return;
+    }
+    g_migr.nextMs = now + 4000;
+    if (g_migr.hostIt) {
+        int64_t port = 27716;
+        svc_config->get_int(mod_ctx, g_bindPortVar, &port);
+        g_hostNameOverride = g_migr.code;
+        start_hosting(port);
+        g_hostNameOverride.clear();
+    } else {
+        start_joining_code(g_migr.code);
+    }
+}
 
 void send_bye(PeerLink& link) {
     if (!link.used || !link.viaUdp || !g_udp || link.udpEndpoint.empty()) return;
@@ -463,6 +581,7 @@ void broadcast_roster() {
 void drop_link(int id, const char* why) {
     if (id < 0 || id >= kCoopMaxPlayers || !g_links[id].used) return;
     coop_log::warn("coop_mod: player {} disconnected ({})", id, why);
+    voice_peer_left(static_cast<uint8_t>(id));
     send_bye(g_links[id]);
     g_links[id].sock.close();
     g_links[id] = PeerLink{};
@@ -485,7 +604,10 @@ void drop_link(int id, const char* why) {
         }
     } else {
 
+        const CoopRoster before = g_roster;
+        const uint8_t me = g_localId;
         g_peerConnected = false;
+        begin_migration(before, me);
         g_roster = 1u << kCoopHostId;
         g_localId = kCoopHostId;
         for (int i = 0; i < kCoopMaxPlayers; ++i) {
@@ -639,6 +761,13 @@ void process_tcp_rx(PeerLink& link, uint8_t fromId) {
         MsgHeader header;
         std::memcpy(&header, link.rx.data() + offset, sizeof(header));
         if (header.size > kCoopMaxMessagePayload) {
+
+            if (g_isHost && fromId != kCoopNoPlayer) {
+                mods::log::error("coop_mod: malformed message (size {}) from player {} - dropping them",
+                    header.size, fromId);
+                drop_link(fromId, "malformed message");
+                return;
+            }
             mods::log::error("coop_mod: malformed message (size {}) - disconnecting", header.size);
             coop_net_disconnect();
             return;
@@ -647,7 +776,12 @@ void process_tcp_rx(PeerLink& link, uint8_t fromId) {
         const uint8_t* payload = link.rx.data() + offset + sizeof(header);
 
         const uint8_t from = (fromId != kCoopNoPlayer) ? fromId : header.from;
-        if (from < kCoopMaxPlayers) g_playerQuiet[from] = 0;
+
+        if (from >= kCoopMaxPlayers) {
+            offset += sizeof(header) + header.size;
+            continue;
+        }
+        g_playerQuiet[from] = 0;
 
         const bool addressed = header.type == kMsgSnapWant || header.type == kMsgSnapStream;
         if (g_isHost && from != kCoopHostId && !addressed) {
@@ -725,7 +859,9 @@ ModResult start_hosting(int64_t port) {
 
     if (cfg_bool(g_roomsVar, true)) {
 
-        const std::string name = normalize_room_code(cfg_string(g_roomCodeVar, ""));
+        const std::string name = !g_hostNameOverride.empty()
+                                     ? g_hostNameOverride
+                                     : normalize_room_code(cfg_string(g_roomCodeVar, ""));
         if (!name.empty() && (name.size() < kRoomNameMin || name.size() > kRoomNameMax)) {
 
             g_statusText = "Room names are 4 to 24 letters and numbers. Hosting by address only.";
@@ -739,6 +875,7 @@ ModResult start_hosting(int64_t port) {
 ModResult start_joining_code(const std::string& typed) {
     global_shutdown();
     const std::string code = normalize_room_code(typed);
+    g_sessionCode = code;
     if (code.size() < kRoomNameMin || code.size() > kRoomNameMax) {
         g_statusText = "Enter the room code or name the host sees";
         return MOD_ERROR;
@@ -879,6 +1016,50 @@ void handle_midna_datagram(const mods::net::Event& event) {
         }
     }
     puppet_hook_on_midna_snapshot(static_cast<uint8_t>(id), snap);
+}
+
+const uint32_t kVoiceMagic = 0x31435643u;
+struct VoiceHead {
+    uint32_t magic;
+    uint8_t playerId;
+    uint8_t pad;
+    uint16_t size;
+    uint32_t seq;
+};
+
+bool is_voice_datagram(const mods::net::Event& event) {
+    if (event.data.size() < sizeof(VoiceHead) || event.data.size() == sizeof(PlayerSnapshot)) return false;
+    uint32_t magic = 0;
+    std::memcpy(&magic, event.data.data(), 4);
+    return magic == kVoiceMagic;
+}
+
+void handle_voice_datagram(const mods::net::Event& event) {
+    VoiceHead head;
+    std::memcpy(&head, event.data.data(), sizeof(head));
+    if (head.size == 0 || head.size > kVoiceMaxOpus || sizeof(head) + head.size > event.data.size()) return;
+    int id = -1;
+    if (g_isHost) {
+        for (int i = 0; i < kCoopMaxPlayers; ++i) {
+            if (g_links[i].used && g_links[i].haveUdp && g_links[i].udpEndpoint == event.endpoint) {
+                id = i;
+                break;
+            }
+        }
+        if (id < 0) return;
+
+        std::vector<std::byte> out(event.data.begin(), event.data.end());
+        out[4] = static_cast<std::byte>(id);
+        for (int i = 0; i < kCoopMaxPlayers; ++i) {
+            if (i == id || !g_links[i].used || !g_links[i].haveUdp) continue;
+            udp_send(g_links[i].udpEndpoint, out);
+        }
+    } else {
+        id = head.playerId;
+        if (id >= kCoopMaxPlayers || id == g_localId) return;
+    }
+    voice_on_frame(static_cast<uint8_t>(id), head.seq,
+        reinterpret_cast<const uint8_t*>(event.data.data()) + sizeof(head), head.size);
 }
 
 int udp_link_for(std::string_view endpoint) {
@@ -1182,6 +1363,10 @@ void handle_udp_payload(const mods::net::Event& event) {
 
     if (!g_isHost && !g_peerConnected) return;
     g_ticksSinceRx = 0;
+    if (is_voice_datagram(event)) {
+        handle_voice_datagram(event);
+        return;
+    }
     if (event.data.size() == sizeof(MidnaSnapshot)) {
         handle_midna_datagram(event);
         return;
@@ -2254,6 +2439,27 @@ uint8_t local_midna_hair_shape(daMidna_c* midna) {
     return 0;
 }
 
+}
+
+void coop_voice_send(uint32_t sequence, const uint8_t* opus, size_t size) {
+    if (!g_udp || g_localId == kCoopNoPlayer || size == 0 || size > kVoiceMaxOpus) return;
+    VoiceHead head{kVoiceMagic, g_localId, 0, static_cast<uint16_t>(size), sequence};
+    std::vector<std::byte> out(sizeof(head) + size);
+    std::memcpy(out.data(), &head, sizeof(head));
+    std::memcpy(out.data() + sizeof(head), opus, size);
+
+    while (out.size() == sizeof(PlayerSnapshot) || out.size() == sizeof(MidnaSnapshot) ||
+           out.size() == sizeof(HorseSnapshot)) {
+        out.push_back(std::byte{0});
+    }
+    for (int i = 0; i < kCoopMaxPlayers; ++i) {
+        if (!g_links[i].used || !g_links[i].haveUdp) continue;
+        udp_send(g_links[i].udpEndpoint, out);
+    }
+}
+
+namespace {
+
 void send_midna_datagram(const MidnaSnapshot& snap) {
     global_send_midna(snap);
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
@@ -2886,10 +3092,29 @@ void coop_net_join() {
     if (g_peerConnected || g_connecting) return;
     svc_config->set_string(mod_ctx, g_modeVar, "join");
     g_autoConnectPending = false;
+    g_sessionCode.clear();
     start_joining(cfg_string(g_joinAddressVar, "127.0.0.1:27716"));
 }
 
 void coop_net_disconnect() {
+
+    g_migr = Migration{};
+    g_rejoinIsMigration = false;
+    g_sessionCode.clear();
+    disconnect_quietly();
+}
+
+bool coop_net_migrating() {
+    return g_rejoinIsMigration;
+}
+
+ConfigVarHandle coop_net_migrate_var() {
+    return g_migrateVar;
+}
+
+namespace {
+
+void disconnect_quietly() {
     upnp_release();
     online_stop();
     for (int i = 0; i < kCoopMaxPlayers; ++i) send_bye(g_links[i]);
@@ -2910,6 +3135,7 @@ void coop_net_disconnect() {
     if (wasConnected) features_on_disconnected();
     puppet_hook_request_release();
     coop_log::info("coop_mod: disconnected");
+}
 }
 
 void coop_net_send(uint8_t type, const void* payload, size_t size) {
@@ -2992,6 +3218,12 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     upnpDesc.default_bool = true;
     svc_config->register_var(mod_ctx, &upnpDesc, &g_upnpVar);
 
+    ConfigVarDesc migrateDesc = CONFIG_VAR_DESC_INIT;
+    migrateDesc.name = "keep_playing_if_host_leaves";
+    migrateDesc.type = CONFIG_VAR_BOOL;
+    migrateDesc.default_bool = true;
+    svc_config->register_var(mod_ctx, &migrateDesc, &g_migrateVar);
+
     ConfigVarDesc roomCodeDesc = CONFIG_VAR_DESC_INIT;
     roomCodeDesc.name = "room_code";
     roomCodeDesc.type = CONFIG_VAR_STRING;
@@ -3045,7 +3277,9 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
     report_register_vars();
     global_register_vars();
     chat_register_vars();
+    voice_init();
     report_init();
+    crash_guard_init();
     features_register_vars();
     features_init();
     skins_init();
@@ -3156,6 +3390,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
         }
     }
 
+    coop_stage("net");
     mods::net::Event event;
     while (poll_net_event(event)) {
         if (event.handle == g_udp.handle()) {
@@ -3169,30 +3404,43 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 
     upnp_update();
     online_update();
+    migration_update();
+    coop_stage("global");
     global_update();
+    coop_stage("chat");
     chat_update();
+    coop_stage("voice");
+    voice_update();
+    coop_stage("ui");
     ui_update();
     update_pings();
     announce_local_pause();
+    coop_stage("features");
     features_update();
+    coop_stage("report");
     report_update();
     report_hint_update();
 
+    coop_stage("rando");
     rando_update();
     checks_update();
     selftest_update();
 
+    coop_stage("send");
     send_local_snapshot();
     send_local_midna();
     send_local_horse();
 
     flush_udp_links();
+    coop_stage("");
 
     return MOD_OK;
 }
 
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
     global_shutdown();
+    voice_shutdown();
+    chat_keys_block(false);
     online_stop();
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         send_bye(g_links[i]);

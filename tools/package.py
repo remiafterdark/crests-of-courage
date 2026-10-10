@@ -92,8 +92,10 @@ def main():
     args = ap.parse_args()
 
     entries = [(os.path.join(HERE, 'mod.json'), 'mod.json')]
-    # The listing art, named by mod.json. The mod manager and the mod site both read these.
-    for art in ('icon.png', 'banner.png'):
+    # The listing art, named by mod.json. The mod manager and the mod site both read these. Then
+    # the Hyrule Online page's picture (menu.cpp, mod://.../res/crowd.png) and Opus's licence, which
+    # its BSD terms require to travel with every build that has Opus in it.
+    for art in ('icon.png', 'banner.png', 'crowd.png', 'OPUS_LICENSE.txt'):
         full = os.path.join(HERE, 'res', art)
         if os.path.isfile(full):
             entries.append((full, 'res/' + art))

@@ -5,6 +5,7 @@
 
 #include "d/actor/d_a_alink.h"
 #include "d/d_com_inf_game.h"
+#include "d/d_kankyo.h"
 #include "d/d_save.h"
 #include "d/d_stage.h"
 
@@ -30,8 +31,9 @@ const RawSoftlock kRaw[] = {
 };
 
 enum class Op {
-    FlagOn, FlagOff, SwOn, SwOff, Stage, NotStage, Room, NotPoint, Rando, NoRando, NotTransform, NotDarkClear,
-    Set, Clear, SwSet, SwClear,
+    FlagOn, FlagOff, SwOn, SwOff, TboxOn, Stage, NotStage, Room, NotPoint, Rando, NoRando, NotTransform, NotDarkClear,
+    Wolf, NoTwilight, Item, NoItem,
+    Set, Clear, SwSet, SwClear, Human,
 };
 
 struct Term {
@@ -90,6 +92,7 @@ bool parse_term(const std::string& text, Term& t) {
     if (word == "clear") { t.op = Op::Clear; return flag(); }
     if (word == "swon") { t.op = Op::SwOn; return slot_sw(); }
     if (word == "swoff") { t.op = Op::SwOff; return slot_sw(); }
+    if (word == "tbon") { t.op = Op::TboxOn; return slot_sw() && t.b < 64; }
     if (word == "swset") { t.op = Op::SwSet; return slot_sw(); }
     if (word == "swclear") { t.op = Op::SwClear; return slot_sw(); }
     if (word == "stage" || word == "notstage") {
@@ -101,6 +104,14 @@ bool parse_term(const std::string& text, Term& t) {
     if (word == "notpoint") { t.op = Op::NotPoint; t.a = std::atoi(arg.c_str()); return true; }
     if (word == "nottransform") { t.op = Op::NotTransform; t.a = std::atoi(arg.c_str()); return t.a >= 0 && t.a < 8; }
     if (word == "notdarkclear") { t.op = Op::NotDarkClear; t.a = std::atoi(arg.c_str()); return t.a >= 0 && t.a < 8; }
+    if (word == "item" || word == "noitem") {
+        t.op = word == "item" ? Op::Item : Op::NoItem;
+        t.a = static_cast<int>(std::strtol(arg.c_str(), nullptr, 16));
+        return t.a > 0 && t.a < 0x100;
+    }
+    if (word == "wolf") { t.op = Op::Wolf; return true; }
+    if (word == "notwilight") { t.op = Op::NoTwilight; return true; }
+    if (word == "human") { t.op = Op::Human; return true; }
     if (word == "rando") { t.op = Op::Rando; return true; }
     if (word == "norando") { t.op = Op::NoRando; return true; }
     return false;
@@ -146,6 +157,7 @@ bool holds(const Term& t, const char* stage) {
     case Op::FlagOff: return dComIfGs_isEventBit(static_cast<u16>(t.a)) == 0;
     case Op::SwOn: return slot_bits(t.a).isSwitch(t.b) != 0;
     case Op::SwOff: return slot_bits(t.a).isSwitch(t.b) == 0;
+    case Op::TboxOn: return slot_bits(t.a).isTbox(t.b) != 0;
     case Op::Stage:
     case Op::NotStage: {
         bool in = false;
@@ -158,6 +170,13 @@ bool holds(const Term& t, const char* stage) {
     case Op::NoRando: return !rando_active();
     case Op::NotTransform: return dComIfGs_isTransformLV(t.a) == 0;
     case Op::NotDarkClear: return dComIfGs_isDarkClearLV(t.a) == 0;
+    case Op::Wolf: {
+        daAlink_c* alink = daAlink_getAlinkActorClass();
+        return alink != nullptr && alink->checkWolf();
+    }
+    case Op::NoTwilight: return !dKy_darkworld_check();
+    case Op::Item: return dComIfGs_isItemFirstBit(static_cast<u8>(t.a)) != 0;
+    case Op::NoItem: return dComIfGs_isItemFirstBit(static_cast<u8>(t.a)) == 0;
     default: return false;
     }
 }
@@ -168,6 +187,15 @@ void apply(const Term& t) {
     case Op::Clear: dComIfGs_offEventBit(static_cast<u16>(t.a)); break;
     case Op::SwSet: slot_bits(t.a).onSwitch(t.b); break;
     case Op::SwClear: slot_bits(t.a).offSwitch(t.b); break;
+    case Op::Human: {
+
+        daAlink_c* alink = daAlink_getAlinkActorClass();
+        if (alink != nullptr && alink->checkWolf() && alink->mEquipItem != dItemNo_IRONBALL_e &&
+            alink->mProcID != daAlink_c::PROC_METAMORPHOSE && alink->mProcID != daAlink_c::PROC_METAMORPHOSE_ONLY) {
+            alink->procCoMetamorphoseInit();
+        }
+        break;
+    }
     default: break;
     }
 }

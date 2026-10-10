@@ -457,6 +457,111 @@ void coop_log_capture(char level, const std::string& message) {
     if (s_unwritten.size() > kKeepBytes) s_unwritten.erase(0, s_unwritten.size() - kKeepBytes);
 }
 
+std::string s_crashId;
+bool s_crashPending = false;
+uint32_t s_crashTicks = 0;
+ConfigVarHandle s_autoCrashVar = 0;
+ConfigVarHandle s_crashSeenVar = 0;
+UiDialogHandle s_crashDialog = 0;
+
+std::string previous_engine_log_name(bool* crashed) {
+    *crashed = false;
+    const std::filesystem::path data = log_dir();
+    if (data.empty()) return "";
+    std::error_code ec;
+    const std::filesystem::path logs = data.parent_path().parent_path() / "logs";
+    std::vector<std::filesystem::path> runs;
+    for (const auto& e : std::filesystem::directory_iterator(logs, ec)) {
+        const std::string name = path_text(e.path().filename());
+        if (name.rfind("dusklight-", 0) == 0 && e.path().extension() == ".log") runs.push_back(e.path());
+    }
+    if (runs.size() < 2) return "";
+    std::sort(runs.begin(), runs.end());
+    const std::filesystem::path& before = runs[runs.size() - 2];
+    std::ifstream in(before, std::ios::binary);
+    std::string line;
+    while (in && std::getline(in, line)) {
+        if (line.find("APPLICATION CRASHED") != std::string::npos) {
+            *crashed = true;
+            break;
+        }
+    }
+    return path_text(before.filename());
+}
+
+void detect_last_crash() {
+    bool engine = false;
+    const std::string engineLog = previous_engine_log_name(&engine);
+    bool trail = false;
+    std::ifstream in(std::filesystem::u8path(coop_crash_trail_path()), std::ios::binary);
+    if (in) {
+        std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const size_t start = all.rfind("--- session start ---");
+        const size_t crash = all.rfind("CRASH ");
+        trail = crash != std::string::npos && (start == std::string::npos || crash > start);
+    }
+    if (!engine && !trail) return;
+    s_crashId = !engineLog.empty() ? engineLog : "trail";
+    s_crashPending = true;
+    coop_log::info("coop_mod: [REPORT] the last run crashed ({})", engine ? "game's crash report" : "crash trail");
+}
+
+void send_crash_report(const char* why) {
+    if (s_text.empty()) s_text = why;
+    s_when = 2;
+    send_report();
+}
+
+void mark_crash_seen() {
+    s_crashPending = false;
+    if (s_crashSeenVar != 0) svc_config->set_string(mod_ctx, s_crashSeenVar, s_crashId.c_str());
+}
+
+void offer_crash_report() {
+    if (svc_ui == nullptr || !SERVICE_HAS(svc_ui, UiService, dialog_push) || svc_ui->dialog_push == nullptr) {
+        mark_crash_seen();
+        return;
+    }
+    static UiDialogAction actions[3];
+    actions[0] = UI_DIALOG_ACTION_INIT;
+    actions[0].label = "Send";
+    actions[0].on_pressed = [](ModContext*, UiDialogHandle, void*) {
+        send_crash_report("(crash report from the prompt after a crash)");
+    };
+    actions[1] = UI_DIALOG_ACTION_INIT;
+    actions[1].label = "Always send";
+    actions[1].on_pressed = [](ModContext*, UiDialogHandle, void*) {
+        if (s_autoCrashVar != 0) svc_config->set_bool(mod_ctx, s_autoCrashVar, true);
+        send_crash_report("(crash report from the prompt after a crash)");
+    };
+    actions[2] = UI_DIALOG_ACTION_INIT;
+    actions[2].label = "Not this time";
+    UiDialogDesc desc = UI_DIALOG_DESC_INIT;
+    desc.title = "The game crashed last time";
+    desc.body_rml =
+        "Send the crash report so it can be fixed? It sends the co-op log and the crash details from "
+        "that run. Network addresses are removed.";
+    desc.variant = UI_DIALOG_WARNING;
+    desc.actions = actions;
+    desc.action_count = 3;
+    desc.build = [](ModContext*, UiElementHandle pane, void*, ModError*) -> ModResult {
+        UiControlDesc text = UI_CONTROL_DESC_INIT;
+        text.kind = UI_CONTROL_STRING;
+        text.label = "What were you doing? (optional)";
+        text.binding = UI_BINDING_CALLBACKS;
+        text.max_length = 1500;
+        text.string_set_mode = UI_STRING_SET_ON_CHANGE;
+        text.get = [](ModContext*, void*, UiControlValue* out) { out->string_value = s_text.c_str(); };
+        text.set = [](ModContext*, void*, const UiControlValue* v) {
+            s_text = v->string_value != nullptr ? v->string_value : "";
+        };
+        svc_ui->pane_add_control(mod_ctx, pane, &text, nullptr);
+        return MOD_OK;
+    };
+    mark_crash_seen();
+    svc_ui->dialog_push(mod_ctx, &desc, &s_crashDialog);
+}
+
 const int kKeepRuns = 3;
 
 void report_init() {
@@ -469,6 +574,7 @@ void report_init() {
     for (int n = kKeepRuns - 1; n >= 1; --n) std::filesystem::rename(run(n), run(n + 1), ec);
     std::filesystem::rename(dir / "coop-log.txt", run(1), ec);
     std::filesystem::remove(dir / "coop-log-previous.txt", ec);
+    detect_last_crash();
 }
 
 void report_update() {
@@ -547,6 +653,15 @@ void report_build_tab(UiElementHandle left, UiElementHandle right) {
     svc_ui->pane_add_text(mod_ctx, left, s_status.c_str(), &s_statusElem);
     s_statusShown = s_status;
 
+    UiControlDesc autoSend = UI_CONTROL_DESC_INIT;
+    autoSend.kind = UI_CONTROL_TOGGLE;
+    autoSend.label = "Send crash reports by themselves";
+    autoSend.binding = UI_BINDING_CONFIG_VAR;
+    autoSend.config_var = s_autoCrashVar;
+    autoSend.help_rml = "After the game crashes, the next start sends the crash report without asking. "
+                        "Off, it asks first.";
+    if (s_autoCrashVar != 0) svc_ui->pane_add_control(mod_ctx, left, &autoSend, nullptr);
+
     svc_ui->pane_add_text(mod_ctx, right,
         "Sent with your report:\n"
         "- your device and versions\n"
@@ -578,9 +693,38 @@ void report_register_vars() {
     desc.type = CONFIG_VAR_BOOL;
     desc.default_bool = false;
     if (svc_config->register_var(mod_ctx, &desc, &s_hintVar) != MOD_OK) s_hintVar = 0;
+    ConfigVarDesc autoDesc = CONFIG_VAR_DESC_INIT;
+    autoDesc.name = "report_crashes_automatically";
+    autoDesc.type = CONFIG_VAR_BOOL;
+    autoDesc.default_bool = false;
+    if (svc_config->register_var(mod_ctx, &autoDesc, &s_autoCrashVar) != MOD_OK) s_autoCrashVar = 0;
+    ConfigVarDesc seenDesc = CONFIG_VAR_DESC_INIT;
+    seenDesc.name = "report_crash_seen";
+    seenDesc.type = CONFIG_VAR_STRING;
+    seenDesc.default_string = "";
+    if (svc_config->register_var(mod_ctx, &seenDesc, &s_crashSeenVar) != MOD_OK) s_crashSeenVar = 0;
+}
+
+void crash_report_update() {
+    if (!s_crashPending || ++s_crashTicks < 300) return;
+    if (s_crashSeenVar != 0) {
+        char seen[256] = {};
+        size_t len = 0;
+        if (svc_config->get_string(mod_ctx, s_crashSeenVar, seen, sizeof(seen), &len) == MOD_OK && s_crashId == seen) {
+            s_crashPending = false;
+            return;
+        }
+    }
+    if (cfg_bool(s_autoCrashVar, false)) {
+        mark_crash_seen();
+        send_crash_report("(automatic crash report)");
+        return;
+    }
+    offer_crash_report();
 }
 
 void report_hint_update() {
+    crash_report_update();
     if (!s_hintArmed || s_hintVar == 0 || cfg_bool(s_hintVar, false)) return;
     if (++s_hintTicks < 120) return;
     coop_notify_c(kNotifyOther, "Found a bug?", "Report bugs in CO-OP > Report Bug");

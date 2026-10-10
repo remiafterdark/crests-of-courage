@@ -46,6 +46,12 @@ struct SurfaceHandles {
     std::vector<std::string> rowLabels;
 
     UiElementHandle globalStatus = 0;
+    UiElementHandle statusCard = 0;
+    UiElementHandle playersCard = 0;
+    std::string lastStatusCard;
+    std::string lastPlayersCard;
+    UiElementHandle voiceKey = 0;
+    std::string lastVoiceKey;
     std::string lastGlobalStatus;
     UiListHandle blockList = 0;
     std::string lastBlockList;
@@ -292,6 +298,10 @@ std::string invite_text() {
     return upnp_status();
 }
 
+void size_list(UiListHandle list, size_t rows) {
+    if (list != 0) svc_ui->elem_set_class(mod_ctx, list, "coop-list", rows > 0);
+}
+
 void push_block_list(SurfaceHandles& h) {
     if (h.blockList == 0) return;
     std::vector<GlobalPlayer> rows;
@@ -319,20 +329,27 @@ void push_block_list(SurfaceHandles& h) {
     for (size_t i = 0; i < rows.size(); ++i) {
         h.blockLabels.push_back(rows[i].name + (isBlocked[i] ? "  (blocked)" : ""));
     }
+
     std::vector<UiListItem> items;
     for (size_t i = 0; i < rows.size(); ++i) {
         UiListItem item = UI_LIST_ITEM_INIT;
-        item.key = i;
+        item.key = std::strtoull(rows[i].tag.c_str(), nullptr, 16);
         item.label = h.blockLabels[i].c_str();
         items.push_back(item);
     }
     svc_ui->list_set_items(mod_ctx, h.blockList, items.empty() ? nullptr : items.data(), items.size());
+    size_list(h.blockList, items.size());
 }
 
 void on_block_pressed(ModContext*, UiListHandle, uint64_t key, void*) {
     SurfaceHandles& h = s_window;
-    if (key >= h.blockRows.size()) return;
-    global_set_blocked(h.blockRows[key], !h.blockRowBlocked[key]);
+    for (const GlobalPlayer& row : h.blockRows) {
+        if (std::strtoull(row.tag.c_str(), nullptr, 16) != key) continue;
+        const bool on = !global_blocked(row.tag);
+        global_set_blocked(row, on);
+        coop_log::info("coop_mod: [GLOBAL] list press {} -> {}", row.tag, on ? "block" : "unblock");
+        break;
+    }
     h.blockListPushed = false;
     push_block_list(h);
 }
@@ -361,6 +378,8 @@ void push_players(SurfaceHandles& h) {
     if (h.listPushed && joined == h.lastList) return;
     h.lastList = joined;
     h.listPushed = true;
+    size_list(h.players, h.rowIds.size());
+    size_list(h.catchUp, h.rowIds.size());
     if (h.rowIds.empty()) {
         svc_ui->list_set_items(mod_ctx, h.players, nullptr, 0);
         if (h.catchUp != 0) svc_ui->list_set_items(mod_ctx, h.catchUp, nullptr, 0);
@@ -493,6 +512,10 @@ std::string net_peers_text() {
     return out.empty() ? "Nobody else is here yet." : out;
 }
 
+std::string global_status_card_rml();
+std::string voice_key_text();
+std::string global_players_card_rml();
+
 void refresh(SurfaceHandles& h) {
     if (h.status != 0) {
         const std::string text = status_text();
@@ -545,6 +568,27 @@ void refresh(SurfaceHandles& h) {
         }
     }
     push_block_list(h);
+    if (h.voiceKey != 0) {
+        const std::string text = voice_key_text();
+        if (text != h.lastVoiceKey) {
+            h.lastVoiceKey = text;
+            svc_ui->elem_set_text(mod_ctx, h.voiceKey, h.lastVoiceKey.c_str());
+        }
+    }
+    if (h.statusCard != 0) {
+        const std::string rml = global_status_card_rml();
+        if (rml != h.lastStatusCard) {
+            h.lastStatusCard = rml;
+            svc_ui->elem_set_rml(mod_ctx, h.statusCard, rml.c_str());
+        }
+    }
+    if (h.playersCard != 0) {
+        const std::string rml = global_players_card_rml();
+        if (rml != h.lastPlayersCard) {
+            h.lastPlayersCard = rml;
+            svc_ui->elem_set_rml(mod_ctx, h.playersCard, rml.c_str());
+        }
+    }
     if (h.netPeers != 0) {
         const std::string text = net_peers_text();
         if (text != h.lastNetPeers) {
@@ -640,6 +684,8 @@ ModResult group_advanced(ModContext*, UiElementHandle pane, void*, ModError*) {
     add_toggle(pane, "Room codes", coop_net_rooms_var());
     add_toggle(pane, "Open the port for me", coop_net_upnp_var());
     add_toggle(pane, "Connect on launch", coop_net_autoconnect_var());
+    add_toggle(pane, "Keep playing if the host leaves", coop_net_migrate_var(),
+        "If the host crashes or leaves a room-code game, another player takes over the same room and everyone carries on.");
 
     svc_ui->pane_add_section(mod_ctx, pane, "Your save");
     add_button(pane, "Restore latest backup",
@@ -656,29 +702,165 @@ ModResult group_advanced(ModContext*, UiElementHandle pane, void*, ModError*) {
     return MOD_OK;
 }
 
-void build_global(UiElementHandle pane, SurfaceHandles& h) {
-    h.lastGlobalStatus = "Status: " + global_status();
-    svc_ui->pane_add_text(mod_ctx, pane, h.lastGlobalStatus.c_str(), &h.globalStatus);
-    add_toggle(pane, "Hyrule Online", global_enabled_var(),
-        "Other players can see your IP address while this is on.");
+std::string global_status_card_rml() {
+    std::string dot = "hot-dot";
+    std::string value = "Off";
+    std::string detail = "Other players can see your IP address while this is on.";
+    if (global_active()) {
+        dot += " hot-on";
+        value = "Online";
+        detail = global_status();
+    } else if (global_connecting()) {
+        dot += " hot-busy";
+        value = "Connecting";
+        detail = global_status();
+    } else if (cfg_bool(global_enabled_var(), false)) {
+        value = "Paused";
+        detail = global_status();
+    }
+    return "<div class=\"hot-card\"><div class=\"hot-card-top\"><div class=\"hot-card-title\">Status</div>"
+           "<div class=\"hot-card-value\"><div class=\"" + dot + "\"></div><div class=\"hot-card-value-text\">" +
+           value + "</div></div></div><div class=\"hot-card-sub\">" + escape_rml(detail) + "</div></div>";
+}
 
-    svc_ui->pane_add_section(mod_ctx, pane, "PvP");
-    add_toggle(pane, "PvP", global_pvp_var(),
-        "Fight other players who have it on too. Their names show in red.");
-    add_toggle(pane, "Only show PvP players", global_pvp_only_var(),
-        "Hides everyone who doesn't have PvP on.");
+std::string global_players_card_rml() {
+    const bool on = global_active();
+    return "<div class=\"hot-card\"><div class=\"hot-card-top\"><div class=\"hot-card-title\">Players Online</div>"
+           "<div class=\"hot-card-value\"><img class=\"hot-community-icon\" "
+           "src=\"mod://dev.remiafterdark.coop_mod/res/crowd.png\" /><div class=\"hot-card-value-text\">" +
+           std::to_string(global_total()) + "</div></div></div><div class=\"hot-card-sub\">" +
+           (on ? "Playing Hyrule Online right now." : "Join to see who's playing.") + "</div></div>";
+}
 
-    svc_ui->pane_add_section(mod_ctx, pane, "Name tags");
-    add_toggle(pane, "Show their names", global_nametags_var(),
-        "Only for Hyrule Online. Off in Local > Name tags hides these too.");
-    add_number(pane, "Name distance", global_nametag_distance_var(), 500, 30000, 500, "",
-        "How far away you can read their names.", global_nametags_var());
+void add_wide_rml(UiElementHandle pane, const std::string& rml, UiElementHandle* out = nullptr) {
+    UiElementHandle h = 0;
+    svc_ui->pane_add_rml(mod_ctx, pane, rml.c_str(), &h);
+    if (h != 0) svc_ui->elem_set_class(mod_ctx, h, "hot-wide", true);
+    if (out != nullptr) *out = h;
+}
 
-    svc_ui->pane_add_section(mod_ctx, pane, "Chat");
+std::string voice_key_text() {
+    return voice_key_capture_active() ? "Mute key: press a key (Esc to cancel)"
+                                      : "Mute key: " + voice_mute_key_name();
+}
+
+ModResult group_global_voice(ModContext*, UiElementHandle pane, void*, ModError*) {
+    add_panel_header(pane, "Voice", "Talk to the players near you.");
+    if (!voice_supported()) {
+        svc_ui->pane_add_text(mod_ctx, pane, "Voice chat isn't available on this device yet.", nullptr);
+        return MOD_OK;
+    }
+    static std::string s_status;
+    s_status = "Status: " + voice_status();
+    svc_ui->pane_add_text(mod_ctx, pane, s_status.c_str(), nullptr);
+    add_toggle(pane, "Voice chat", voice_enabled_var(), "In Hyrule Online and in co-op.");
+    if (voice_can_talk()) {
+        static std::vector<std::string> s_mics;
+        static std::vector<const char*> s_micPtrs;
+        s_mics = voice_input_devices();
+        s_micPtrs.clear();
+        for (const std::string& m : s_mics) s_micPtrs.push_back(m.c_str());
+        add_dropdown(pane, "Microphone", voice_input_index_var(), s_micPtrs.data(), s_micPtrs.size(), nullptr,
+            voice_enabled_var());
+        add_toggle(pane, "Mute my microphone", voice_muted_var(), nullptr, voice_enabled_var());
+        add_number(pane, "Microphone volume", voice_mic_volume_var(), 0, 200, 10, "%", nullptr, voice_enabled_var());
+#if defined(_WIN32)
+        s_window.lastVoiceKey = voice_key_text();
+        svc_ui->pane_add_text(mod_ctx, pane, s_window.lastVoiceKey.c_str(), &s_window.voiceKey);
+        add_button(pane, "Change mute key", [](ModContext*, void*) { voice_begin_key_capture(); }, nullptr,
+            "Mutes and unmutes your microphone in game. Press this, then the new key.");
+#endif
+    } else {
+        svc_ui->pane_add_text(mod_ctx, pane,
+            "Talking isn't available on this device yet, but you can hear the players near you.", nullptr);
+    }
+    add_number(pane, "Player volume", voice_player_volume_var(), 0, 200, 10, "%", nullptr, voice_enabled_var());
+    add_number(pane, "Range", voice_range_var(), 0, 200, 10, "%", "How far away you can hear people.",
+        voice_enabled_var());
+    add_toggle(pane, "Fade with distance in co-op", voice_proximity_var(),
+        "Off: everyone in your co-op room is heard at full volume. Hyrule Online always fades.",
+        voice_enabled_var());
+    return MOD_OK;
+}
+
+ModResult group_global_chat(ModContext*, UiElementHandle pane, void*, ModError*) {
+    add_panel_header(pane, "Chat");
     svc_ui->pane_add_text(mod_ctx, pane, chat_how_text(), nullptr);
     add_toggle(pane, "Show chat on screen", chat_show_var());
     add_number(pane, "Chat size", chat_size_var(), 50, 200, 10, "%");
     add_number(pane, "Fade after", chat_fade_var(), 2, 120, 1, " s");
+    return MOD_OK;
+}
+
+ModResult group_global_names(ModContext*, UiElementHandle pane, void*, ModError*) {
+    add_panel_header(pane, "Name tags");
+    add_toggle(pane, "Show their names", global_nametags_var(),
+        "Only for Hyrule Online. Off in Local > Name tags hides these too.");
+    add_number(pane, "Name distance", global_nametag_distance_var(), 500, 30000, 500, "",
+        "How far away you can read their names.", global_nametags_var());
+    add_color(pane, "Your name color", colors_name_var());
+    add_button(pane, "Name color back to white", [](ModContext*, void*) {
+        if (colors_name_var() != 0) svc_config->set_string(mod_ctx, colors_name_var(), "");
+    });
+    return MOD_OK;
+}
+
+ModResult group_global_box(ModContext*, UiElementHandle pane, void*, ModError*) {
+    add_panel_header(pane, "On-screen box");
+    add_toggle(pane, "Show the box", global_hud_var(),
+        "How many players are in this area, while Hyrule Online is on. On a PC you can drag it with the mouse.");
+    add_toggle(pane, "Players in all of Hyrule", global_hud_all_var(), "Everyone online, above the count for this area.",
+        global_hud_var());
+    add_toggle(pane, "PvP players in this area", global_hud_pvp_var(), "How many players here have PvP on, in red.",
+        global_hud_var());
+    add_number(pane, "Across", global_hud_x_var(), 0, 100, 1, "%", nullptr, global_hud_var());
+    add_number(pane, "Down", global_hud_y_var(), 0, 100, 1, "%", nullptr, global_hud_var());
+    add_number(pane, "Size", global_hud_size_var(), 50, 200, 5, "%", nullptr, global_hud_var());
+    add_number(pane, "Opacity", global_hud_opacity_var(), 20, 100, 5, "%", nullptr, global_hud_var());
+    add_button(pane, "Put it back", [](ModContext*, void*) { global_hud_reset_place(); });
+    return MOD_OK;
+}
+
+ModResult group_global_pvp(ModContext*, UiElementHandle pane, void*, ModError*) {
+    add_panel_header(pane, "PvP");
+    add_toggle(pane, "PvP", global_pvp_var(),
+        "Fight other players who have it on too. Their names show in red.");
+    add_toggle(pane, "Only show PvP players", global_pvp_only_var(),
+        "Hides everyone who doesn't have PvP on.");
+    return MOD_OK;
+}
+
+void build_global(UiElementHandle pane, SurfaceHandles& h, UiElementHandle detail) {
+    add_panel_header(pane, "Hyrule Online", "Play alongside everyone out in Hyrule.");
+    add_wide_rml(pane, "<div class=\"hot-intro\">See other people playing in the same area as you. You each "
+                       "keep your own game, nothing gets shared.</div>");
+    h.lastStatusCard = global_status_card_rml();
+    add_wide_rml(pane, h.lastStatusCard, &h.statusCard);
+    h.lastPlayersCard = global_players_card_rml();
+    add_wide_rml(pane, h.lastPlayersCard, &h.playersCard);
+
+    UiControlDesc join = UI_CONTROL_DESC_INIT;
+    join.kind = UI_CONTROL_BUTTON;
+    join.label = "JOIN HYRULE";
+    join.on_pressed = [](ModContext*, void*) { svc_config->set_bool(mod_ctx, global_enabled_var(), true); };
+    join.is_disabled = [](ModContext*, void*) -> bool { return cfg_bool(global_enabled_var(), false); };
+    join.help_rml = "Other players can see your IP address while this is on.";
+    UiElementHandle joinHandle = 0;
+    if (svc_ui->pane_add_control(mod_ctx, pane, &join, &joinHandle) == MOD_OK && joinHandle != 0) {
+        svc_ui->elem_set_class(mod_ctx, joinHandle, "hot-primary", true);
+    }
+    UiControlDesc leave = UI_CONTROL_DESC_INIT;
+    leave.kind = UI_CONTROL_BUTTON;
+    leave.label = "LEAVE HYRULE";
+    leave.on_pressed = [](ModContext*, void*) { svc_config->set_bool(mod_ctx, global_enabled_var(), false); };
+    leave.is_disabled = [](ModContext*, void*) -> bool { return !cfg_bool(global_enabled_var(), false); };
+    svc_ui->pane_add_control(mod_ctx, pane, &leave, nullptr);
+
+    add_group_or_section(pane, detail, "Voice", group_global_voice);
+    add_group_or_section(pane, detail, "Chat", group_global_chat);
+    add_group_or_section(pane, detail, "Name tags", group_global_names);
+    add_group_or_section(pane, detail, "PvP", group_global_pvp);
+    add_group_or_section(pane, detail, "On-screen box", group_global_box);
 
     svc_ui->pane_add_section(mod_ctx, pane, "Players");
     svc_ui->pane_add_text(mod_ctx, pane, "Press someone to block them. Press again to unblock.", nullptr);
@@ -823,6 +1005,10 @@ ModResult group_nametags(ModContext*, UiElementHandle pane, void*, ModError*) {
     add_toggle(pane, "Hide when far away", vars.nametagsHideFar,
         "Tags disappear past about a field's width instead of following them forever.",
         vars.nametags);
+    add_color(pane, "Your name color", colors_name_var());
+    add_button(pane, "Name color back to white", [](ModContext*, void*) {
+        if (colors_name_var() != 0) svc_config->set_string(mod_ctx, colors_name_var(), "");
+    });
     return MOD_OK;
 }
 
@@ -863,9 +1049,8 @@ ModResult group_health(ModContext*, UiElementHandle pane, void*, ModError*) {
 ModResult group_map(ModContext*, UiElementHandle pane, void*, ModError*) {
     add_panel_header(pane, "Map");
     svc_ui->pane_add_text(mod_ctx, pane,
-        "Early version, off to start with. It works, but it doesn't look great yet: the map uses "
-        "the same Link face as yours with a name under it, and the minimap arrows are plain "
-        "shapes.", nullptr);
+        "Off to start with. Players show as a Link face, outlined in red when they have PvP on.",
+        nullptr);
 
     svc_ui->pane_add_section(mod_ctx, pane, "Map screen");
     add_toggle(pane, "Show players on the map", map_markers_full_var(),
@@ -879,11 +1064,11 @@ ModResult group_map(ModContext*, UiElementHandle pane, void*, ModError*) {
 
     svc_ui->pane_add_section(mod_ctx, pane, "Minimap");
     add_toggle(pane, "Show players on the minimap", map_markers_minimap_var(),
-        "An arrow for each player in the same area, pointing the way they face.");
-    add_number(pane, "Arrow size", map_markers_arrow_size_var(), 50, 250, 10, "%", nullptr,
+        "A face for each player nearby. Players in the next area over show faded at the edge.");
+    add_number(pane, "Marker size", map_markers_arrow_size_var(), 50, 250, 10, "%", nullptr,
         map_markers_minimap_var());
     add_toggle(pane, "Keep far players at the edge", map_markers_edge_var(),
-        "Somebody off the edge of the minimap stays on its border, pointing toward them.",
+        "Somebody off the edge of the minimap stays on its border, on their side.",
         map_markers_minimap_var());
 
     svc_ui->pane_add_section(mod_ctx, pane, "Both");
@@ -891,7 +1076,7 @@ ModResult group_map(ModContext*, UiElementHandle pane, void*, ModError*) {
         "Faded, so you can tell they are upstairs or down.");
     static const char* const kColors[] = {"Each their own", "All white"};
     add_dropdown(pane, "Colours", map_markers_colors_var(), kColors, 2,
-        "Each player gets a colour for their arrow and name, so you can tell who is who.");
+        "Each player gets a colour for their name, so you can tell who is who.");
     return MOD_OK;
 }
 
@@ -1041,14 +1226,6 @@ std::vector<const char*> s_slotOptionPtrs[kSkinChoiceCount];
 std::vector<std::string> s_slotModelNames[kSkinChoiceCount];
 std::string s_slotHelp[kSkinChoiceCount];
 
-void* pack_model(int index) {
-    return reinterpret_cast<void*>(static_cast<intptr_t>(index));
-}
-int model_of(void* data) {
-    const int index = static_cast<int>(reinterpret_cast<intptr_t>(data));
-    return index >= 0 && index < static_cast<int>(s_modelNames.size()) ? index : -1;
-}
-
 std::string worn_text() {
     if (skins_all_same("")) return "Wearing Link's own model.";
     for (int i = 0; i < skins_count(); ++i) {
@@ -1149,18 +1326,34 @@ const char* outfit_heading(int outfit) {
     }
 }
 
+std::vector<bool> s_presetInHas;
+void* pack_preset(int row, bool otherGroup) {
+    return reinterpret_cast<void*>(static_cast<intptr_t>(row | (otherGroup ? 0x10000 : 0)));
+}
+int preset_row(void* data) {
+    return static_cast<int>(reinterpret_cast<intptr_t>(data) & 0xFFFF);
+}
+bool preset_hidden(ModContext*, void* data) {
+    const int row = preset_row(data);
+    const bool other = (reinterpret_cast<intptr_t>(data) & 0x10000) != 0;
+    if (row < 0 || row >= static_cast<int>(s_presetInHas.size())) return other;
+    return other ? s_presetInHas[row] : !s_presetInHas[row];
+}
+
 void sort_presets(SurfaceHandles& h) {
     if (h.presetHas.empty() || h.presetHas.size() != h.presetOther.size()) return;
     const int outfit = local_skin_outfit();
     if (outfit == h.presetOutfit) return;
     h.presetOutfit = outfit;
     int others = 0;
+    s_presetInHas.assign(h.presetHas.size(), true);
     for (size_t i = 0; i < h.presetHas.size(); ++i) {
 
         const bool has = i == 0 ||
             (i - 1 < s_modelNames.size() && skins_covers_outfit(s_modelNames[i - 1].c_str(), outfit));
         if (h.presetHas[i] != 0) svc_ui->elem_set_visible(mod_ctx, h.presetHas[i], has);
         if (h.presetOther[i] != 0) svc_ui->elem_set_visible(mod_ctx, h.presetOther[i], !has);
+        s_presetInHas[i] = has;
         if (!has) ++others;
     }
     h.presetHasText = outfit_heading(outfit);
@@ -1194,7 +1387,7 @@ void build_models(UiElementHandle pane, SurfaceHandles& h, UiElementHandle detai
     h.presetOutfit = -1;
     h.presetHasText = outfit_heading(local_skin_outfit());
     const auto add_group = [&](UiElementHandle& head, const char* title, UiElementHandle* rowOut,
-                               std::vector<UiElementHandle>& into) {
+                               std::vector<UiElementHandle>& into, bool otherGroup) {
         svc_ui->pane_add_text(mod_ctx, pane, title, &head);
         if (head != 0) svc_ui->elem_set_class(mod_ctx, head, "coop-preset-head", true);
         if (rowOut != nullptr) *rowOut = 0;
@@ -1205,29 +1398,32 @@ void build_models(UiElementHandle pane, SurfaceHandles& h, UiElementHandle detai
             if (i == 0) {
                 desc.label = "Link";
                 desc.help_rml = "Link as the game draws him.";
+                desc.user_data = pack_preset(0, otherGroup);
                 desc.on_pressed = [](ModContext*, void*) { skins_set_local_all(""); };
                 desc.is_selected = [](ModContext*, void*) { return skins_all_same(""); };
             } else {
                 desc.label = s_modelTitles[i - 1].c_str();
                 desc.help_rml = s_modelHelp[i - 1].c_str();
-                desc.user_data = pack_model(static_cast<int>(i - 1));
+                desc.user_data = pack_preset(static_cast<int>(i), otherGroup);
                 desc.on_pressed = [](ModContext*, void* d) {
-                    const int index = model_of(d);
-                    if (index >= 0) skins_set_local_all(s_modelNames[index].c_str());
+                    const int index = preset_row(d) - 1;
+                    if (index >= 0 && index < static_cast<int>(s_modelNames.size())) skins_set_local_all(s_modelNames[index].c_str());
                 };
                 desc.is_selected = [](ModContext*, void* d) {
-                    const int index = model_of(d);
-                    return index >= 0 && skins_all_same(s_modelNames[index].c_str());
+                    const int index = preset_row(d) - 1;
+                    return index >= 0 && index < static_cast<int>(s_modelNames.size()) &&
+                           skins_all_same(s_modelNames[index].c_str());
                 };
             }
+            desc.is_disabled = preset_hidden;
             UiElementHandle control = 0;
             svc_ui->pane_add_control(mod_ctx, parent, &desc, &control);
             if (control != 0) svc_ui->elem_set_class(mod_ctx, control, "coop-preset", true);
             into.push_back(control);
         }
     };
-    add_group(h.presetHasHead, h.presetHasText.c_str(), nullptr, h.presetHas);
-    add_group(h.presetOtherHead, "Other models", &h.presetOtherRow, h.presetOther);
+    add_group(h.presetHasHead, h.presetHasText.c_str(), nullptr, h.presetHas, false);
+    add_group(h.presetOtherHead, "Other models", &h.presetOtherRow, h.presetOther, true);
     sort_presets(h);
     if (s_modelNames.empty()) {
         svc_ui->pane_add_text(mod_ctx, pane,
@@ -1379,14 +1575,17 @@ ModResult tab_connect(
 ModResult tab_global(
     ModContext*, UiWindowHandle, UiElementHandle left, UiElementHandle right, void*, ModError*) {
     s_window = SurfaceHandles{};
-    build_global(left, s_window);
-    add_panel_header(right, "Hyrule Online");
-    svc_ui->pane_add_text(mod_ctx, right,
-        "See other people playing in the same area as you. You each keep your own game, "
-        "nothing gets shared.", nullptr);
-    svc_ui->pane_add_text(mod_ctx, right,
-        "Other players can see your IP address while this is on.", nullptr);
-    svc_ui->pane_add_text(mod_ctx, right, "Turns off while you're in a co-op room.", nullptr);
+    build_global(left, s_window, right);
+    add_wide_rml(right,
+        "<div class=\"coop-head\">About</div>"
+        "<div class=\"hot-about-title\">Hyrule Online</div>"
+        "<div class=\"hot-about-text\">See other people playing in the same area as you. You each keep "
+        "your own game, nothing gets shared.</div>"
+        "<div class=\"hot-about-text\">Other players can see your IP address while this is on.</div>"
+        "<div class=\"hot-about-text\">Turns off while you're in a co-op room.</div>"
+        "<div class=\"hot-rule\"></div>"
+        "<div class=\"hot-about-credit\">Hyrule Online page by ThyHeroOfTime</div>"
+        "<div class=\"hot-about-credit\">UI design by Dragonberri</div>");
     return MOD_OK;
 }
 
@@ -1620,6 +1819,132 @@ select-button.group-button key {
     color: rgba(var(--color-text-rgb), 38%);
     border-left-color: rgba(var(--color-border-rgb), 28%);
 }
+
+pane > ui-list.coop-list {
+    flex: 0 0 auto;
+    height: 240dp;
+}
+
+pane > div.hot-wide {
+    max-width: none;
+}
+
+.hot-intro {
+    display: block;
+    color: rgba(var(--color-text-rgb), 88%);
+    font-size: var(--font-size-md);
+    line-height: 1.45;
+    padding-bottom: var(--space-sm);
+}
+
+.hot-card {
+    display: block;
+    padding-top: var(--space-sm);
+    padding-bottom: var(--space-sm);
+    padding-left: var(--space-md);
+    padding-right: var(--space-md);
+    margin-bottom: var(--space-xs);
+    border-radius: 3dp;
+    background-color: rgba(29, 28, 22, 94%);
+    box-shadow: rgba(148, 119, 51, 55%) 0 0 0 1dp;
+}
+
+.hot-card-top {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.hot-card-title {
+    color: rgb(236, 226, 196);
+    font-weight: bold;
+    font-size: var(--font-size-lg);
+}
+
+.hot-card-value {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    color: rgb(236, 226, 196);
+    font-size: var(--font-size-lg);
+}
+
+.hot-card-value-text {
+    display: block;
+    color: inherit;
+    font-size: inherit;
+}
+
+.hot-community-icon {
+    width: 24dp;
+    height: 18dp;
+    margin-right: var(--space-sm);
+}
+
+.hot-dot {
+    flex: 0 0 10dp;
+    width: 10dp;
+    height: 10dp;
+    border-radius: 5dp;
+    margin-right: var(--space-sm);
+    background-color: rgb(165, 165, 160);
+}
+
+.hot-dot.hot-on {
+    background-color: rgb(92, 205, 104);
+}
+
+.hot-dot.hot-busy {
+    background-color: rgb(220, 176, 61);
+}
+
+.hot-card-sub {
+    display: block;
+    color: rgba(var(--color-text-rgb), 72%);
+    font-size: var(--font-size-md);
+    line-height: 1.4;
+    padding-top: 2dp;
+}
+
+button.hot-primary:not(:disabled) {
+    color: rgb(255, 236, 174);
+    background-color: rgba(103, 82, 38, 92%);
+    box-shadow: rgb(220, 176, 61) 0 0 0 2dp;
+}
+
+.hot-rule {
+    display: block;
+    height: 1dp;
+    background-color: rgba(202, 163, 59, 45%);
+    margin-top: var(--space-md);
+    margin-bottom: var(--space-sm);
+}
+
+.hot-about-title {
+    display: block;
+    color: rgb(236, 226, 196);
+    font-weight: bold;
+    font-size: var(--font-size-lg);
+    padding-top: var(--space-sm);
+    padding-bottom: var(--space-xs);
+}
+
+.hot-about-text {
+    display: block;
+    color: rgba(var(--color-text-rgb), 80%);
+    font-size: var(--font-size-md);
+    line-height: 1.45;
+    padding-bottom: var(--space-xs);
+}
+
+.hot-about-credit {
+    display: block;
+    color: rgb(236, 226, 196);
+    font-size: var(--font-size-md);
+    padding-top: var(--space-sm);
+}
+
 )RCSS";
 
 void open_window() {

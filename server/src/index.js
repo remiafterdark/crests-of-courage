@@ -353,6 +353,8 @@ const GLOBAL_CHAT_MAX = 100;
 const GLOBAL_CHAT_GAP_MS = 2000;
 const GLOBAL_RENAMES = 6;
 
+const GLOBAL_BLOCKS = 30;
+
 function addressTag(ip) {
   let h = 2166136261;
   for (let i = 0; i < ip.length; i++) {
@@ -427,6 +429,15 @@ export class Global {
 
   block(ws, info, id, on) {
     if (!Number.isInteger(id) || id <= 0) return;
+    const now = Date.now();
+    if (now - (info.blockWindow || 0) > 60000) {
+      info.blockWindow = now;
+      info.blockCount = 0;
+    }
+    if (++info.blockCount > GLOBAL_BLOCKS) {
+      ws.serializeAttachment(info);
+      return;
+    }
     const blocks = (info.blocks || []).filter((b) => b !== id);
     if (on) blocks.push(id);
     info.blocks = blocks.slice(-200);
@@ -467,16 +478,20 @@ export class Global {
     }
   }
 
-  counts(area) {
+  counts(area, v = 0) {
     let total = 0;
     let here = 0;
+    let same = 0;
     for (const ws of this.all()) {
       const info = ws.deserializeAttachment();
       if (!info || !info.hello) continue;
       ++total;
-      if (area && info.area === area) ++here;
+      if (area && info.area === area) {
+        ++here;
+        if (info.v === v) ++same;
+      }
     }
-    return { total, here };
+    return { total, here, same };
   }
 
   part(ws, info) {
@@ -561,7 +576,7 @@ export class Global {
       info.tag = await tagOf(msg.key);
       this.introduce(ws, info);
       ws.serializeAttachment(info);
-      send(ws, { op: "count", ...this.counts(info.area) });
+      send(ws, { op: "count", ...this.counts(info.area, info.v) });
       return;
     }
     if (msg.op === "area") {
@@ -578,7 +593,7 @@ export class Global {
         this.introduce(ws, info);
       }
       ws.serializeAttachment(info);
-      send(ws, { op: "count", ...this.counts(info.area) });
+      send(ws, { op: "count", ...this.counts(info.area, info.v) });
       return;
     }
     if (msg.op === "chat" && info.hello) {

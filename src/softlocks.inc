@@ -27,6 +27,18 @@ SOFTLOCK("R-Q64X", "Midna in the shadows (F_0800) outside Ordon: no Midna button
     "on 0x6140; notstage F_SP103,F_SP104,F_SP00,R_SP01",
     "clear 0x6140", "She can be called again.")
 
-SOFTLOCK("2026-09-29", "Epona tamed (M_023) on the wolf visit: Ordon in the wrong layer, nobody there",
-    "norando; on 0x0601; on 0x0502; notdarkclear 0",
+SOFTLOCK("2026-09-29", "Epona tamed (M_023) before Faron is cleared: Ordon in the wrong layer, nobody there",
+    "norando; on 0x0601; notdarkclear 0",
     "clear 0x0601", "")
+
+SOFTLOCK("R-8AJB", "still the wolf after Faron's spirit, no way to change back",
+    "norando; wolf; notwilight; on 0x0610; off 0x0602; off 0x0D04",
+    "human", "Midna changed you back.")
+
+SOFTLOCK("R-CRB8", "Bo's boots flag without the Iron Boots: his talk loops",
+    "norando; on 0x1C20; noitem 0x45",
+    "clear 0x1C20", "Talk to Bo again.")
+
+SOFTLOCK("R-EXSQ", "randomizer: Bo stops you in his hallway forever after a partner won the sumo",
+    "rando; stage R_SP01; on 0x3901; off 0x1210; tbon 0:2",
+    "set 0x1210", "")

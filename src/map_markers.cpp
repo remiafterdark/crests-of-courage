@@ -9,6 +9,7 @@
 #include "mods/svc/hook.hpp"
 
 #include "JSystem/J2DGraph/J2DGrafContext.h"
+#include "JSystem/JKernel/JKRAramArchive.h"
 #include "JSystem/JUtility/JUTFont.h"
 #include "JSystem/JUtility/TColor.h"
 #include "SSystem/SComponent/c_math.h"
@@ -26,6 +27,8 @@
 #include "m_Do/m_Do_graphic.h"
 
 #include <gx.h>
+
+#include "map_marker_icons.inc"
 
 #include <algorithm>
 #include <chrono>
@@ -112,6 +115,7 @@ bool mirror_mode() {
 
 struct Spot {
     bool sameStage = false;
+    char stage[9] = {};
     int room = -1;
     f32 x = 0.0f, y = 0.0f, z = 0.0f;
     s16 angle = 0;
@@ -145,32 +149,182 @@ bool other_player(uint8_t id) {
     return id != coop_net_local_id() && (coop_net_player_present(id) || global_slot_present(id));
 }
 
+struct PeerTrack {
+    bool valid = false;
+    char stage[9] = {};
+    int room = -1;
+    f32 x = 0.0f, y = 0.0f, z = 0.0f;
+    s16 angle = 0;
+};
+PeerTrack s_track[kCoopMaxPlayers];
+
+bool room_loaded(int room) {
+    return room >= 0 && room < 64 && dComIfGp_roomControl_checkRoomDisp(room);
+}
+
 bool spot_of(uint8_t id, Spot* out) {
-    if (!other_player(id)) return false;
+    if (id >= kCoopMaxPlayers) return false;
+    PeerTrack& t = s_track[id];
     const CoopPeer& p = features_peer_of(id);
-    if (!p.present || !p.inGame || p.stage[0] == '\0') return false;
+    if (!other_player(id) || !p.present) {
+        t = PeerTrack{};
+        return false;
+    }
+    if (p.inGame && p.stage[0] != '\0') {
+        std::strncpy(t.stage, p.stage, 8);
+        t.stage[8] = '\0';
+        t.room = p.curRoom;
+        t.x = p.x;
+        t.y = p.y;
+        t.z = p.z;
+        t.angle = p.angleY;
+        t.valid = true;
+    } else if (!t.valid) {
+        return false;
+    }
     const char* ours = dComIfGp_getStartStageName();
-    out->sameStage = ours != nullptr && std::strncmp(ours, p.stage, 8) == 0;
-    out->room = p.curRoom;
-    f32 x = p.x, y = p.y, z = p.z;
-    short angle = p.angleY;
-    if (out->sameStage) {
-        f32 lx = 0.0f, ly = 0.0f, lz = 0.0f;
-        short la = 0;
-        if (puppet_hook_get_pose_of(id, &lx, &ly, &lz, &la, nullptr, nullptr)) {
-            x = lx;
-            y = ly;
-            z = lz;
-            angle = la;
-        }
-        to_map_space(out->room, x, y, z, angle, out);
+    out->sameStage = ours != nullptr && std::strncmp(ours, t.stage, 8) == 0;
+    std::memcpy(out->stage, t.stage, sizeof(out->stage));
+    out->room = t.room;
+    f32 lx = 0.0f, ly = 0.0f, lz = 0.0f;
+    short la = 0;
+    if (out->sameStage && room_loaded(t.room) &&
+        puppet_hook_get_pose_of(id, &lx, &ly, &lz, &la, nullptr, nullptr)) {
+        to_map_space(t.room, lx, ly, lz, la, out);
+    } else if (p.mapValid) {
+        out->x = p.mapX;
+        out->y = p.mapY;
+        out->z = p.mapZ;
+        out->angle = p.mapAngleY;
+    } else if (out->sameStage) {
+        to_map_space(t.room, t.x, t.y, t.z, t.angle, out);
     } else {
-        out->x = x;
-        out->y = y;
-        out->z = z;
-        out->angle = angle;
+        out->x = t.x;
+        out->y = t.y;
+        out->z = t.z;
+        out->angle = t.angle;
     }
     return true;
+}
+
+struct FieldStageAnchor {
+    char stage[9] = {};
+    f32 x = 0.0f;
+    f32 z = 0.0f;
+};
+struct VirtualStageName {
+    char stage[9] = {};
+    char mapped[9] = {};
+};
+std::vector<FieldStageAnchor> s_fieldAnchors;
+std::vector<VirtualStageName> s_virtualStages;
+bool s_fieldTopologyTried = false;
+
+void load_field_topology() {
+    if (s_fieldTopologyTried) return;
+    JKRAramArchive* arc = dComIfGp_getFieldMapArchive2();
+    if (arc == nullptr) return;
+    s_fieldTopologyTried = true;
+    alignas(32) u8 buffer[0x800] = {};
+    arc->readResource(buffer, sizeof(buffer), "dat/field.dat");
+    auto* field = reinterpret_cast<dMenu_Fmap_field_data_c*>(buffer);
+    const uint32_t stageOff = field->mStageDataOffset;
+    const uint32_t regionOff = field->mRegionDataOffset;
+    const uint32_t virtualOff = field->mVirtualStageOffset;
+    if (stageOff >= sizeof(buffer) || regionOff >= sizeof(buffer) || virtualOff >= sizeof(buffer)) return;
+
+    auto* regions = reinterpret_cast<dMenu_Fmap_field_region_data_c*>(buffer + regionOff);
+    f32 originX[8] = {};
+    f32 originZ[8] = {};
+    bool haveOrigin[8] = {};
+    for (int i = 0; i < regions->mCount; ++i) {
+        const auto& r = regions->mData[i];
+        const int slot = static_cast<int>(r.mTextureReadNum) - 1;
+        if (slot < 0 || slot >= 8) continue;
+        originX[slot] = r.mOriginX;
+        originZ[slot] = r.mOriginZ;
+        haveOrigin[slot] = true;
+    }
+    auto* stages = reinterpret_cast<dMenuMapCommon_c::Stage_c*>(buffer + stageOff);
+    for (int i = 0; i < stages->mCount; ++i) {
+        const auto& d = stages->mData[i];
+        const int region = static_cast<int>(d.mRegionNo) - 1;
+        if (region < 0 || region >= 8 || !haveOrigin[region]) continue;
+        FieldStageAnchor a;
+        std::memcpy(a.stage, d.mName, 8);
+        a.stage[8] = '\0';
+        a.x = originX[region] + static_cast<f32>(d.mOffsetX);
+        a.z = originZ[region] + static_cast<f32>(d.mOffsetZ);
+        s_fieldAnchors.push_back(a);
+    }
+    auto* virtuals = reinterpret_cast<dMenu_Fmap_virtual_stage_data_c*>(buffer + virtualOff);
+    for (int i = 0; i < virtuals->mCount; ++i) {
+        VirtualStageName v;
+        std::memcpy(v.stage, virtuals->mData[i].mStageName, 8);
+        std::memcpy(v.mapped, virtuals->mData[i].mVirtualStageName, 8);
+        v.stage[8] = v.mapped[8] = '\0';
+        s_virtualStages.push_back(v);
+    }
+    coop_log::info("coop_mod: [MAP] field layout: {} stages, {} aliases", s_fieldAnchors.size(),
+        s_virtualStages.size());
+}
+
+const FieldStageAnchor* field_anchor_direct(const char* stage) {
+    if (stage == nullptr || stage[0] == '\0') return nullptr;
+    for (const auto& a : s_fieldAnchors) {
+        if (std::strncmp(a.stage, stage, 8) == 0) return &a;
+    }
+    return nullptr;
+}
+
+const FieldStageAnchor* field_anchor(const char* stage) {
+    load_field_topology();
+    if (const auto* a = field_anchor_direct(stage)) return a;
+    for (const auto& v : s_virtualStages) {
+        if (std::strncmp(v.stage, stage, 8) == 0) return field_anchor_direct(v.mapped);
+    }
+    return nullptr;
+}
+
+void face_marker(f32 cx, f32 cy, f32 size, u8 alpha, bool pvp) {
+    GXTexObj tex{};
+    GXInitTexObj(&tex, const_cast<unsigned char*>(pvp ? kMapMarkerPvp : kMapMarker), 32, 32, GX_TF_RGBA8,
+        GX_CLAMP, GX_CLAMP, GX_FALSE);
+    GXInitTexObjLOD(&tex, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f, 0.0f, GX_FALSE, GX_FALSE, GX_ANISO_1);
+    GXLoadTexObj(&tex, GX_TEXMAP0);
+    GXClearVtxDesc();
+    GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
+    GXSetVtxDesc(GX_VA_CLR0, GX_DIRECT);
+    GXSetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+    GXSetNumChans(1);
+    GXSetChanCtrl(GX_COLOR0A0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX, GX_LIGHT_NULL, GX_DF_NONE, GX_AF_NONE);
+    GXSetNumTexGens(1);
+    GXSetTexCoordGen2(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, GX_IDENTITY, GX_FALSE, GX_PTIDENTITY);
+    GXSetNumTevStages(1);
+    GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+    GXSetTevOp(GX_TEVSTAGE0, GX_MODULATE);
+    GXSetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+    GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_SET);
+    GXSetAlphaCompare(GX_GREATER, 0, GX_AOP_AND, GX_ALWAYS, 0);
+    GXSetCullMode(GX_CULL_NONE);
+    const f32 h = size * 0.5f;
+    GXBegin(GX_QUADS, GX_VTXFMT0, 4);
+    GXPosition3f32(cx - h, cy - h, 0.0f);
+    GXColor4u8(255, 255, 255, alpha);
+    GXTexCoord2f32(0.0f, 0.0f);
+    GXPosition3f32(cx + h, cy - h, 0.0f);
+    GXColor4u8(255, 255, 255, alpha);
+    GXTexCoord2f32(1.0f, 0.0f);
+    GXPosition3f32(cx + h, cy + h, 0.0f);
+    GXColor4u8(255, 255, 255, alpha);
+    GXTexCoord2f32(1.0f, 1.0f);
+    GXPosition3f32(cx - h, cy + h, 0.0f);
+    GXColor4u8(255, 255, 255, alpha);
+    GXTexCoord2f32(0.0f, 1.0f);
+    GXEnd();
 }
 
 std::string name_of(uint8_t id) {
@@ -364,36 +518,6 @@ void on_draw_icons_post(ModContext*, void* args, void*, void*) {
     }
 }
 
-void triangle(f32 ax, f32 ay, f32 bx, f32 by, f32 cx, f32 cy, u32 rgba) {
-    GXBegin(GX_TRIANGLES, GX_VTXFMT0, 3);
-    GXPosition3f32(ax, ay, 0.0f);
-    GXColor1u32(rgba);
-    GXPosition3f32(bx, by, 0.0f);
-    GXColor1u32(rgba);
-    GXPosition3f32(cx, cy, 0.0f);
-    GXColor1u32(rgba);
-    GXEnd();
-}
-
-u32 rgba_of(const JUtility::TColor& c) {
-    return (static_cast<u32>(c.r) << 24) | (static_cast<u32>(c.g) << 16) |
-           (static_cast<u32>(c.b) << 8) | c.a;
-}
-
-void arrow(f32 x, f32 y, f32 dx, f32 dy, f32 size, const JUtility::TColor& color) {
-    const f32 nx = -dy, ny = dx;
-    const auto shape = [&](f32 s, u32 rgba) {
-        const f32 tipX = x + dx * s * 0.6f, tipY = y + dy * s * 0.6f;
-        const f32 backX = x - dx * s * 0.4f, backY = y - dy * s * 0.4f;
-        const f32 notchX = x - dx * s * 0.15f, notchY = y - dy * s * 0.15f;
-        const f32 wing = s * 0.45f;
-        triangle(tipX, tipY, backX + nx * wing, backY + ny * wing, notchX, notchY, rgba);
-        triangle(tipX, tipY, notchX, notchY, backX - nx * wing, backY - ny * wing, rgba);
-    };
-    shape(size * 1.4f, rgba_of(JUtility::TColor(0, 0, 0, static_cast<u8>(color.a * 0.85f))));
-    shape(size, rgba_of(color));
-}
-
 dMeterMap_c* s_meterDrawing = nullptr;
 struct Rect {
     bool valid = false;
@@ -430,7 +554,7 @@ void on_meter_map_draw_post(ModContext*, void* args, void*, void*) {
         s_minimapTop = s_minimapRect.y;
         s_minimapSeen = std::chrono::steady_clock::now();
     }
-    if (!coop_net_connected() || !cfg_bool(s_minimapVar, false)) return;
+    if (!(coop_net_connected() || global_active()) || !cfg_bool(s_minimapVar, false)) return;
     dMap_c* map = self->mMap;
     const f32 spanX = map->field_0x8;
     const f32 spanZ = map->field_0xc;
@@ -460,23 +584,32 @@ void on_meter_map_draw_post(ModContext*, void* args, void*, void*) {
     for (int i = 0; i < kCoopMaxPlayers; ++i) {
         const uint8_t id = static_cast<uint8_t>(i);
         Spot s;
-        if (!spot_of(id, &s) || !s.sameStage) continue;
+        if (!spot_of(id, &s)) continue;
         f32 alpha = baseAlpha;
-        if (dMapInfo_c::calcFloorNo(s.y, true, s.room) != localFloor) {
+
+        f32 px = s.x, pz = s.z;
+        if (!s.sameStage) {
+            const FieldStageAnchor* here = field_anchor(dComIfGp_getStartStageName());
+            const FieldStageAnchor* there = field_anchor(s.stage);
+            if (here == nullptr || there == nullptr) continue;
+            px = s.x + there->x - here->x;
+            pz = s.z + there->z - here->z;
+            alpha *= 0.72f;
+        } else if (dMapInfo_c::calcFloorNo(s.y, true, s.room) != localFloor) {
             if (!otherFloors) continue;
             alpha *= 0.45f;
         }
 
-        f32 u = (s.x - map->mPosX) / spanX;
-        const f32 v = (s.z - map->mPosZ) / spanZ + 0.5f;
+        f32 u = (px - map->mPosX) / spanX;
+        const f32 v = (pz - map->mPosZ) / spanZ + 0.5f;
         u = mirror ? 0.5f - u : 0.5f + u;
         f32 sx = left + u * w;
         f32 sy = top + v * h;
         f32 dx = cM_ssin(s.angle) * (mirror ? -1.0f : 1.0f);
         f32 dy = cM_scos(s.angle);
         const f32 inset = size * 0.7f;
-        const bool outside = sx < left + inset || sx > left + w - inset || sy < top + inset ||
-                             sy > top + h - inset;
+        const bool outside = !s.sameStage || sx < left + inset || sx > left + w - inset ||
+                             sy < top + inset || sy > top + h - inset;
         if (outside) {
             if (!edge) continue;
 
@@ -492,21 +625,19 @@ void on_meter_map_draw_post(ModContext*, void* args, void*, void*) {
         }
         if (!setUp) {
             graf->setup2D();
-            GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_SET);
-            GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
             setUp = true;
         }
-        arrow(sx, sy, dx, dy, size, player_color(id, static_cast<u8>(255.0f * alpha)));
+
+        (void)dx;
+        (void)dy;
+        face_marker(sx, sy, size * 1.6f, static_cast<u8>(255.0f * alpha), global_slot_pvp(id));
         if (!s_loggedMinimap) {
             s_loggedMinimap = true;
             coop_log::info("coop_mod: [MAP] {} minimap pos=({:.0f}, {:.0f}){} view=({:.0f}, {:.0f}) {:.0f}x{:.0f}", name_of(id), sx, sy,
                 outside ? " (at the edge)" : "", left, top, w, h);
         }
     }
-    if (setUp) {
-
-        GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_CLR_RGBA, GX_RGBA4, 0);
-    }
+    if (setUp) graf->setup2D();
 }
 
 ConfigVarHandle register_bool(const char* name, bool fallback) {
@@ -527,6 +658,21 @@ ConfigVarHandle register_int(const char* name, int64_t fallback) {
     return svc_config->register_var(mod_ctx, &desc, &handle) == MOD_OK ? handle : 0;
 }
 
+}
+
+bool map_markers_local_pose(float* x, float* y, float* z, int16_t* angle) {
+    daAlink_c* alink = daAlink_getAlinkActorClass();
+    if (alink == nullptr) return false;
+    const int room = fopAcM_GetRoomNo(alink);
+    if (room < 0 || room >= 64) return false;
+    Spot s;
+    to_map_space(room, alink->current.pos.x, alink->current.pos.y, alink->current.pos.z,
+        alink->shape_angle.y, &s);
+    *x = s.x;
+    *y = s.y;
+    *z = s.z;
+    *angle = s.angle;
+    return true;
 }
 
 bool map_markers_minimap_top(float* top) {

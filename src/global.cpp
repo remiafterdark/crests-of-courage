@@ -40,6 +40,7 @@ enum GlobalType : uint8_t {
     kGlobalSounds = 8,
     kGlobalParticles = 9,
     kGlobalPvpHit = 10,
+    kGlobalVoice = 11,
 };
 
 const uint64_t kPunchForMs = 10000;
@@ -288,6 +289,7 @@ void release(int slot, const char* why) {
     if (p.reached) send_to(p, kGlobalBye, nullptr, 0);
     coop_log::info("coop_mod: [GLOBAL] player {} slot {} {}", p.id, slot, why);
     p = Peer{};
+    voice_peer_left(static_cast<uint8_t>(slot));
     puppet_hook_release_player(static_cast<uint8_t>(slot));
     features_global_forget(static_cast<uint8_t>(slot));
 }
@@ -390,6 +392,7 @@ bool clean_presence(MsgPresence& m) {
     clean_text(m.name, sizeof(m.name));
     clean_word(m.stage, sizeof(m.stage));
     if (!sane_float(m.x) || !sane_float(m.y) || !sane_float(m.z)) return false;
+    if (m.mapValid != 0 && (!sane_float(m.mapX) || !sane_float(m.mapY) || !sane_float(m.mapZ))) m.mapValid = 0;
     m.storyBits = 0;
     m.flags &= 1;
     if (m.maxLife > 400) m.maxLife = 400;
@@ -583,6 +586,13 @@ void on_sealed(int slot, const uint8_t* data, size_t size) {
             static_cast<uint8_t>(slot));
         break;
     }
+    case kGlobalVoice: {
+        if (len <= 4 || len > 4 + kVoiceMaxOpus || p.hidden || global_blocked(p.tag)) return;
+        uint32_t sequence = 0;
+        std::memcpy(&sequence, payload, 4);
+        voice_on_frame(static_cast<uint8_t>(slot), sequence, payload + 4, len - 4);
+        break;
+    }
     case kGlobalBye:
         release(slot, "left");
         break;
@@ -653,8 +663,10 @@ void on_server_message(const std::string& text) {
     }
     if (op == "chat") {
         const std::string tag = msg.str("tag");
-        remember_seen(static_cast<uint32_t>(std::strtoul(msg.str("id").c_str(), nullptr, 10)),
-            is_tag(tag) ? tag : "");
+        const uint32_t from = static_cast<uint32_t>(std::strtoul(msg.str("id").c_str(), nullptr, 10));
+        remember_seen(from, is_tag(tag) ? tag : "");
+
+        if (from != s_myId) coop_log::info("coop_mod: [CHAT] from {} slot {}", from, slot_of_id(from));
         chat_on_message(static_cast<uint32_t>(std::strtoul(msg.str("id").c_str(), nullptr, 10)),
             is_tag(tag) ? tag : "", msg.str("name"), msg.str("text"));
         return;
@@ -675,6 +687,11 @@ void on_server_message(const std::string& text) {
     if (op == "count") {
         s_total = static_cast<uint32_t>(std::strtoul(msg.str("total").c_str(), nullptr, 10));
         s_here = static_cast<uint32_t>(std::strtoul(msg.str("here").c_str(), nullptr, 10));
+
+        const std::string same = msg.str("same");
+        coop_log::info("coop_mod: [GLOBAL] area '{}' here {} same version {} total {}",
+            s_area == "\x01" ? "?" : s_area, s_here,
+            same.empty() ? "-1" : same, s_total);
         return;
     }
     if (op == "gone") {
@@ -875,9 +892,53 @@ bool global_slot_pvp(uint8_t slot) {
     return global_slot_present(slot) && s_peers[slot].pvp;
 }
 
+void global_send_voice(uint32_t sequence, const uint8_t* opus, size_t size, float range, int most) {
+    daAlink_c* alink = daAlink_getAlinkActorClass();
+    if (s_phase != Phase::Live || alink == nullptr || size == 0 || size > kVoiceMaxOpus || range <= 0.0f) return;
+    const int8_t room = static_cast<int8_t>(fopAcM_GetRoomNo(alink));
+    std::pair<float, int> near[kCoopMaxPlayers];
+    int n = 0;
+    for (int i = 1; i < kCoopMaxPlayers; ++i) {
+        const Peer& p = s_peers[i];
+        if (!p.reached || !p.havePos || p.hidden || global_blocked(p.tag)) continue;
+        if (p.room != room && p.room >= 0 && room >= 0) continue;
+        const float dx = p.x - alink->current.pos.x, dy = p.y - alink->current.pos.y, dz = p.z - alink->current.pos.z;
+        const float d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < range * range) near[n++] = {d2, i};
+    }
+    std::sort(near, near + n);
+    uint8_t packet[4 + kVoiceMaxOpus];
+    std::memcpy(packet, &sequence, 4);
+    std::memcpy(packet + 4, opus, size);
+    for (int k = 0; k < n && k < most; ++k) send_to(s_peers[near[k].second], kGlobalVoice, packet, 4 + size);
+}
+
+bool global_slot_position(uint8_t slot, float* x, float* y, float* z, int8_t* room) {
+    if (slot == 0 || slot >= kCoopMaxPlayers || !global_slot_present(slot) || !s_peers[slot].havePos) return false;
+    const Peer& p = s_peers[slot];
+    *x = p.x;
+    *y = p.y;
+    *z = p.z;
+    *room = p.room;
+    return true;
+}
+
+std::string global_slot_tag(uint8_t slot) {
+    if (slot == 0 || slot >= kCoopMaxPlayers || !s_peers[slot].used) return "";
+    return s_peers[slot].tag;
+}
+
 void global_send_pvp_hit(uint8_t slot, const MsgPvpHit& hit) {
     if (!global_pvp_on() || !global_slot_pvp(slot)) return;
     send_to(s_peers[slot], kGlobalPvpHit, &hit, sizeof(hit));
+}
+
+uint32_t global_total() {
+    return s_phase == Phase::Live ? s_total : 0;
+}
+
+bool global_connecting() {
+    return enabled() && !coop_net_connected() && !coop_net_connecting() && s_phase != Phase::Live;
 }
 
 std::string global_status() {

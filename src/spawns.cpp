@@ -19,6 +19,7 @@
 #include "f_op/f_op_actor_mng.h"
 #include "f_pc/f_pc_name.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -34,6 +35,31 @@ namespace {
 const int kMaxSpawns = kCoopMaxPlayers * 6;
 const int kSendEveryTicks = 2;
 const int kNoId = -1;
+
+void delete_replica(fopAc_ac_c* actor) {
+    if (actor == nullptr) return;
+    if (dCcS* cc = dComIfG_Ccsp()) {
+        const int atCount = std::min<int>(cc->mObjAtCount, static_cast<int>(ARRAY_SIZEU(cc->mpObjAt)));
+        for (int i = 0; i < atCount; ++i) {
+            cCcD_Obj* obj = cc->mpObjAt[i];
+            if (obj != nullptr && obj->GetAc() == actor) obj->OffAtSetBit();
+        }
+        const int tgCount = std::min<int>(cc->field_0x280e, static_cast<int>(ARRAY_SIZEU(cc->mpObjTg)));
+        int cleared = 0;
+        for (int i = 0; i < tgCount; ++i) {
+            cCcD_Obj* obj = cc->mpObjTg[i];
+            if (obj == nullptr) continue;
+            dCcD_GObjInf* inf = dCcD_GetGObjInf(obj);
+            if (inf == nullptr || !inf->ChkTgHit()) continue;
+            cCcD_Obj* hitBy = inf->GetTgHitObj();
+            if (hitBy == nullptr || hitBy->GetAc() != actor) continue;
+            inf->ClrTgHit();
+            ++cleared;
+        }
+        if (cleared > 0) coop_log::info("coop_mod: [SPAWN] replica hits cleared={}", cleared);
+    }
+    fopAcM_delete(actor);
+}
 
 ConfigVarHandle s_enableVar = 0;
 ConfigVarHandle s_selfTestVar = 0;
@@ -667,7 +693,7 @@ void apply_replicas() {
         if (s_tick - r.stamp > kReplicaStaleTicks) {
             coop_log::warn("coop_mod: [SPAWN] replica netId={} name={:#x} owner stopped updating, deleted",
                 r.netId, static_cast<int>(r.procName));
-            fopAcM_delete(actor);
+            delete_replica(actor);
             r = Replica{};
             continue;
         }
@@ -860,7 +886,7 @@ void remove_boomerang_replicas() {
         Replica& r = s_replica[i];
         if (!r.used || r.procName != fpcNm_BOOMERANG_e) continue;
         auto* actor = static_cast<fopAc_ac_c*>(fopAcM_SearchByID(r.id));
-        if (actor != nullptr) fopAcM_delete(actor);
+        if (actor != nullptr) delete_replica(actor);
         release_bombs_of(r.netId);
         coop_log::info("coop_mod: [SPAWN] cutscene, removed remote boomerang netId={}", r.netId);
         r = Replica{};
@@ -1066,7 +1092,7 @@ void spawns_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_
         if (r == nullptr) return;
         auto* actor = static_cast<fopAc_ac_c*>(fopAcM_SearchByID(r->id));
         if (actor != nullptr && gone_removes_replica(r->procName)) {
-            fopAcM_delete(actor);
+            delete_replica(actor);
             coop_log::info("coop_mod: [SPAWN] remote netId={} removed", msg.netId);
         } else {
 

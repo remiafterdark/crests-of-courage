@@ -6,6 +6,7 @@
 #include <windows.h>
 #endif
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -13,11 +14,14 @@
 #if defined(__linux__) && !defined(__ANDROID__)
 #define COOP_SDL_KEYS 1
 
+typedef bool (*SdlEventFilter)(void* userdata, void* event);
 extern "C" {
 const bool* SDL_GetKeyboardState(int* numkeys);
 uint16_t SDL_GetModState(void);
 uint32_t SDL_GetKeyFromScancode(int scancode, uint16_t modstate, bool key_event);
 void* SDL_GetKeyboardFocus(void);
+void SDL_SetEventFilter(SdlEventFilter filter, void* userdata);
+bool SDL_GetEventFilter(SdlEventFilter* filter, void** userdata);
 }
 #endif
 
@@ -27,6 +31,7 @@ struct ChatKeys {
     bool enter = false;
     bool escape = false;
     bool paste = false;
+    int scroll = 0;
 };
 
 namespace {
@@ -79,6 +84,10 @@ const int kScanV = 25;
 const int kScanReturn = 40;
 const int kScanEscape = 41;
 const int kScanBackspace = 42;
+const int kScanPageUp = 75;
+const int kScanPageDown = 78;
+const int kScanDown = 81;
+const int kScanUp = 82;
 const int kScanKeypadEnter = 88;
 const int kScanLeftCtrl = 224;
 const int kScanRightGui = 231;
@@ -96,6 +105,98 @@ bool ours_in_front() {
 bool key_down(const bool* state, int count, int scan) {
     return state != nullptr && scan < count && state[scan];
 }
+#endif
+
+std::atomic<bool> s_blocking{false};
+
+#if defined(_WIN32)
+HWND s_blockWnd = nullptr;
+WNDPROC s_blockPrev = nullptr;
+
+LRESULT CALLBACK block_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+
+    if (s_blocking && (msg == WM_KEYDOWN || msg == WM_CHAR || msg == WM_DEADCHAR)) return 0;
+    return CallWindowProcW(s_blockPrev, hwnd, msg, wp, lp);
+}
+
+bool block_install() {
+    if (s_blockWnd != nullptr) return true;
+    HWND front = GetForegroundWindow();
+    if (front == nullptr || !ours_in_front()) return false;
+    const LONG_PTR prev = SetWindowLongPtrW(front, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&block_proc));
+    if (prev == 0) return false;
+    s_blockWnd = front;
+    s_blockPrev = reinterpret_cast<WNDPROC>(prev);
+    return true;
+}
+
+void block_remove() {
+    if (s_blockWnd == nullptr) return;
+    if (GetWindowLongPtrW(s_blockWnd, GWLP_WNDPROC) != reinterpret_cast<LONG_PTR>(&block_proc)) return;
+    SetWindowLongPtrW(s_blockWnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(s_blockPrev));
+    s_blockWnd = nullptr;
+    s_blockPrev = nullptr;
+}
+#elif COOP_SDL_KEYS
+
+const uint32_t kEventKeyDown = 0x300;
+const uint32_t kEventTextEditing = 0x302;
+const uint32_t kEventTextInput = 0x303;
+bool s_filterSet = false;
+SdlEventFilter s_prevFilter = nullptr;
+void* s_prevData = nullptr;
+
+bool block_filter(void*, void* event) {
+    if (s_blocking && event != nullptr) {
+        const uint32_t type = *static_cast<const uint32_t*>(event);
+        if (type == kEventKeyDown || type == kEventTextEditing || type == kEventTextInput) return false;
+    }
+    return s_prevFilter == nullptr || s_prevFilter(s_prevData, event);
+}
+
+bool block_install() {
+    if (s_filterSet) return true;
+    s_prevFilter = nullptr;
+    s_prevData = nullptr;
+    SDL_GetEventFilter(&s_prevFilter, &s_prevData);
+    SDL_SetEventFilter(block_filter, nullptr);
+    s_filterSet = true;
+    return true;
+}
+
+void block_remove() {
+    if (!s_filterSet) return;
+    SdlEventFilter now = nullptr;
+    void* data = nullptr;
+    SDL_GetEventFilter(&now, &data);
+    if (now != block_filter) return;
+    SDL_SetEventFilter(s_prevFilter, s_prevData);
+    s_filterSet = false;
+}
+#endif
+}
+
+bool chat_keys_block(bool on) {
+#if defined(_WIN32) || COOP_SDL_KEYS
+    if (on) {
+        const bool installed = block_install();
+        s_blocking = installed;
+        return installed;
+    }
+    s_blocking = false;
+    block_remove();
+    return true;
+#else
+    (void)on;
+    return false;
+#endif
+}
+
+bool chat_game_in_front() {
+#if defined(_WIN32) || COOP_SDL_KEYS
+    return ours_in_front();
+#else
+    return true;
 #endif
 }
 
@@ -172,6 +273,10 @@ void chat_keys_poll(ChatKeys& out) {
             out.escape = true;
             continue;
         }
+        if (vk == VK_PRIOR || vk == VK_NEXT || vk == VK_UP || vk == VK_DOWN) {
+            out.scroll += vk == VK_PRIOR ? 4 : vk == VK_NEXT ? -4 : vk == VK_UP ? 1 : -1;
+            continue;
+        }
         if (ctrl && !alt) {
             if (vk == 'V') out.paste = true;
             continue;
@@ -212,6 +317,10 @@ void chat_keys_poll(ChatKeys& out) {
         }
         if (scan == kScanEscape) {
             out.escape = true;
+            continue;
+        }
+        if (scan == kScanPageUp || scan == kScanPageDown || scan == kScanUp || scan == kScanDown) {
+            out.scroll += scan == kScanPageUp ? 4 : scan == kScanPageDown ? -4 : scan == kScanUp ? 1 : -1;
             continue;
         }
         if (ctrl && !alt) {

@@ -209,6 +209,10 @@ struct CoopPeer {
     float z = 0.0f;
     int16_t angleY = 0;
 
+    bool mapValid = false;
+    float mapX = 0.0f, mapY = 0.0f, mapZ = 0.0f;
+    int16_t mapAngleY = 0;
+
     SkinChoices skins = {};
     uint32_t skinStamp = 0;
 
@@ -363,6 +367,9 @@ void game_mode_remember_host(const char* name, const char* address);
 void coop_remember_last_host(const char* name, const char* address);
 
 void coop_toast(const char* title, const char* body);
+bool coop_net_migrating();
+ConfigVarHandle coop_net_migrate_var();
+bool online_room_taken();
 uint32_t local_skin_stamp();
 void send_skin_choices();
 
@@ -486,6 +493,10 @@ void colors_attach_puppet_model(J3DModel* model, uint8_t owner);
 void colors_protect_puppet_model(J3DModel* model, uint8_t owner);
 
 void coop_crash_trail(const char* step);
+void crash_guard_init();
+
+extern const char* volatile g_coopStage;
+inline void coop_stage(const char* name) { g_coopStage = name; }
 std::string coop_crash_trail_path();
 
 bool private_arc_request(const char* name);
@@ -635,6 +646,7 @@ void rando_init();
 void checks_init();
 
 void map_markers_init();
+bool map_markers_local_pose(float* x, float* y, float* z, int16_t* angle);
 bool map_markers_minimap_top(float* top);
 
 bool squad_hud_corner(float* crossTop, float* heartsBottom);
@@ -691,6 +703,8 @@ void world_update();
 void world_on_connected();
 bool world_hold_story_flag(uint16_t flag);
 bool features_load_is_cutscene();
+bool features_bottles_relay();
+bool features_story_flag_applies_now(uint16_t flag);
 void softlocks_update();
 void joinsync_catch_up(uint8_t player);
 void joinsync_on_catch_up(uint8_t type, const uint8_t* payload, size_t size, uint8_t from);
@@ -810,6 +824,8 @@ void global_send_pvp_hit(uint8_t slot, const MsgPvpHit& hit);
 bool pvp_with(uint8_t player);
 bool pvp_live();
 std::string global_status();
+uint32_t global_total();
+bool global_connecting();
 void global_on_ws_event(const mods::ws::Event& event);
 bool global_on_datagram(const std::string& from, const uint8_t* data, size_t size);
 void global_send_snapshot(const PlayerSnapshot& snapshot);
@@ -843,6 +859,54 @@ void chat_update();
 void chat_first_online();
 void chat_draw();
 bool chat_key_pressed();
+bool chat_game_in_front();
+bool chat_is_typing();
+bool chat_keys_block(bool on);
+
+const size_t kVoiceMaxOpus = 256;
+void voice_init();
+void voice_update();
+void voice_shutdown();
+void voice_on_frame(uint8_t slot, uint32_t sequence, const uint8_t* opus, size_t size);
+void voice_peer_left(uint8_t slot);
+bool voice_peer_speaking(uint8_t slot);
+bool voice_local_speaking();
+bool voice_peer_muted(uint8_t slot);
+void voice_set_peer_muted(uint8_t slot, bool muted);
+std::vector<std::string> voice_input_devices();
+std::string voice_status();
+std::string voice_mute_key_name();
+void voice_begin_key_capture();
+bool voice_key_capture_active();
+bool voice_supported();
+void voice_draw_mute_hint(float minX, float minY, float width, float height);
+
+class J2DOrthoGraph;
+void global_hud_register_vars();
+void global_hud_draw(J2DOrthoGraph& ortho, float minX, float minY, float width, float height);
+void global_hud_reset_place();
+ConfigVarHandle global_hud_var();
+ConfigVarHandle global_hud_x_var();
+ConfigVarHandle global_hud_y_var();
+ConfigVarHandle global_hud_size_var();
+ConfigVarHandle global_hud_opacity_var();
+ConfigVarHandle global_hud_all_var();
+ConfigVarHandle global_hud_pvp_var();
+void coop_draw_voice_icon(float x, float baseline, float size, unsigned char alpha, bool muted);
+bool voice_can_talk();
+ConfigVarHandle voice_enabled_var();
+ConfigVarHandle voice_proximity_var();
+ConfigVarHandle voice_range_var();
+ConfigVarHandle voice_input_index_var();
+ConfigVarHandle voice_mic_volume_var();
+ConfigVarHandle voice_player_volume_var();
+ConfigVarHandle voice_muted_var();
+
+void coop_voice_send(uint32_t sequence, const uint8_t* opus, size_t size);
+
+void global_send_voice(uint32_t sequence, const uint8_t* opus, size_t size, float range, int most);
+bool global_slot_position(uint8_t slot, float* x, float* y, float* z, int8_t* room);
+std::string global_slot_tag(uint8_t slot);
 struct HorseSnapshot;
 struct MidnaSnapshot;
 void global_send_horse(const HorseSnapshot& snap);
@@ -860,6 +924,8 @@ void features_build_presence(MsgPresence* out);
 void features_build_skin_choices(MsgSkinChoices* out);
 void features_global_forget(uint8_t slot);
 void colors_build_local(MsgColorEntry* out);
+ConfigVarHandle colors_name_var();
+bool colors_name_rgb(uint8_t player, uint8_t* r, uint8_t* g, uint8_t* b);
 
 bool online_pending_key(uint32_t keyId, uint8_t out[32]);
 
