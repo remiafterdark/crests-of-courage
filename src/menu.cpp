@@ -823,8 +823,9 @@ ModResult group_global_box(ModContext*, UiElementHandle pane, void*, ModError*) 
 
 ModResult group_global_pvp(ModContext*, UiElementHandle pane, void*, ModError*) {
     add_panel_header(pane, "PvP");
-    add_toggle(pane, "PvP", global_pvp_var(),
-        "Fight other players who have it on too. Their names show in red.");
+    add_toggle(pane, "PvP in Hyrule Online", global_pvp_var(),
+        "Fight other Hyrule Online players who have it on too. Their names show in red. "
+        "Off means nobody out here can hurt you. Co-op rooms have their own PvP switch.");
     add_toggle(pane, "Only show PvP players", global_pvp_only_var(),
         "Hides everyone who doesn't have PvP on.");
     return MOD_OK;
@@ -943,9 +944,9 @@ ModResult group_together(ModContext*, UiElementHandle pane, void*, ModError*) {
 
 ModResult group_pvp(ModContext*, UiElementHandle pane, void*, ModError*) {
     add_panel_header(pane, "PvP");
-    add_toggle(pane, "PvP", pvp_enabled_var(),
-        "Players can hit each other with anything that hits an enemy. The host's setting is the one "
-        "in use.");
+    add_toggle(pane, "PvP in co-op", pvp_enabled_var(),
+        "Players in your co-op room can hit each other with anything that hits an enemy. The host's "
+        "setting is the one in use. Hyrule Online has its own PvP switch.");
     add_number(pane, "Damage", pvp_damage_var(), 0, 400, 25, "%",
         "How much of each hit lands, for everybody.", pvp_enabled_var());
     add_toggle(pane, "Lock on to players", pvp_lock_on_var(),

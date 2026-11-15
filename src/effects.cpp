@@ -780,6 +780,8 @@ void fx_play_for(uint8_t playerId, uint32_t soundId, const float* pos) {
     }
 }
 
+const int kMaxRemoteBurstsPerFrame = 12;
+
 void fx_on_particles(const uint8_t* payload, size_t size, uint8_t from) {
     if (size < 1) return;
 
@@ -807,6 +809,14 @@ void fx_on_particles(const uint8_t* payload, size_t size, uint8_t from) {
             slot->lastTick = s_tick;
             emit_particle(particles, alink, e, x, y, z, slot);
         } else {
+
+            static uint32_t s_burstTick = 0;
+            static int s_burst = 0;
+            if (s_burstTick != s_tick) {
+                s_burstTick = s_tick;
+                s_burst = 0;
+            }
+            if (++s_burst > kMaxRemoteBurstsPerFrame) continue;
             emit_particle(particles, alink, e, x, y, z, nullptr);
         }
     }

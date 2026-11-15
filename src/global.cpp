@@ -44,6 +44,8 @@ enum GlobalType : uint8_t {
 };
 
 const uint64_t kPunchForMs = 10000;
+
+const uint64_t kPunchRetryMs = 60000;
 const uint64_t kPunchEveryMs = 100;
 const uint64_t kQuietDropMs = 15000;
 const uint64_t kStunWaitMs = 2500;
@@ -444,7 +446,10 @@ void on_sealed(int slot, const uint8_t* data, size_t size) {
     const size_t len = size - 1;
     Peer& p = s_peers[slot];
 
-    if (p.hidden && (type == kGlobalMidna || type == kGlobalSounds || type == kGlobalParticles)) return;
+    if (p.hidden &&
+        (type == kGlobalMidna || type == kGlobalSounds || type == kGlobalParticles || type == kGlobalHorse)) {
+        return;
+    }
     switch (type) {
     case kGlobalPresence: {
         if (len != sizeof(MsgPresence)) return;
@@ -945,11 +950,14 @@ std::string global_status() {
     if (!enabled()) return "Off";
     if (coop_net_connected() || coop_net_connecting()) return "Paused while in co-op";
     if (s_phase != Phase::Live) return s_status;
-    int here = 0;
+    int here = 0, unreached = 0;
     for (int i = 1; i < kCoopMaxPlayers; ++i) {
         if (global_slot_present(static_cast<uint8_t>(i))) ++here;
+        if (s_peers[i].used && !s_peers[i].reached && s_peers[i].gaveUp) ++unreached;
     }
-    return "Online: " + std::to_string(s_total) + " players, " + std::to_string(here) + " here";
+    std::string status = "Online: " + std::to_string(s_total) + " players, " + std::to_string(here) + " here";
+    if (unreached > 0) status += ", " + std::to_string(unreached) + " can't connect";
+    return status;
 }
 
 void global_on_ws_event(const mods::ws::Event& event) {
@@ -1204,7 +1212,8 @@ void global_update() {
                     p.gaveUp = true;
                     coop_log::info("coop_mod: [GLOBAL] could not reach player {}", p.id);
                 }
-                continue;
+                if (now - p.startedMs < kPunchForMs + kPunchRetryMs) continue;
+                p.startedMs = now;
             }
             if (now - p.lastProbeMs >= kPunchEveryMs) {
                 p.lastProbeMs = now;

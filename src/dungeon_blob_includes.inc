@@ -21,7 +21,6 @@
 #include "d/actor/d_a_obj_magLift.h"
 #include "d/actor/d_a_obj_magLiftRot.h"
 #include "d/actor/d_a_obj_magne_arm.h"
-#include "d/actor/d_a_obj_rotBridge.h"
 #include "d/actor/d_a_obj_lv7bridge.h"
 #include "d/actor/d_a_obj_lv4bridge.h"
 #include "d/actor/d_a_obj_lv4floor.h"

@@ -138,6 +138,31 @@ const uint8_t kSnapHidden = 0x80;
 
 const uint8_t kSnapNoHits = 0x10;
 
+enum PlayerGearBit : uint16_t {
+    kGearBoomerang = 1u << 0,
+    kGearLantern = 1u << 1,
+    kGearSpinner = 1u << 2,
+    kGearIronBoots = 1u << 3,
+    kGearBow = 1u << 4,
+    kGearHawkeye = 1u << 5,
+    kGearBallAndChain = 1u << 6,
+    kGearDominionRod = 1u << 7,
+    kGearClawshot = 1u << 8,
+    kGearDoubleClawshot = 1u << 9,
+    kGearSlingshot = 1u << 10,
+    kGearFishingRod = 1u << 11,
+};
+struct PlayerGear {
+    uint16_t owned;
+    uint8_t arrowMax;
+    uint8_t arrows;
+    uint8_t wallet;
+    uint8_t bottles[4];
+    uint8_t bombBags[3];
+    uint8_t itemX;
+    uint8_t itemY;
+};
+
 struct PlayerSnapshot {
     uint32_t seq;
 
@@ -210,6 +235,7 @@ struct PlayerSnapshot {
 
     int16_t tevTint;
     uint8_t tevTintOn;
+    PlayerGear gear;
 };
 const float kMagneRotFixed = 8192.0f;
 
@@ -307,6 +333,7 @@ static_assert(sizeof(MidnaSnapshot) ==
         4 + 4 + 1 + 1 + 1 + 1 + 2 + 2 + 4 + 48 + 48 + 8 + 8 + 4 + 4 + (kMidnaJoints * 30),
     "MidnaSnapshot must stay packed");
 
+static_assert(sizeof(PlayerGear) == 14, "PlayerGear must stay tightly packed");
 static_assert(sizeof(AnmSlotSnapshot) == 2 + 4 + 4 + 4,
     "AnmSlotSnapshot must stay tightly packed");
 static_assert(sizeof(AttachedModelSnapshot) == 1 + 2 + 2 + 4 + (12 * 4) + 4,
@@ -316,7 +343,7 @@ static_assert(sizeof(PlayerSnapshot) ==
             16 + 16 + (kPuppetAttachSlots * 61) + 6 + 1 + 1 + 1 + 2 +
             (kPuppetChainPts * 3 * 4) + 1 + 12 + 24 + 2 + 1 + 2 + 12 + 1 + 4 + 4 +
             4   + 1   + 18   + 18   + 6   + 4   +
-            2   + 1  ,
+            2   + 1   + 14  ,
     "PlayerSnapshot must stay tightly packed");
 
 static_assert(sizeof(MidnaSnapshot) != sizeof(PlayerSnapshot),

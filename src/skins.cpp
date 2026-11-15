@@ -17,6 +17,7 @@
 #include "d/d_item_data.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -76,6 +77,7 @@ struct LoadedPart {
     bool forLink = false;
     J3DModelData* data = nullptr;
     bool failed = false;
+    std::chrono::steady_clock::time_point lastAsked{};
 };
 std::vector<LoadedPart> s_loadedParts;
 
@@ -100,7 +102,7 @@ const char* const kSlotLabel[kSkinChoiceCount] = {
     "Wolf", "Equipment", "Cutscenes", "Voice",
     "Wooden Sword", "Ordon Sword", "Master Sword", "Hylian Shield", "Ordon Shield",
     "Clawshot", "Boomerang", "Bombs", "Bow", "Slingshot",
-    "Ball and Chain", "Spinner", "Fishing Rod", "Bottle",
+    "Ball and Chain", "Spinner", "Dominion Rod", "Bottle",
 };
 
 struct EquipSlotFile {
@@ -345,6 +347,7 @@ void skins_outfit_cycle_update() {
 
 void skins_init() {
     models_warp_guard_init();
+    models_draw_guard_init();
     unpack_shipped_models();
     for (int i = 0; i < kSkinChoiceCount; ++i) {
         ConfigVarDesc desc = CONFIG_VAR_DESC_INIT;
@@ -836,6 +839,40 @@ bool skins_have(const char* name, uint32_t hash) {
 
 J3DModelData* part_data(const char* name, int outfit, int part, bool forLink);
 
+size_t skins_free_unused_parts(size_t want) {
+    const auto now = std::chrono::steady_clock::now();
+    std::vector<size_t> order;
+    for (size_t i = 0; i < s_loadedParts.size(); ++i) order.push_back(i);
+    std::sort(order.begin(), order.end(),
+        [](size_t a, size_t b) { return s_loadedParts[a].lastAsked < s_loadedParts[b].lastAsked; });
+    std::vector<bool> drop(s_loadedParts.size(), false);
+    size_t freed = 0;
+    int count = 0;
+    for (size_t i : order) {
+        if (freed >= want) break;
+        LoadedPart& p = s_loadedParts[i];
+        if (p.failed || p.data == nullptr) continue;
+        if (now - p.lastAsked < std::chrono::seconds(5)) continue;
+        if (models_part_in_use(p.data)) continue;
+        if (p.forLink) {
+            if (!models_link_settled()) continue;
+            bool chosen = false;
+            for (int slot = 0; slot < kSkinChoiceCount && !chosen; ++slot) chosen = skins_local_slot(slot) == p.skin;
+            if (chosen) continue;
+        }
+        const size_t bytes = models_free_part(p.data);
+        if (bytes == 0) continue;
+        freed += bytes;
+        ++count;
+        drop[i] = true;
+    }
+    for (size_t i = s_loadedParts.size(); i-- > 0;) {
+        if (drop[i]) s_loadedParts.erase(s_loadedParts.begin() + static_cast<std::ptrdiff_t>(i));
+    }
+    if (count > 0) coop_log::info("coop_mod: [SKIN] gave back {} unused part(s), {} KB", count, freed / 1024);
+    return freed;
+}
+
 J3DModelData* skins_part_data(const char* name, int outfit, int part) {
     return part_data(name, outfit, part, false);
 }
@@ -847,12 +884,13 @@ J3DModelData* part_data(const char* name, int outfit, int part, bool forLink) {
 
     if (skin == nullptr || skin->builtin || !skin->has[outfit][part]) return nullptr;
 
-    for (const LoadedPart& loaded : s_loadedParts) {
+    for (LoadedPart& loaded : s_loadedParts) {
         if (loaded.part != part || loaded.outfit != outfit || loaded.skin != skin->name ||
             loaded.forLink != forLink) {
             continue;
         }
         if (loaded.failed) return nullptr;
+        loaded.lastAsked = std::chrono::steady_clock::now();
         return loaded.data;
     }
 
@@ -869,6 +907,7 @@ J3DModelData* part_data(const char* name, int outfit, int part, bool forLink) {
     loaded.data = forLink ? loadBmdDataForLink(file.c_str()) : loadBmdDataForPuppet(file.c_str());
     if (loaded.data == nullptr) loaded.data = loadBmdDataFromFile(file.c_str());
     loaded.failed = loaded.data == nullptr;
+    loaded.lastAsked = std::chrono::steady_clock::now();
     s_loadedParts.push_back(loaded);
     if (loaded.failed) {
         coop_log::warn("coop_mod: [SKIN] '{}' {} failed to load, using game part",
@@ -980,7 +1019,7 @@ const AramFile kAramFiles[] = {
     {0x31E, "o_gd_worm.bmd", kSkinChoiceBottle},
     {0x311, "al_ib.bmd", kSkinChoiceBallAndChain},
     {0x314, "al_bow.bmd", kSkinChoiceBow},
-    {0x315, "al_crod.bmd", kSkinChoiceFishingRod},
+    {0x315, "al_crod.bmd", kSkinChoiceDominionRod},
     {0x316, "al_hs.bmd", kSkinChoiceHookshot},
     {0x317, "al_hs_kusari.bmd", kSkinChoiceHookshot},
     {0x318, "al_hs_tip.bmd", kSkinChoiceHookshot},

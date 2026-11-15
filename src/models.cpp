@@ -14,6 +14,8 @@
 #include "JSystem/J3DGraphLoader/J3DModelLoader.h"
 
 #include "d/d_resorce.h"
+#include "d/d_drawlist.h"
+#include "SSystem/SComponent/c_counter.h"
 #include "mods/svc/hook.hpp"
 
 #include <cstdio>
@@ -289,12 +291,134 @@ HookAction skip_switch_if_loose(ModContext* ctx, void* args, void* a, void* b) {
     return skip_if_loose(ctx, args, a, b);
 }
 
+DEFINE_HOOK_SYMBOL("dDlst_list_c::reset", void(dDlst_list_c*), DrawListResetHook);
+
+DEFINE_HOOK_SYMBOL("mDoGph_Painter", int(), PainterHook);
+uint32_t s_paints = 0;
+bool s_paintsHooked = false;
+
+void on_painter_post(ModContext*, void*, void*, void*) {
+    ++s_paints;
+}
+
+uint32_t s_drawEpoch = 1;
+bool s_drawEpochHooked = false;
+
+void on_draw_list_reset_post(ModContext*, void*, void*, void*) {
+    ++s_drawEpoch;
+    if (s_drawEpoch == 0) s_drawEpoch = 1;
+}
+
+struct EnteredModel {
+    J3DModel* model;
+    uint32_t epoch;
+};
+const int kEnteredSlots = 1024;
+EnteredModel s_entered[kEnteredSlots] = {};
+
+bool coop_model_enter_once(J3DModel* model, const char* where) {
+    if (model == nullptr) return false;
+    const uint32_t epoch = s_drawEpochHooked ? s_drawEpoch : static_cast<uint32_t>(g_Counter.mCounter0) + 1;
+    uintptr_t h = reinterpret_cast<uintptr_t>(model);
+    h ^= h >> 17;
+    h *= 0x9E3779B1u;
+    for (int probe = 0; probe < 16; ++probe) {
+        EnteredModel& e = s_entered[(h + probe) & (kEnteredSlots - 1)];
+        if (e.model == model) {
+            if (e.epoch == epoch) {
+                static int s_said = 0;
+                if (s_said < 20) {
+                    ++s_said;
+                    coop_log::warn("coop_mod: [DRAW] model {:p} entered twice in one draw list ({}), "
+                                   "second entry refused", static_cast<void*>(model),
+                        where != nullptr ? where : "?");
+                }
+                return false;
+            }
+            e.epoch = epoch;
+            return true;
+        }
+        if (e.model == nullptr || e.epoch != epoch) {
+
+            e.model = model;
+            e.epoch = epoch;
+            return true;
+        }
+    }
+
+    return true;
+}
+
+void coop_model_update_dl(J3DModel* model, const char* where) {
+    if (coop_model_enter_once(model, where)) mDoExt_modelUpdateDL(model);
+}
+
+void coop_model_entry_dl(J3DModel* model, const char* where) {
+    if (coop_model_enter_once(model, where)) mDoExt_modelEntryDL(model);
+}
+
+uint32_t coop_paint_count() {
+    return s_paints;
+}
+
+bool coop_paint_counted() {
+    return s_paintsHooked;
+}
+
+void models_draw_guard_init() {
+    s_paintsHooked = mods::hook::add_post<PainterHook>(on_painter_post) == MOD_OK;
+    coop_log::info("coop_mod: [models] painted-frame counter {}", s_paintsHooked ? "attached" : "unavailable");
+    s_drawEpochHooked = mods::hook::add_post<DrawListResetHook>(on_draw_list_reset_post) == MOD_OK;
+    coop_log::info("coop_mod: [models] draw guard {}", s_drawEpochHooked ? "attached" : "on the frame counter");
+}
+
 void models_warp_guard_init() {
     const bool on = mods::hook::add_pre<WarpOnHook>(skip_switch_if_loose) == MOD_OK;
     const bool off = mods::hook::add_pre<WarpOffHook>(skip_switch_if_loose) == MOD_OK;
     const bool srt = mods::hook::add_pre<WarpSrtHook>(skip_if_loose) == MOD_OK;
     coop_log::info("coop_mod: [models] warp guard {}", on && off && srt ? "attached" : "FAILED - "
         "warping in a custom model can crash");
+}
+
+size_t skins_free_unused_parts(size_t want);
+const u32 kPartMargin = 4u * 1024u * 1024u;
+std::unordered_map<J3DModelData*, JKRHeap*> s_partHeaps;
+
+JKRHeap* part_heap_for(JKRHeap* parent, std::streamoff size, const char* path) {
+    const u32 want = static_cast<u32>(size) * 3u + 1024u * 1024u;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (static_cast<u64>(parent->getFreeSize()) >= static_cast<u64>(want) + kPartMargin) {
+            JKRHeap* heap = JKRSolidHeap::create(want, parent, false);
+            if (heap != nullptr) return heap;
+        }
+        if (attempt == 0) {
+            const size_t freed = skins_free_unused_parts(static_cast<size_t>(want) + kPartMargin);
+            coop_log::info("coop_mod: [models] making room for '{}': {} KB given back", path, freed / 1024);
+        }
+    }
+    static int s_logged = 0;
+    if (s_logged++ < 8) {
+        coop_log::warn("coop_mod: [models] no room for '{}' ({} KB wanted, {} KB free) and every loaded part is in use, using game part",
+            path, (want + kPartMargin) / 1024, parent->getFreeSize() / 1024);
+    }
+    return nullptr;
+}
+
+std::unordered_map<J3DModel*, J3DModelData*> s_modelData;
+std::unordered_map<J3DModelData*, int> s_dataUsers;
+
+void note_model_made(J3DModel* model, J3DModelData* data) {
+    if (model == nullptr || data == nullptr) return;
+    s_modelData[model] = data;
+    ++s_dataUsers[data];
+}
+
+void note_model_freed(J3DModel* model) {
+    const auto it = s_modelData.find(model);
+    if (it == s_modelData.end()) return;
+    const auto users = s_dataUsers.find(it->second);
+    if (users != s_dataUsers.end() && --users->second <= 0) s_dataUsers.erase(users);
+    s_modelData.erase(it);
 }
 
 J3DModelData* loadBmdDataFromFile(const char* path) {
@@ -314,9 +438,18 @@ J3DModelData* loadBmdDataFromFile(const char* path) {
     file.seekg(0);
 
     ensure_system_heap_capacity();
-    JKRHeap* heap = JKRHeap::getRootHeap();
-    if (heap == nullptr) heap = JKRHeap::getSystemHeap();
+    JKRHeap* root = JKRHeap::getRootHeap();
+    if (root == nullptr) root = JKRHeap::getSystemHeap();
+    JKRHeap* heap = root != nullptr ? part_heap_for(root, size, path) : nullptr;
     if (heap == nullptr) return nullptr;
+
+    struct PartHeapGuard {
+        JKRHeap* heap;
+        bool keep = false;
+        ~PartHeapGuard() {
+            if (!keep && heap != nullptr) heap->destroy();
+        }
+    } guard{heap};
     void* buffer = heap->alloc(static_cast<u32>(size), 32);
     if (buffer == nullptr) {
         coop_log::warn("coop_mod: [models] no room for '{}' ({} bytes)", path,
@@ -368,6 +501,9 @@ J3DModelData* loadBmdDataFromFile(const char* path) {
         data->getJointNum(), data->getMaterialNum());
     s_looseData.insert(data);
     remember_own_anms(data);
+    guard.keep = true;
+    static_cast<JKRSolidHeap*>(heap)->adjustSize();
+    s_partHeaps[data] = heap;
     return data;
 }
 
@@ -425,8 +561,63 @@ void models_link_rebuilding() {
     s_resetLogs = 0;
 }
 
+bool models_part_in_use(J3DModelData* data) {
+    if (data == nullptr) return false;
+    return s_worn.count(data) != 0 || s_dataUsers.count(data) != 0;
+}
+
+bool models_link_settled() {
+    return !s_worn.empty();
+}
+
+size_t models_free_part(J3DModelData* data) {
+    const auto it = s_partHeaps.find(data);
+    if (it == s_partHeaps.end() || models_part_in_use(data)) return 0;
+    JKRHeap* heap = it->second;
+    const size_t bytes = heap->getHeapSize();
+    s_partHeaps.erase(it);
+    s_looseData.erase(data);
+    s_fresh.erase(data);
+    s_puppetWarpData.erase(data);
+    heap->destroy();
+    return bytes;
+}
+
 bool models_is_skin(J3DModelData* data) {
     return data != nullptr && s_fresh.count(data) != 0;
+}
+
+u32 game_bmd_type(const char* path) {
+    struct Tag {
+        const char* file;
+        u32 type;
+    };
+    static const Tag kTags[] = {
+        {"al_swm.bmd", 'BMWE'}, {"al_podm.bmd", 'BMWE'},
+        {"al_bottle.bmd", 'BMDE'}, {"al_ib.bmd", 'BMDE'}, {"al_kantera.bmd", 'BMDE'},
+        {"al_bow.bmd", 'BMDR'}, {"al_crod.bmd", 'BMDR'}, {"al_hs.bmd", 'BMDR'},
+        {"al_hs_kusari.bmd", 'BMDR'}, {"al_hs_tip.bmd", 'BMDR'}, {"al_pachi.bmd", 'BMDR'},
+        {"al_pend.bmd", 'BMDR'}, {"al_wf.bmd", 'BMDR'}, {"o_gd_hk.bmd", 'BMDR'},
+        {"o_gd_nv.bmd", 'BMDR'}, {"o_gd_worm.bmd", 'BMDR'}, {"footmark.bmd", 'BMDR'},
+        {"al_boom.bmd", 'BMDR'}, {"al_sp.bmd", 'BMDR'}, {"al_arrow.bmd", 'BMDR'},
+        {"al_bomb.bmd", 'BMDR'}, {"ef_ktglow.bmd", 'BMDR'},
+    };
+    const char* base = path;
+    for (const char* c = path; *c != '\0'; ++c) {
+        if (*c == '/' || *c == '\\') base = c + 1;
+    }
+    for (const Tag& t : kTags) {
+#if defined(_WIN32)
+        if (_stricmp(base, t.file) == 0) return t.type;
+#else
+        if (strcasecmp(base, t.file) == 0) return t.type;
+#endif
+    }
+    return 'BMWR';
+}
+
+bool type_has_warp(u32 type) {
+    return type == 'BMWR' || type == 'BMWE';
 }
 
 J3DModelData* load_bmd_with_warp(const char* path, const char* who) {
@@ -437,23 +628,34 @@ J3DModelData* load_bmd_with_warp(const char* path, const char* who) {
     if (size <= 64 || size > 64 * 1024 * 1024) return nullptr;
     file.seekg(0);
     ensure_system_heap_capacity();
-    JKRHeap* heap = JKRHeap::getRootHeap();
-    if (heap == nullptr) heap = JKRHeap::getSystemHeap();
+    JKRHeap* root = JKRHeap::getRootHeap();
+    if (root == nullptr) root = JKRHeap::getSystemHeap();
+    JKRHeap* heap = root != nullptr ? part_heap_for(root, size, path) : nullptr;
     if (heap == nullptr) return nullptr;
     void* buffer = heap->alloc(static_cast<u32>(size), 32);
-    if (buffer == nullptr) return nullptr;
-    if (!file.read(static_cast<char*>(buffer), size) || std::memcmp(buffer, "J3D2", 4) != 0) {
+    if (buffer == nullptr || !file.read(static_cast<char*>(buffer), size) || std::memcmp(buffer, "J3D2", 4) != 0) {
+        heap->destroy();
         return nullptr;
     }
+    const u32 type = game_bmd_type(path);
     JKRHeap* previous = heap->becomeCurrentHeap();
-    J3DModelData* data = dRes_info_c::loaderBasicBmd('BMWR', buffer);
+    J3DModelData* data = dRes_info_c::loaderBasicBmd(type, buffer);
     if (previous != nullptr) previous->becomeCurrentHeap();
     if (data == nullptr || data->getMaterialNum() == 0 || data->getMaterialNodePointer(0) == nullptr) {
         coop_log::warn("coop_mod: [models] '{}' warp load failed, using plain copy",
             path);
+        heap->destroy();
         return nullptr;
     }
-    coop_log::info("coop_mod: [models] loaded '{}' for {} (warp material)", path, who);
+    static_cast<JKRSolidHeap*>(heap)->adjustSize();
+    s_partHeaps[data] = heap;
+    if (type_has_warp(type)) {
+        coop_log::info("coop_mod: [models] loaded '{}' for {} (warp material)", path, who);
+    } else {
+
+        s_looseData.insert(data);
+        coop_log::info("coop_mod: [models] loaded '{}' for {} (no warp)", path, who);
+    }
     remember_own_anms(data);
     return data;
 }
@@ -465,6 +667,8 @@ J3DModelData* loadBmdDataForLink(const char* path) {
 J3DModelData* loadBmdDataForPuppet(const char* path) {
     J3DModelData* data = load_bmd_with_warp(path, "other players");
     if (data == nullptr) return nullptr;
+
+    if (!type_has_warp(game_bmd_type(path))) return data;
     dRes_info_c::offWarpMaterial(data);
     s_puppetWarpData.insert(data);
     return data;
@@ -533,11 +737,13 @@ void renderModelAtMtx(J3DModel* model, MtxP mtx, mDoExt_bckAnm* bck) {
         g_env_light.setLightTevColorType_MAJI(model, &alink->tevStr);
     }
 
-    mDoExt_modelUpdateDL(model);
+    coop_model_update_dl(model, "render");
 }
 
 JKRHeap* private_arc_heap_peek();
 JKRHeap* private_arc_heap();
+JKRHeap* private_model_heap();
+JKRHeap* private_model_heap_peek();
 std::string coop_mem_status();
 
 namespace {
@@ -553,9 +759,11 @@ int s_modelHeapFallbacks = 0;
 J3DModel* coop_create_model(J3DModelData* data, u32 modelFlag, u32 differedDlistFlag) {
     if (data == nullptr) return nullptr;
 
+    differedDlistFlag |= J3DDiffFlag_KonstColor;
+
     const u32 kModelHeapSize = 2u * 1024u * 1024u;
     const u32 kReserve = 2u * 1024u * 1024u;
-    JKRHeap* parent = private_arc_heap();
+    JKRHeap* parent = private_model_heap();
     int slot = -1;
     for (int i = 0; i < kModelHeapMax; ++i) {
         if (s_modelHeaps[i].model == nullptr) {
@@ -565,11 +773,16 @@ J3DModel* coop_create_model(J3DModelData* data, u32 modelFlag, u32 differedDlist
     }
     if (parent == nullptr || slot < 0 || parent->getFreeSize() < kModelHeapSize + kReserve) {
 
+        JKRHeap* current = JKRHeap::getCurrentHeap();
+        const bool roomy = current != nullptr && current->getFreeSize() >= static_cast<int>(kReserve * 4u);
         if (s_modelHeapFallbacks++ < 4) {
-            coop_log::warn("coop_mod: [models] no room for model heap ({}), using fallback | [MEM] {}", slot < 0 ? "table full" : "heap low",
-                coop_mem_status());
+            coop_log::warn("coop_mod: [models] no room for model heap ({}), {} | [MEM] {}", slot < 0 ? "table full" : "heap low",
+                roomy ? "using fallback" : "skipped", coop_mem_status());
         }
-        return mDoExt_J3DModel__create(data, modelFlag, differedDlistFlag);
+        if (!roomy) return nullptr;
+        J3DModel* fallback = mDoExt_J3DModel__create(data, modelFlag, differedDlistFlag);
+        note_model_made(fallback, data);
+        return fallback;
     }
 
     const u32 kSizes[] = {512u * 1024u, kModelHeapSize};
@@ -589,11 +802,13 @@ J3DModel* coop_create_model(J3DModelData* data, u32 modelFlag, u32 differedDlist
     heap->adjustSize();
     s_modelHeaps[slot].model = model;
     s_modelHeaps[slot].heap = heap;
+    note_model_made(model, data);
     return model;
 }
 
 void coop_free_model(J3DModel* model) {
     if (model == nullptr) return;
+    note_model_freed(model);
     for (ModelHeap& m : s_modelHeaps) {
         if (m.model != model) continue;
 
@@ -614,7 +829,7 @@ std::string coop_mem_status() {
         std::snprintf(out, n, "%ld/%ldK", static_cast<long>(h->getTotalFreeSize() / 1024),
             static_cast<long>(h->getFreeSize() / 1024));
     };
-    char cur[32], sys[32], zel[32], game[32], arc[32], ours[32], root[32];
+    char cur[32], sys[32], zel[32], game[32], arc[32], ours[32], mdl[32], root[32];
     JKRHeap* current = JKRHeap::getCurrentHeap();
     kb(current, cur, sizeof(cur));
     kb(JKRHeap::getSystemHeap(), sys, sizeof(sys));
@@ -622,12 +837,13 @@ std::string coop_mem_status() {
     kb(mDoExt_getGameHeap(), game, sizeof(game));
     kb(mDoExt_getArchiveHeap(), arc, sizeof(arc));
     kb(private_arc_heap_peek(), ours, sizeof(ours));
+    kb(private_model_heap_peek(), mdl, sizeof(mdl));
     kb(JKRHeap::getRootHeap(), root, sizeof(root));
     char buf[320];
     std::snprintf(buf, sizeof(buf),
-        "current=%s:%s system=%s zelda=%s game=%s archive=%s ours=%s root=%s",
+        "current=%s:%s system=%s zelda=%s game=%s archive=%s ours=%s models=%s root=%s",
         current != nullptr && current->getName() != nullptr ? current->getName() : "?", cur, sys,
-        zel, game, arc, ours, root);
+        zel, game, arc, ours, mdl, root);
     return buf;
 }
 

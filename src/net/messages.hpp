@@ -379,6 +379,7 @@ struct MsgPing {
 struct MsgItemTaken {
     float home[3];
     uint8_t itemNo;
+    uint8_t itemBit;
 };
 
 struct MsgAssignId {

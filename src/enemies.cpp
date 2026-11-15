@@ -674,6 +674,12 @@ bool syncable(fopAc_ac_c* actor) {
         if (name == fpcNm_E_RD_e && (arg0 == 4 || arg0 == 5 || arg0 == 11 || arg0 == 12)) return false;
         if (name == fpcNm_E_WB_e && (arg0 == 5 || arg0 == 7 || arg0 == 8 || arg0 == 9)) return false;
 
+        if (name == fpcNm_E_WB_e && std::strcmp(dComIfGp_getStartStageName(), "F_SP118") == 0) {
+            const int room = fopAcM_GetRoomNo(actor);
+            const int homeRoom = actor->home.roomNo;
+            if (room == 1 || room == 2 || homeRoom == 1 || homeRoom == 2) return false;
+        }
+
         if (name == fpcNm_E_ZH_e) return false;
 
         if (name == fpcNm_E_PM_e) return false;
@@ -752,6 +758,10 @@ void apply_hidden(fopAc_ac_c* actor, bool hidden) {
     } else {
         fopAcM_OffStatus(actor, fopAcStts_NODRAW_e);
     }
+}
+
+bool stage_leaving() {
+    return dComIfGp_isEnableNextStage() || dComIfGp_getStageRoom() == nullptr;
 }
 
 bool in_gameplay() {
@@ -1542,7 +1552,8 @@ const EnemyActLayout kEnemyAct[] = {
     ACT(0x01ef, e_kg_class,              mAction,          field_0x678),
     ACT(0x01f0, e_kr_class,              mCurAction,       field_0x672),
     ACT(0x01f1, daE_SW_c,                mActionMode,      mMoveMode),
-    ACT(0x01f2, daE_GE_c,                mSubMode,         mMode),
+
+    ACT(0x01f2, daE_GE_c,                mActionMode,      mMode),
     ACT(0x01f4, daE_YM_c,                mAction,          mMode),
     ACT(0x01f6, daE_YMB_c,               mAction,          mMode),
     ACT(0x01fa, e_yr_class,              field_0x66b,      field_0x67d),
@@ -1621,10 +1632,51 @@ void read_enemy_decision(fopAc_ac_c* actor, int16_t& action, int16_t& mode) {
 
 void write_enemy_timers(fopAc_ac_c* actor, const int16_t* in, uint8_t count, int age);
 
+bool decision_fits(fopAc_ac_c* actor, int16_t action, int16_t mode) {
+    switch (fopAcM_GetName(actor)) {
+    case fpcNm_E_RD_e: {
+        auto* rd = reinterpret_cast<e_rd_class*>(actor);
+
+        if (action == 13 || action == 14) {
+            const bool mounted = rd->action == 12 || rd->action == 13 || rd->action == 14;
+            if (!mounted || fopAcM_SearchByID(rd->boar_id) == nullptr) return false;
+        }
+        if (rd->bow_anm != nullptr) return true;
+        const bool bow = action == 5 || action == 6 || action == 7 || action == 8 || action == 26;
+        const bool ridingArcher = action == 13 && mode >= 30 && mode < 40;
+        return !bow && !ridingArcher;
+    }
+    case fpcNm_E_SW_e:
+        return static_cast<daE_SW_c*>(actor)->mpModelMorf != nullptr;
+    case fpcNm_E_YM_e: {
+        auto* ym = static_cast<daE_YM_c*>(actor);
+        if (action == daE_YM_c::ACT_SWITCH && ym->mAction != daE_YM_c::ACT_SWITCH) return false;
+
+        if ((action == daE_YM_c::ACT_RIVER) != (ym->mAction == daE_YM_c::ACT_RIVER)) return false;
+        if (action == daE_YM_c::ACT_RIVER && (ym->mpKago == nullptr || ym->mpPath == nullptr)) {
+            return false;
+        }
+        const bool pathed = action == daE_YM_c::ACT_SWITCH || action == daE_YM_c::ACT_RAIL ||
+                            action == daE_YM_c::ACT_BACK_RAIL;
+        return !pathed || ym->mpPath != nullptr;
+    }
+    case fpcNm_E_WW_e: {
+
+        auto* ww = reinterpret_cast<daE_WW_c*>(actor);
+        const bool master = ww->field_0x757 != 0;
+        return master == (action == 0  );
+    }
+    default:
+        return true;
+    }
+}
+
 void settle_after_decision(fopAc_ac_c* actor) {
     if (fopAcM_GetName(actor) == fpcNm_E_GE_e) {
         auto* ge = static_cast<daE_GE_c*>(actor);
         if (ge->field_0xb8a <= 0) ge->field_0xb8a = 8;
+
+        if (ge->mCircleFlyScale <= 0) ge->mCircleFlyScale = 14;
     }
     if (fopAcM_GetName(actor) == fpcNm_E_MM_e) {
         auto* mm = reinterpret_cast<e_mm_class*>(actor);
@@ -1640,6 +1692,14 @@ bool apply_enemy_decision(fopAc_ac_c* actor, int16_t action, int16_t mode, Track
     const EnemyActLayout* l = act_layout_for(fopAcM_GetName(actor));
     if (l == nullptr) return false;
     if (t->decisionKnown && t->lastAction == action && t->lastMode == mode) return false;
+    if (!decision_fits(actor, action, mode)) {
+        static int s_refusedLogged = 0;
+        if (s_refusedLogged++ < 20) {
+            coop_log::info("coop_mod: [ENEMY] decision refused name={} action={} mode={}",
+                static_cast<int>(fopAcM_GetName(actor)), static_cast<int>(action), static_cast<int>(mode));
+        }
+        return false;
+    }
 
     if (fopAcM_GetName(actor) == fpcNm_E_HZ_e) {
         auto* hz = static_cast<daE_HZ_c*>(actor);
@@ -1882,7 +1942,8 @@ void send_state(EnemyList& list) {
 bool is_downed_alive(fopAc_ac_c* actor) {
     if (actor == nullptr) return false;
     const s16 name = fopAcM_GetName(actor);
-    return name == fpcNm_E_S1_e || name == fpcNm_E_HP_e || name == fpcNm_E_PO_e;
+    return name == fpcNm_E_S1_e || name == fpcNm_E_HP_e || name == fpcNm_E_PO_e ||
+           name == fpcNm_E_SF_e;
 }
 
 void send_gone(int8_t room, uint32_t key) {
@@ -1980,6 +2041,15 @@ void sweep(EnemyList& list, bool host) {
             t = Tracked{};
             continue;
         }
+
+        if (t.procName == fpcNm_E_SF_e && !t.killed && !t.goneSent && room_is_loaded(t.room)) {
+            if (quiet) continue;
+            send_gone(t.room, t.key);
+            coop_log::info("coop_mod: [ENEMY] Stalfos destroyed room={} key={:#010x}, sent",
+                static_cast<int>(t.room), t.key);
+            t = Tracked{};
+            continue;
+        }
         if (!t.killed && t.runtime && !t.goneSent && !catchable && room_is_loaded(t.room)) {
             if (quiet) continue;
             send_gone(t.room, t.key);
@@ -2023,6 +2093,32 @@ void apply_remote(EnemyList& list) {
         ++s_diagMatched;
 
         if (r.gone) {
+
+            if (fopAcM_GetName(actor) == fpcNm_E_WB_e && fopAcM_SearchByName(fpcNm_E_RDB_e) != nullptr) {
+                r = Remote{};
+                continue;
+            }
+
+            if (fopAcM_GetName(actor) == fpcNm_E_SF_e) {
+                Tracked* st = find_tracked(r.room, r.key);
+                if (st != nullptr) {
+                    st->killed = true;
+                    st->goneSent = true;
+                }
+                if ((st == nullptr || !st->deleteAsked) && deleteCount < kMaxTracked &&
+                    !fpcM_IsCreating(fopAcM_GetID(actor))) {
+                    if (st != nullptr) st->deleteAsked = true;
+                    auto* sf = reinterpret_cast<e_sf_class*>(actor);
+                    {
+                        CoopActorLayer layer;
+                        fopAcM_createDisappear(actor, &actor->current.pos, 15, 0, 0x29);
+                    }
+                    if (sf->mSwBit != 0xFF) dComIfGs_onSwitch(sf->mSwBit, fopAcM_GetRoomNo(actor));
+                    toDelete[deleteCount++] = actor;
+                    r = Remote{};
+                }
+                continue;
+            }
             if (actor->health > 0) actor->health = 0;
             Tracked* t = find_tracked(r.room, r.key);
             if (t != nullptr) {
@@ -2803,6 +2899,7 @@ void capture_landed_hits(EnemyList& list) {
 void show_relayed_hitmark(fopAc_ac_c* actor, dCcD_GObjInf* tg, const MsgEnemyHit& msg);
 
 void inject_pending_hits(EnemyList& list) {
+    if (stage_leaving()) return;
     bool any = false;
     for (int i = 0; i < kMaxPendingHits; ++i) {
         if (s_pendingHits[i].used) { any = true; break; }
@@ -3264,6 +3361,25 @@ bool apply_object_blob(fopAc_ac_c* actor, const uint8_t* in, size_t len) {
         at += n;
     }
     return true;
+}
+
+void after_object_blob(fopAc_ac_c* actor) {
+    if (fopAcM_GetName(actor) != fpcNm_Obj_Lv3Water_e) return;
+    auto* water = static_cast<daLv3Water_c*>(actor);
+    const u8 type = water->mType;
+    if (type != 1 && type != 10 && type != 15 && type != 17 && type != 19 && type != 20) return;
+    dBgW* bg = water->mpBgW;
+    if (bg == nullptr) return;
+
+    const bool registered = bg->GetId() < 0x100;
+    const bool want = water->mSwStatePostEvent != 0;
+    if (want && !registered) {
+        dComIfG_Bgsp().Regist(bg, actor);
+        coop_log::info("coop_mod: [OBJ] lakebed water type {} collision on (partner's state)", type);
+    } else if (!want && registered) {
+        dComIfG_Bgsp().Release(bg);
+        coop_log::info("coop_mod: [OBJ] lakebed water type {} collision off (partner's state)", type);
+    }
 }
 
 void apply_object_phase(fopAc_ac_c* actor, const int16_t* in, int count) {
@@ -3906,6 +4022,7 @@ void apply_pending_moves() {
 
         const bool stateCopied = msg.blobLen > 0 && msg.blobLen <= sizeof(msg.blob) &&
                                  apply_object_blob(actor, msg.blob, msg.blobLen);
+        if (stateCopied) after_object_blob(actor);
         if (stateCopied || gap.abs() > kMoverSnapDist) {
             actor->current.pos = want;
             actor->old.pos = want;
@@ -4328,6 +4445,14 @@ void apply_remote_carry() {
     daAlink_c* me = daAlink_getAlinkActorClass();
     s_remoteStatueCount = 0;
     s_heldPinCount = 0;
+
+    if (dComIfGp_isEnableNextStage() || dComIfGp_getStageRoom() == nullptr) {
+        static int s_heldLogged = 0;
+        bool any = false;
+        for (const RemoteCarry& r : s_remoteCarry) any = any || (r.used && r.msg.state == kCarryGone);
+        if (any && s_heldLogged++ < 10) coop_log::info("coop_mod: [CARRY] remote break held, stage changing");
+        return;
+    }
     for (RemoteCarry& r : s_remoteCarry) {
         if (!r.used) continue;
         const MsgCarry& msg = r.msg;
@@ -4874,11 +4999,53 @@ const RemoteCarry* remote_statue(fopAc_ac_c* statue) {
     return nullptr;
 }
 
+fpc_ProcID s_drivenStatues[8] = {fpcM_ERROR_PROCESS_ID_e, fpcM_ERROR_PROCESS_ID_e,
+    fpcM_ERROR_PROCESS_ID_e, fpcM_ERROR_PROCESS_ID_e, fpcM_ERROR_PROCESS_ID_e,
+    fpcM_ERROR_PROCESS_ID_e, fpcM_ERROR_PROCESS_ID_e, fpcM_ERROR_PROCESS_ID_e};
+
+bool statue_driven(fpc_ProcID id, bool mark, bool clear) {
+    int free = -1;
+    for (int i = 0; i < 8; ++i) {
+        if (s_drivenStatues[i] == id) {
+            if (clear) s_drivenStatues[i] = fpcM_ERROR_PROCESS_ID_e;
+            return true;
+        }
+        if (free < 0 && s_drivenStatues[i] == fpcM_ERROR_PROCESS_ID_e) free = i;
+    }
+    if (mark) s_drivenStatues[free >= 0 ? free : 0] = id;
+    return false;
+}
+
+void statue_to_idle(daCstatue_c* statue) {
+    if (statue->mpMorf == nullptr) return;
+    auto* anm = static_cast<J3DAnmTransform*>(
+        dComIfG_getObjectRes(statue->mResName, daCstatue_c::m_bckIdxTable[statue->mType][0]));
+    if (anm == nullptr) return;
+    const f32 start = anm->getFrameMax() - 0.001f;
+    statue->mpMorf->setAnm(anm, -1, 3.0f, 1.0f, start, -1.0f);
+    statue->mpMorf->setFrameF(start);
+    statue->mCurrentAnim = 0;
+}
+
 HookAction on_statue_set_anime(ModContext*, void* args, void*, void*) {
     auto* statue = mods::arg<daCstatue_c*>(args, 0);
     if (statue == nullptr || !carry_live()) return HOOK_CONTINUE;
     const RemoteCarry* r = remote_statue(statue);
-    if (r == nullptr) return HOOK_CONTINUE;
+    if (r == nullptr) {
+
+        daAlink_c* me = daAlink_getAlinkActorClass();
+        const fpc_ProcID id = fopAcM_GetID(statue);
+        if (!statue_driven(id, false, false)) return HOOK_CONTINUE;
+        if (me != nullptr && me->getCopyRodActor() == nullptr && statue->mCurrentAnim != 0 &&
+            !statue->eventInfo.checkCommandDemoAccrpt()) {
+            statue_to_idle(statue);
+            statue_driven(id, false, true);
+            return HOOK_SKIP_ORIGINAL;
+        }
+        statue_driven(id, false, true);
+        return HOOK_CONTINUE;
+    }
+    statue_driven(fopAcM_GetID(statue), true, false);
 
     const uint8_t want = r->msg.statueAnim;
     if (want < 7 && want != statue->mCurrentAnim && statue->mpMorf != nullptr) {
@@ -5089,6 +5256,7 @@ void capture_landed_object_hits(BreakableList& list) {
 }
 
 void inject_pending_object_hits() {
+    if (stage_leaving()) return;
     bool any = false;
     for (int i = 0; i < kMaxPendingObjectHits; ++i) {
         if (s_pendingObjectHits[i].used) { any = true; break; }
@@ -5793,6 +5961,7 @@ void on_cage_bars(const MsgCageBars& msg) {
 }
 
 void apply_pending_cages() {
+    if (stage_leaving()) return;
     for (PendingCage& p : s_pendingCage) {
         if (!p.used) continue;
         fopAc_ac_c* cages[kMaxCages] = {};

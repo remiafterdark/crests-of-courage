@@ -93,6 +93,11 @@ void* collect_boss(void* proc, void* data) {
     if (actor == nullptr || list->count >= kMaxBossActors) return nullptr;
     const uint8_t kind = kind_of(fopAcM_GetName(actor));
     if (kind == kBossKindNone) return nullptr;
+
+    if ((kind == kBossKindOok || kind == kBossKindOokBoomerang) && fopAcM_GetRoomNo(actor) == 4 &&
+        std::strcmp(dComIfGp_getStartStageName(), "D_MN05") == 0) {
+        return nullptr;
+    }
     const int i = list->count++;
     list->actors[i] = actor;
     list->kinds[i] = kind;
@@ -188,7 +193,8 @@ const BossField kFieldsOokBoomerang[] = {
     BOSS_FIELD(e_mk_bo_class, field_0x5ee, bslot_timer(4), kBPolicyMirror),
     BOSS_FIELD(e_mk_bo_class, field_0x5f8, bslot_extra(0), kBPolicyMirror),
     BOSS_FIELD(e_mk_bo_class, field_0x5fa, bslot_extra(1), kBPolicyMirror),
-    BOSS_FIELD(e_mk_bo_class, field_0x600, bslot_extra(2), kBPolicyMirror),
+
+    BOSS_FIELD(e_mk_bo_class, field_0x600, bslot_extra(2), kBPolicyReadOnly),
     BOSS_FIELD(e_mk_bo_class, field_0x602, bslot_extra(3), kBPolicyMirror),
     BOSS_FIELD(e_mk_bo_class, field_0x998, bslot_extra(4), kBPolicyMirror),
     BOSS_FIELD(e_mk_bo_class, field_0x9b4, bslot_extra(5), kBPolicyMirror),
@@ -1990,10 +1996,49 @@ uint8_t decide_fight_owner(const BossList& list) {
     return s_fightOwner != kCoopNoPlayer ? s_fightOwner : coop_net_local_id();
 }
 
+struct OokPark {
+    fpc_ProcID id = fpcM_ERROR_PROCESS_ID_e;
+    s16 sub = 0;
+};
+OokPark s_ookPark;
+
+void* find_ook(void* proc, void*) {
+    auto* actor = static_cast<fopAc_ac_c*>(proc);
+    return actor != nullptr && fopAcM_GetName(actor) == fpcNm_E_MK_e ? actor : nullptr;
+}
+
+void keep_ook_boomerang() {
+    auto* mk = reinterpret_cast<e_mk_class*>(fopAcM_Search(find_ook, nullptr));
+    if (mk == nullptr) {
+        s_ookPark = OokPark{};
+        return;
+    }
+    const fpc_ProcID id = fopAcM_GetID(&mk->actor);
+    const bool alive = fopAcM_SearchByID(mk->boomerangId) != nullptr;
+    if (s_ookPark.id == id) {
+        if (alive) {
+            mk->demoSubMode = s_ookPark.sub;
+            coop_log::info("coop_mod: [BOSS] Ook boomerang back, demo resumed at {}", static_cast<int>(s_ookPark.sub));
+            s_ookPark = OokPark{};
+        } else if (!fpcM_IsCreating(mk->boomerangId) && mk->unkFlag4 != 7) {
+            mk->unkFlag4 = 7;
+        }
+        return;
+    }
+    const s16 sub = mk->demoSubMode;
+    if (mk->demoMode != e_mk_class::DEMO_MODE_END || (sub != 1 && sub != 10 && sub != 11) || alive) return;
+    s_ookPark.id = id;
+    s_ookPark.sub = sub;
+    mk->demoSubMode = 0;
+    if (!fpcM_IsCreating(mk->boomerangId)) mk->unkFlag4 = 7;
+    coop_log::warn("coop_mod: [BOSS] Ook end demo at {} without his boomerang, making one", static_cast<int>(sub));
+}
+
 void boss_update() {
     ++s_tick;
 
     announce_pillar_rolls();
+    keep_ook_boomerang();
 
     {
         BossList demoList;

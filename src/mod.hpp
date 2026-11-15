@@ -183,7 +183,8 @@ enum SkinChoiceSlot {
     kSkinChoiceSlingshot,
     kSkinChoiceBallAndChain,
     kSkinChoiceSpinner,
-    kSkinChoiceFishingRod,
+
+    kSkinChoiceDominionRod,
     kSkinChoiceBottle,
     kSkinChoiceCount,
 
@@ -328,6 +329,11 @@ J3DModelData* skins_local_aram_data(uint16_t index);
 void skins_warn_update(int outfit);
 
 std::string skins_local_slot(int slot);
+
+size_t skins_free_unused_parts(size_t want);
+bool models_part_in_use(J3DModelData* data);
+bool models_link_settled();
+size_t models_free_part(J3DModelData* data);
 void skins_set_local_slot(int slot, const char* name);
 void skins_local_choices(SkinChoices* out);
 
@@ -494,6 +500,8 @@ void colors_protect_puppet_model(J3DModel* model, uint8_t owner);
 
 void coop_crash_trail(const char* step);
 void crash_guard_init();
+
+bool coop_in_game_image(const void* p);
 
 extern const char* volatile g_coopStage;
 inline void coop_stage(const char* name) { g_coopStage = name; }
@@ -860,6 +868,9 @@ void chat_first_online();
 void chat_draw();
 bool chat_key_pressed();
 bool chat_game_in_front();
+struct PlayerGear;
+bool puppet_hook_get_gear(uint8_t playerId, PlayerGear* out);
+void fill_local_gear(PlayerGear& g);
 bool chat_is_typing();
 bool chat_keys_block(bool on);
 

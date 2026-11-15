@@ -33,11 +33,17 @@ extern const SaveService* svc_save;
 extern const UiService* svc_ui;
 
 #if defined(_WIN32)
+#define COOP_RANDO_PICKER_HOOK 1
 DEFINE_HOOK_SYMBOL("dusk::mods::svc::`anonymous namespace'::ui_pane_add_control",
     ModResult(ModContext*, UiElementHandle, const UiControlDesc*, UiElementHandle*), RandoUiControl);
 #else
+#if defined(__APPLE__)
+#define COOP_RANDO_PICKER_HOOK 0
+#else
+#define COOP_RANDO_PICKER_HOOK 1
 DEFINE_HOOK_SYMBOL("dusk::mods::svc::(anonymous namespace)::ui_pane_add_control",
     ModResult(ModContext*, UiElementHandle, const UiControlDesc*, UiElementHandle*), RandoUiControl);
+#endif
 #endif
 
 namespace {
@@ -247,7 +253,25 @@ std::string b64_decode(const std::string& in) {
     return out;
 }
 
+std::string seed_from_sidecar_read(const std::filesystem::path& path, int slot);
+
 std::string seed_from_sidecar(const std::filesystem::path& path, int slot) {
+    static std::filesystem::path s_path;
+    static int s_slotRead = -1;
+    static std::filesystem::file_time_type s_stamp{};
+    static std::string s_seed;
+    std::error_code ec;
+    const auto stamp = std::filesystem::last_write_time(path, ec);
+    if (ec) return {};
+    if (path == s_path && slot == s_slotRead && stamp == s_stamp) return s_seed;
+    s_seed = seed_from_sidecar_read(path, slot);
+    s_path = path;
+    s_slotRead = slot;
+    s_stamp = stamp;
+    return s_seed;
+}
+
+std::string seed_from_sidecar_read(const std::filesystem::path& path, int slot) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return {};
     const std::string json((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -718,7 +742,11 @@ void rando_init() {
         if (svc_config->register_var(mod_ctx, &last, &s_lastUsedVar) != MOD_OK) s_lastUsedVar = 0;
     }
     if (svc_hook != nullptr) {
+#if COOP_RANDO_PICKER_HOOK
         s_pickerAttached = mods::hook::add_post<RandoUiControl>(on_ui_control_post) == MOD_OK;
+#else
+        (void)&on_ui_control_post;
+#endif
     }
     coop_log::info("coop_mod: [RANDO] seed picker {}", s_pickerAttached ? "attached" : "unavailable");
     if (svc_save != nullptr) {

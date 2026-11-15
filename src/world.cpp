@@ -13,6 +13,8 @@
 #include "d/d_save.h"
 #include "d/actor/d_a_obj_drop.h"
 #include "d/actor/d_a_obj_smallkey.h"
+#include "d/actor/d_a_door_shutter.h"
+#include "d/d_door_param2.h"
 #include "d/actor/d_a_tbox.h"
 #include "d/actor/d_a_tbox2.h"
 #include "d/d_tresure.h"
@@ -47,6 +49,8 @@ DEFINE_HOOK(&daTbox_c::actionOpenWait, TboxOpenWaitHook);
 DEFINE_HOOK_SYMBOL("src/d/d_s_play.cpp#phase_1", int(void*), StoryStageLoadHook);
 
 DEFINE_HOOK(&dShopSystem_c::setSoldOut, ShopSoldOutHook);
+
+DEFINE_HOOK_SYMBOL("daAlink_c::checkSetNpcTks", bool(daAlink_c*, cXyz*, int, int), NpcTksHook);
 
 extern const SaveService* svc_save;
 
@@ -215,6 +219,9 @@ void* collect_local_switch(void* proc, void*) {
         for (int i = 0; i < count && top + i < 0xFF; ++i) add_local_switch(room, top + i);
     } else if (name == fpcNm_Tag_Spinner_e) {
         if ((param & 0xFF) != 0xFF) add_local_switch(room, param & 0xFF);
+    } else if (name == fpcNm_E_PH_e && std::strcmp(dComIfGp_getStartStageName(), "D_MN07A") == 0) {
+
+        add_local_switch(room, 63);
     } else if (name == fpcNm_Obj_Swpropeller_e) {
 
         if ((param & 0xFF) != 0xFF) add_local_switch(room, param & 0xFF);
@@ -911,6 +918,24 @@ void clear_tbox_bit(uint8_t* bytes, int no) {
     const int bitInWord = no & 0x1F;
     const int byteIndex = word * 4 + (3 - (bitInWord >> 3));
     bytes[byteIndex] = static_cast<uint8_t>(bytes[byteIndex] & ~(1 << (no & 7)));
+}
+
+void keep_through_load(dSv_info_c* info, int saveNo) {
+    if (!dComIfGp_isEnableNextStage() || saveNo < 0 || saveNo >= dSv_save_c::STAGE_MAX) return;
+    std::memcpy(mem_bytes(info->getSavedata().getSave(saveNo)), mem_bytes(info->getMemory()), kMemSize);
+}
+
+void* unlock_opened_door(void* proc, void*) {
+    auto* actor = static_cast<fopAc_ac_c*>(proc);
+    if (fopAcM_GetName(actor) != fpcNm_DOOR20_e) return nullptr;
+    auto* door = static_cast<daDoor20_c*>(actor);
+    if (!door->field_0x5f0) return nullptr;
+    const int swBit = door_param2_c::getSwbit(door);
+    if (swBit == 0xff || !dComIfGs_isSwitch(swBit, -1)) return nullptr;
+    door->field_0x5f0 = false;
+    door->deleteKey();
+    coop_log::info("coop_mod: [WORLD] door switch {} opened elsewhere, lock taken off", swBit);
+    return nullptr;
 }
 
 void* open_matching_chest(void* proc, void* data) {
@@ -2436,6 +2461,18 @@ void world_register_vars() {
             return HOOK_SKIP_ORIGINAL;
         });
     coop_log::info("coop_mod: [CHEST] open guard installed: {}", static_cast<int>(r));
+    const ModResult tks = mods::hook::add_pre<NpcTksHook>(
+        [](ModContext*, void*, void* retval, void*) -> HookAction {
+            const char* stage = dComIfGp_getStartStageName();
+            if (stage == nullptr || std::strcmp(stage, "D_MN01") != 0) return HOOK_CONTINUE;
+            dStage_roomDt_c* room0 = dComIfGp_roomControl_getStatusRoomDt(0);
+            if (room0 != nullptr && room0->getPlayer() != nullptr) return HOOK_CONTINUE;
+            coop_log::info("coop_mod: [STORY] Lakebed without its entrance room loaded: Ooccoo not "
+                           "placed this time");
+            if (retval != nullptr) *static_cast<bool*>(retval) = false;
+            return HOOK_SKIP_ORIGINAL;
+        });
+    coop_log::info("coop_mod: [STORY] Ooccoo guard: {}", static_cast<int>(tks));
     const bool shopPre = mods::hook::add_pre<ShopSoldOutHook>(on_shop_sold_out_pre) == MOD_OK;
     const bool shopPost = mods::hook::add_post<ShopSoldOutHook>(on_shop_sold_out_post) == MOD_OK;
     coop_log::info("coop_mod: [SHOP] sold-out hook: {}", shopPre && shopPost ? "ok" : "failed");
@@ -2467,6 +2504,9 @@ void world_update() {
         s_base.have = false;
         s_heldWorldCount = 0;
         return;
+    }
+    if (s_tick % 30 == 0 && !dComIfGp_event_runCheck() && daAlink_getAlinkActorClass() != nullptr) {
+        fopAcM_Search(unlock_opened_door, nullptr);
     }
 
     if (s_heldWorldCount > 0 && !local_mid_sequence()) {
@@ -2775,6 +2815,7 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
             open_chests_from_bits(newlySet);
             remove_collected_from_bits(newlySet);
         }
+        if (sameSlot) keep_through_load(info, msg.saveNo);
         break;
     }
     case kRegionKeys: {
@@ -2783,6 +2824,7 @@ void world_on_message(uint8_t type, const uint8_t* payload, size_t size, uint8_t
                                    : mem_bytes(info->getSavedata().getSave(msg.saveNo));
         target[kKeyOffset] = msg.set[0];
         if (slotBaselineValid) s_base.mem[kKeyOffset] = msg.set[0];
+        if (sameSlot) keep_through_load(info, msg.saveNo);
         break;
     }
     case kRegionDan: {

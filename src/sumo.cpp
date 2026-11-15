@@ -30,8 +30,13 @@ IMPORT_OPTIONAL_SERVICE(MessageService, svc_message);
 IMPORT_OPTIONAL_SERVICE(FlowService, svc_flow);
 
 DEFINE_HOOK_SYMBOL("daNpcWrestler_c::sumouWait", bool(daNpcWrestler_c*, void*), SumoWaitHook);
-DEFINE_HOOK_SYMBOL("daNpcWrestler_c::sumouAI", void(daNpcWrestler_c*), SumoAIHook);
+
+#if defined(_WIN32)
+#define COOP_SUMO_OUT_P_HOOK 1
 DEFINE_HOOK_SYMBOL("daNpcWrestler_c::checkOutOfArenaP", bool(daNpcWrestler_c*), SumoOutPHook);
+#else
+#define COOP_SUMO_OUT_P_HOOK 0
+#endif
 DEFINE_HOOK_SYMBOL("daNpcWrestler_c::checkOutOfArenaW", bool(daNpcWrestler_c*), SumoOutWHook);
 DEFINE_HOOK_SYMBOL("daNpcWrestler_c::Draw", int(daNpcWrestler_c*), SumoWrestlerDrawHook);
 DEFINE_HOOK_SYMBOL("daAlink_c::procSumouMove", int(daAlink_c*), SumoLinkMoveHook);
@@ -693,11 +698,6 @@ bool mirror_fight() {
     return in_match() && !s.authority && s.fight && !s.ended;
 }
 
-void on_ai_post(ModContext*, void* args, void*, void*) {
-    auto* w = mods::arg<daNpcWrestler_c*>(args, 0);
-    if (is_match_wrestler(w)) w->mWrestlerAction = kMoveWait;
-}
-
 HookAction on_wait_pre(ModContext*, void* args, void* r, void*) {
     auto* w = mods::arg<daNpcWrestler_c*>(args, 0);
     if (!is_match_wrestler(w)) return HOOK_CONTINUE;
@@ -1040,7 +1040,9 @@ void ring_out(void* args, void* r, bool player) {
     }
 }
 
+#if COOP_SUMO_OUT_P_HOOK
 void on_out_p_post(ModContext*, void* args, void* r, void*) { ring_out(args, r, true); }
+#endif
 void on_out_w_post(ModContext*, void* args, void* r, void*) { ring_out(args, r, false); }
 
 HookAction on_clothes_pre(ModContext*, void* args, void*, void*) {
@@ -1134,6 +1136,15 @@ void sumo_after_player(daAlink_c* alink) {
         }
         if (wrestler != nullptr && authority_fight()) authority_frame(alink, wrestler);
         if (mirror_fight()) mirror_frame(alink, wrestler);
+
+        if (wrestler != nullptr && s.result == 0 && s.authority && s.fight && in_end_scene(wrestler)) {
+            const u8 endAct = act_of(wrestler);
+            const bool won = endAct == kActLose || endAct == kActLose2;
+            s.result = result_for(won);
+            s.resultAt = s_frame;
+            send(s.opponent, kSumoResult, s.result);
+            coop_log::info("coop_mod: [SUMO] the match ended here by itself: {}", won ? "we won" : "we lost");
+        }
 
         if (wrestler != nullptr && s.result != 0 && !s.ended) {
             if (in_end_scene(wrestler)) {
@@ -1316,12 +1327,13 @@ void sumo_init() {
         }
     }
     const int results[] = {
-        static_cast<int>(mods::hook::add_post<SumoAIHook>(on_ai_post)),
         static_cast<int>(mods::hook::add_pre<SumoWaitHook>(on_wait_pre)),
         static_cast<int>(mods::hook::add_pre<SumoWrestlerDrawHook>(on_wrestler_draw_pre)),
         static_cast<int>(mods::hook::add_pre<SumoLinkMoveHook>(on_link_sumo_pre)),
         static_cast<int>(mods::hook::add_pre<SumoLinkSideHook>(on_link_sumo_pre)),
+#if COOP_SUMO_OUT_P_HOOK
         static_cast<int>(mods::hook::add_post<SumoOutPHook>(on_out_p_post)),
+#endif
         static_cast<int>(mods::hook::add_post<SumoOutWHook>(on_out_w_post)),
         static_cast<int>(mods::hook::add_pre<SumoClothesHook>(on_clothes_pre)),
         static_cast<int>(mods::hook::add_post<SumoLabelHook>(on_label_post)),

@@ -458,7 +458,7 @@ void gold_draw(Rig& rig, J3DModel* wolf, dKy_tevstr_c* tev, bool mirrored) {
     cXyz at(base[0][3], base[1][3], base[2][3]);
     g_env_light.settingTevStruct(5, &at, &rig.tev);
     g_env_light.setLightTevColorType_MAJI(rig.model, &rig.tev);
-    mDoExt_modelEntryDL(rig.model);
+    coop_model_entry_dl(rig.model, "beast");
     if (mirrored) daMirror_c::entry(rig.model);
 }
 
@@ -491,7 +491,7 @@ void rig_draw(Rig& rig, J3DModel* wolf, dKy_tevstr_c* tev, bool mirrored) {
     rig.model->calc();
     s_posing = nullptr;
     g_env_light.setLightTevColorType_MAJI(rig.model, tev);
-    mDoExt_modelEntryDL(rig.model);
+    coop_model_entry_dl(rig.model, "beast");
     if (mirrored) daMirror_c::entry(rig.model);
 }
 

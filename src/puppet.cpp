@@ -485,6 +485,13 @@ void puppet_free_later(J3DModel*& model) {
 
 void puppet_flush_pending_frees() {
 
+    if (coop_paint_counted()) {
+        static uint32_t s_lastStep = 0;
+        const uint32_t now = coop_paint_count();
+        if (now - s_lastStep < 2) return;
+        s_lastStep = now;
+    }
+
     for (int i = 0; i < s_pendingFreeOlderCount; ++i) {
 
         colors_detach_model(s_pendingFreeOlder[i]);
@@ -3158,8 +3165,20 @@ J3DModel* puppet_skin_part(int part, const cXyz& scale) {
     return model;
 }
 
+const s32 kBuildFloor = 4 * 1024 * 1024;
+
+bool room_to_build() {
+    JKRHeap* zelda = mDoExt_getZeldaHeap();
+    if (zelda == nullptr || zelda->getFreeSize() >= kBuildFloor) return true;
+    static uint32_t s_lowLogged = 0;
+    if (s_lowLogged++ % 600 == 0) {
+        coop_log::warn("coop_mod: [PUPPET] zelda heap low, builds wait | [MEM] {}", coop_mem_status());
+    }
+    return false;
+}
+
 void retry_missing_parts() {
-    if (pup().state != 2 || s_puppetFrame % 90 != 0) return;
+    if (pup().state != 2 || s_puppetFrame % 90 != 0 || !room_to_build()) return;
     const OutfitFiles& files = outfit_files(pup().outfit);
     if (files.isWolf) return;
     PuppetModelLoadScope scope;
@@ -3909,7 +3928,8 @@ void update_one_puppet(daAlink_c* alink) {
             static_cast<int>(s_pupId));
     }
 
-    if (pup().state == 2 && pup().model == nullptr && !pup().skinDirty && s_puppetFrame % 120 == 0) {
+    if (pup().state == 2 && pup().model == nullptr && !pup().skinDirty && s_puppetFrame % 120 == 0 &&
+        room_to_build()) {
         static uint32_t s_noBodyLogged = 0;
         if (s_noBodyLogged++ % 15 == 0) {
             coop_log::warn("coop_mod: [PUPPET] player {} missing body, rebuilding | [MEM] {}",
@@ -3998,7 +4018,7 @@ void update_one_puppet(daAlink_c* alink) {
         retry_missing_parts();
     }
 
-    if (pup().state == 1) {
+    if (pup().state == 1 && room_to_build()) {
         const OutfitFiles& files = outfit_files(pup().pendingOutfit);
 
         if (!pup().holdsArc) {
@@ -4113,6 +4133,15 @@ void puppet_hook_on_midna_snapshot(uint8_t playerId, const MidnaSnapshot& snap) 
     pup().midnaAge = 0;
 }
 
+PlayerGear s_gear[kMaxPuppets] = {};
+bool s_gearKnown[kMaxPuppets] = {};
+
+bool puppet_hook_get_gear(uint8_t playerId, PlayerGear* out) {
+    if (playerId >= kMaxPuppets || out == nullptr || !s_gearKnown[playerId]) return false;
+    *out = s_gear[playerId];
+    return true;
+}
+
 void puppet_hook_on_network_snapshot(uint8_t playerId, float x, float y, float z, int16_t angleX,
     int16_t angleY, int16_t angleZ, int8_t roomNo, uint8_t outfit, const AnmSlotSnapshot* under,
     const AnmSlotSnapshot* upper, uint8_t handL, uint8_t handR,
@@ -4135,6 +4164,8 @@ void puppet_hook_on_network_snapshot(uint8_t playerId, float x, float y, float z
     pup().warpOn = equipment.warpOn;
     pup().tevTint = equipment.tevTint;
     pup().tevTintOn = equipment.tevTintOn;
+    s_gear[playerId] = equipment.gear;
+    s_gearKnown[playerId] = true;
     pup().warpScroll = equipment.warpScroll;
     pup().warpDissolve = equipment.warpDissolve;
     pup().peerRoom = roomNo;
@@ -4386,6 +4417,17 @@ void local_skin_rebuild_equipment(daAlink_c* alink) {
     if (alink->mShieldChangeWaitTimer != 0) return;
     if (coop_local_models_unsafe()) return;
     if (alink->checkWolf()) return;
+
+    if (fpcM_IsCreating(fopAcM_GetID(alink))) return;
+
+    if (!coop_in_game_image(alink->mShieldArcName)) return;
+    static const void* s_shieldArcSeen = nullptr;
+    if (static_cast<const void*>(alink->mShieldArcName) != s_shieldArcSeen) {
+        s_shieldArcSeen = alink->mShieldArcName;
+        char ptr[32];
+        std::snprintf(ptr, sizeof(ptr), "%p", s_shieldArcSeen);
+        breadcrumb2("local: shield arc pointer", ptr);
+    }
     J3DModel** const slots[] = {
         &alink->mpSwAModel, &alink->mpSwASheathModel, &alink->mpSwMModel,
         &alink->mpSwMSheathModel, &alink->mShieldModel,
@@ -4505,6 +4547,7 @@ void puppet_hook_request_release() {
 void puppet_hook_release_player(uint8_t playerId) {
     if (playerId >= kMaxPuppets) return;
     s_puppetSlots[playerId].releaseRequested = true;
+    s_gearKnown[playerId] = false;
 }
 
 bool puppet_hook_player_active(uint8_t playerId) {
@@ -5074,7 +5117,7 @@ void render_puppet_body(J3DModel* model, const cXyz& pos, const csXyz& angle,
     MaterialGuard matGuard;
     const bool matGuarded = material_guard_begin(model, matGuard);
 
-    if (!s_bodyNotDrawn) mDoExt_modelUpdateDL(model);
+    if (!s_bodyNotDrawn) coop_model_update_dl(model, "puppet");
 
     if (matGuarded) material_guard_end(matGuard);
 
@@ -5698,7 +5741,7 @@ void draw_midna_solid(daAlink_c* alink, const MidnaSnapshot& snap, MtxP base,
             vis.set(body, 7, snap.rightHand == 0xFE);
             MidnaEyeAnmGuard eyes;
             eyes.begin(body);
-            mDoExt_modelEntryDL(body);
+            coop_model_entry_dl(body, "puppet");
             eyes.end();
             vis.restore();
             puppet_guard_end(guard);
@@ -5718,7 +5761,7 @@ void draw_midna_solid(daAlink_c* alink, const MidnaSnapshot& snap, MtxP base,
             for (u16 i = 0; i < n; ++i) {
                 vis.set(hands, i, snap.leftHand == i || snap.rightHand == i);
             }
-            mDoExt_modelEntryDL(hands);
+            coop_model_entry_dl(hands, "puppet");
             vis.restore();
             puppet_guard_end(guard);
         }
@@ -5737,7 +5780,7 @@ void draw_midna_solid(daAlink_c* alink, const MidnaSnapshot& snap, MtxP base,
             g_env_light.setLightTevColorType_MAJI(hair, tev);
             MidnaShapeEdits vis;
             for (u16 i = 0; i < 3; ++i) vis.set(hair, i, snap.hairShape == i);
-            mDoExt_modelEntryDL(hair);
+            coop_model_entry_dl(hair, "puppet");
             vis.restore();
             puppet_guard_end(guard);
         }
@@ -5751,7 +5794,7 @@ void draw_midna_solid(daAlink_c* alink, const MidnaSnapshot& snap, MtxP base,
             midna_pose(mask, head, 1.0f, nullptr);
             midna_apply_tired(mask, kMidnaPartMask, tired);
             g_env_light.setLightTevColorType_MAJI(mask, tev);
-            mDoExt_modelEntryDL(mask);
+            coop_model_entry_dl(mask, "puppet");
             puppet_guard_end(guard);
         }
     }
@@ -5786,7 +5829,7 @@ void draw_midna_shadow(daAlink_c* alink, const MidnaSnapshot& snap, MtxP base,
                 joints[kMidnaJntBackbone1][1][3] + 20.0f, joints[kMidnaJntBackbone1][2][3]);
             midna_pose(gokou, at, 1.0f, nullptr);
             g_env_light.setLightTevColorType_MAJI(gokou, &tev);
-            mDoExt_modelEntryDL(gokou);
+            coop_model_entry_dl(gokou, "puppet");
             puppet_guard_end(guard);
         }
     }
@@ -6438,7 +6481,7 @@ void draw_puppet_horse(daAlink_c* alink) {
         s_horsePose[j] = nullptr;
     }
     g_env_light.setLightTevColorType_MAJI(model, &alink->tevStr);
-    mDoExt_modelEntryDL(model);
+    coop_model_entry_dl(model, "puppet");
     puppet_guard_end(guard);
 
     {
@@ -6742,8 +6785,10 @@ void draw_one_puppet(daAlink_c* alink) {
                 g_env_light.setLightTevColorType_MAJI(boot, &alink->tevStr);
                 boot->calcMaterial();
                 boot->diff();
-                boot->entry();
-                boot->viewCalc();
+                if (coop_model_enter_once(boot, "boot")) {
+                    boot->entry();
+                    boot->viewCalc();
+                }
                 if (bootVisApplied) shape_vis_restore(bootVis);
                 puppet_guard_end(bootGuard);
             }
@@ -6765,8 +6810,10 @@ void draw_one_puppet(daAlink_c* alink) {
                 hand_shapes_apply(pup().handsModel, pup().handL, pup().handR, handVis);
             pup().handsModel->calcMaterial();
             pup().handsModel->diff();
-            pup().handsModel->entry();
-            pup().handsModel->viewCalc();
+            if (coop_model_enter_once(pup().handsModel, "hands")) {
+                pup().handsModel->entry();
+                pup().handsModel->viewCalc();
+            }
             if (handVisApplied) shape_vis_restore(handVis);
             puppet_guard_end(handsGuard);
         }
@@ -6847,7 +6894,9 @@ void puppet_hook_init() {
             if (arc == nullptr || std::strcmp(arc, "Wmdl") != 0) return;
             if (mods::arg<int>(args, 1) != dRes_INDEX_WMDL_BMD_WL_e) return;
             J3DModelData* mine = skins_local_part_data(kSkinOutfitWolf, kSkinPartBody);
-            if (mine != nullptr) {
+
+            if (mine != nullptr &&
+                skin_fits_original(mine, static_cast<J3DModelData*>(*result), "wl.bmd")) {
                 models_reset_for_game(mine, "wl.bmd");
                 *result = mine;
             }

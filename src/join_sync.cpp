@@ -552,6 +552,8 @@ void apply_catch_up() {
     if (!in_gameplay_settled() || dComIfGp_event_runCheck()) return;
     const CoopPeer& peer = features_peer_of(s_catchUpFrom);
     keep_own_items(*reinterpret_cast<dSv_save_c*>(s_catchUp.data()), info->getSavedata());
+
+    s_fileIsNew = false;
     load_host_save(info, s_catchUp.data(), s_catchUpFrom);
     s_carryingJoinedWorld = true;
     coop_log::info("coop_mod: [JOIN] caught up with player {}", s_catchUpFrom);

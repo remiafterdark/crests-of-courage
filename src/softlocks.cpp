@@ -33,7 +33,7 @@ const RawSoftlock kRaw[] = {
 enum class Op {
     FlagOn, FlagOff, SwOn, SwOff, TboxOn, Stage, NotStage, Room, NotPoint, Rando, NoRando, NotTransform, NotDarkClear,
     Wolf, NoTwilight, Item, NoItem,
-    Set, Clear, SwSet, SwClear, Human,
+    Set, Clear, SwSet, SwClear, Human, Reload,
 };
 
 struct Term {
@@ -112,6 +112,7 @@ bool parse_term(const std::string& text, Term& t) {
     if (word == "wolf") { t.op = Op::Wolf; return true; }
     if (word == "notwilight") { t.op = Op::NoTwilight; return true; }
     if (word == "human") { t.op = Op::Human; return true; }
+    if (word == "reload") { t.op = Op::Reload; return true; }
     if (word == "rando") { t.op = Op::Rando; return true; }
     if (word == "norando") { t.op = Op::NoRando; return true; }
     return false;
@@ -193,6 +194,14 @@ void apply(const Term& t) {
         if (alink != nullptr && alink->checkWolf() && alink->mEquipItem != dItemNo_IRONBALL_e &&
             alink->mProcID != daAlink_c::PROC_METAMORPHOSE && alink->mProcID != daAlink_c::PROC_METAMORPHOSE_ONLY) {
             alink->procCoMetamorphoseInit();
+        }
+        break;
+    }
+    case Op::Reload: {
+
+        const char* stage = dComIfGp_getStartStageName();
+        if (stage != nullptr && stage[0] != '\0') {
+            dComIfGp_setNextStage(stage, dComIfGp_getStartStagePoint(), dComIfGp_getStartStageRoomNo(), -1);
         }
         break;
     }

@@ -197,6 +197,11 @@ int bottle_count(const GrantPhoto& photo) {
     return n;
 }
 
+bool key_item(uint8_t item) {
+    return (item >= 0x85 && item <= 0x8E) || (item >= 0x92 && item <= 0x98) || item == 0xEE || item == 0xF3 ||
+           item == 0xF6 || (item >= 0xF9 && item <= 0xFD) || item == 0xFE;
+}
+
 void on_grant_post(ModContext*, void* args, void*, void*) {
     if (!s_inGrant) return;
     s_inGrant = false;
@@ -207,9 +212,14 @@ void on_grant_post(ModContext*, void* args, void*, void*) {
         return;
     }
     if (!s_grantIsDuplicate || !s_haveAfter) return;
-    undo_grant();
     const uint8_t item = mods::arg<u8>(args, 0);
-    if (++s_blocked <= 20) {
+
+    if (key_item(item)) {
+        coop_log::info("coop_mod: [CHECKS] '{}' already collected by peer, key {:#x} kept", s_grantName, item);
+        return;
+    }
+    undo_grant();
+    if (++s_blocked <= 200) {
         coop_log::info("coop_mod: [CHECKS] '{}' already collected by peer, item {:#x} revoked", s_grantName, item);
     }
 

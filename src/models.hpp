@@ -35,4 +35,12 @@ void models_warp_guard_init();
 
 void renderModelAtMtx(J3DModel* model, MtxP mtx, mDoExt_bckAnm* bck);
 
+bool coop_model_enter_once(J3DModel* model, const char* where);
+void coop_model_update_dl(J3DModel* model, const char* where);
+void coop_model_entry_dl(J3DModel* model, const char* where);
+void models_draw_guard_init();
+
+uint32_t coop_paint_count();
+bool coop_paint_counted();
+
 void ensure_system_heap_capacity();

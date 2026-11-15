@@ -509,6 +509,8 @@ void voice_draw_mute_hint(f32 minX, f32 minY, f32 width, f32 height) {
     coop_draw_voice_icon(x, baseline, size, alpha, s_hintMuted);
     if (font != nullptr) {
         if (J2DGrafContext* port = dComIfGp_getCurrentGrafPort()) port->setup2D();
+
+        font->setGX();
         const f32 shadow = cell * 0.07f;
         const f32 ty = baseline - size * 0.82f + (size - cell) * 0.5f + cell * 0.85f;
         font->setCharColor(JUtility::TColor(0, 0, 0, static_cast<u8>(alpha * 0.8f)));

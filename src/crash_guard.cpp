@@ -107,6 +107,20 @@ void on_terminate() {
 
 }
 
+bool coop_in_game_image(const void* p) {
+    static uintptr_t s_lo = 0, s_hi = 0;
+    if (s_lo == 0) {
+        auto* base = reinterpret_cast<const unsigned char*>(GetModuleHandleW(nullptr));
+        if (base == nullptr) return true;
+        auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+        s_lo = reinterpret_cast<uintptr_t>(base);
+        s_hi = s_lo + nt->OptionalHeader.SizeOfImage;
+    }
+    const auto v = reinterpret_cast<uintptr_t>(p);
+    return v >= s_lo && v < s_hi;
+}
+
 void crash_guard_init() {
     if (s_file != INVALID_HANDLE_VALUE) return;
     const std::wstring path = std::filesystem::u8path(coop_crash_trail_path()).wstring();
@@ -124,5 +138,6 @@ void crash_guard_init() {
 #else
 
 void crash_guard_init() {}
+bool coop_in_game_image(const void*) { return true; }
 
 #endif

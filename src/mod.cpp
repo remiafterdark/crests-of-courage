@@ -740,7 +740,15 @@ void on_backup_route_frame(uint8_t type, uint8_t from, const uint8_t* payload, s
         }
         return;
     }
-    if (size < sizeof(MsgSnapStreamHead) + sizeof(PlayerSnapshot)) return;
+    if (size != sizeof(MsgSnapStreamHead) + sizeof(PlayerSnapshot)) {
+        static uint32_t s_oddSize = 0;
+        if (s_oddSize++ % 300 == 0) {
+            coop_log::warn("coop_mod: [NET] backup position from player {} is {} bytes, ours are {}"
+                           " - a different build? ({} so far)",
+                from, size, sizeof(MsgSnapStreamHead) + sizeof(PlayerSnapshot), s_oddSize);
+        }
+        return;
+    }
     MsgSnapStreamHead head;
     std::memcpy(&head, payload, sizeof(head));
     if (head.to != g_localId) {
@@ -1314,6 +1322,45 @@ void take_player_snapshot(int id, PlayerSnapshot& snapshot) {
         snapshot.outfit, snapshot.under, snapshot.upper, snapshot.handL, snapshot.handR, snapshot);
 }
 
+void read_local_gear(PlayerGear& g) {
+    std::memset(&g, 0, sizeof(g));
+    std::memset(g.bottles, 0xFF, sizeof(g.bottles));
+    std::memset(g.bombBags, 0xFF, sizeof(g.bombBags));
+    g.itemX = g.itemY = 0xFF;
+    if (dComIfGs_getSaveInfo() == nullptr || daAlink_getAlinkActorClass() == nullptr) return;
+    for (int i = 0; i < 24; ++i) {
+        const u8 item = dComIfGs_getItem(i, false);
+        switch (item) {
+        case dItemNo_BOOMERANG_e: g.owned |= kGearBoomerang; break;
+        case dItemNo_KANTERA_e: g.owned |= kGearLantern; break;
+        case dItemNo_SPINNER_e: g.owned |= kGearSpinner; break;
+        case dItemNo_HVY_BOOTS_e: g.owned |= kGearIronBoots; break;
+        case dItemNo_BOW_e: g.owned |= kGearBow; break;
+        case dItemNo_HAWK_EYE_e: g.owned |= kGearHawkeye; break;
+        case dItemNo_IRONBALL_e: g.owned |= kGearBallAndChain; break;
+        case dItemNo_COPY_ROD_e:
+        case dItemNo_COPY_ROD_2_e: g.owned |= kGearDominionRod; break;
+        case dItemNo_HOOKSHOT_e: g.owned |= kGearClawshot; break;
+        case dItemNo_W_HOOKSHOT_e: g.owned |= kGearDoubleClawshot; break;
+        case dItemNo_PACHINKO_e: g.owned |= kGearSlingshot; break;
+        default:
+            if (item == dItemNo_FISHING_ROD_1_e || (item >= dItemNo_BEE_ROD_e && item <= dItemNo_JEWEL_WORM_ROD_e)) {
+                g.owned |= kGearFishingRod;
+            }
+            break;
+        }
+    }
+    for (int i = 0; i < 4; ++i) g.bottles[i] = dComIfGs_getItem(SLOT_11 + i, false);
+    for (int i = 0; i < 3; ++i) g.bombBags[i] = dComIfGs_getItem(SLOT_15 + i, false);
+    g.arrowMax = (g.owned & kGearBow) != 0 ? dComIfGs_getArrowMax() : 0;
+    g.arrows = (g.owned & kGearBow) != 0 ? dComIfGs_getArrowNum() : 0;
+    g.wallet = dComIfGs_getWalletSize();
+    const u8 x = dComIfGs_getSelectItemIndex(0);
+    const u8 y = dComIfGs_getSelectItemIndex(1);
+    g.itemX = x < 24 ? dComIfGs_getItem(x, true) : 0xFF;
+    g.itemY = y < 24 ? dComIfGs_getItem(y, true) : 0xFF;
+}
+
 void handle_udp_payload(const mods::net::Event& event);
 
 void handle_udp_event(const mods::net::Event& event) {
@@ -1376,6 +1423,13 @@ void handle_udp_payload(const mods::net::Event& event) {
         return;
     }
     if (event.data.size() != sizeof(PlayerSnapshot)) {
+
+        static uint32_t s_oddSize = 0;
+        if (s_oddSize++ % 600 == 0) {
+            coop_log::warn("coop_mod: [NET] {} byte datagram from {} is no snapshot of ours ({} bytes)"
+                           " - a different build? ({} so far)",
+                event.data.size(), event.endpoint, sizeof(PlayerSnapshot), s_oddSize);
+        }
         return;
     }
     PlayerSnapshot snapshot;
@@ -2265,6 +2319,7 @@ void send_local_snapshot() {
         snapshot.tevTint = alink->mProcVar3.field_0x300e;
         snapshot.tevTintOn = 1;
     }
+    fill_local_gear(snapshot.gear);
 
     snapshot.warpOn = 0;
     snapshot.warpScroll = 0.0f;
@@ -3182,6 +3237,24 @@ void coop_debug_give_midna() {
 
     dComIfGs_onTransformLV(3);
     coop_log::info("coop_mod: [DEBUG] Midna flags set");
+}
+
+void fill_local_gear(PlayerGear& g) {
+    read_local_gear(g);
+}
+
+extern "C" MOD_EXPORT bool coop_player_gear(uint8_t player, PlayerGear* out, uint32_t outSize) {
+    if (out == nullptr || outSize < sizeof(PlayerGear)) return false;
+    const uint8_t local = coop_net_connected() ? coop_net_local_id() : 0;
+    if (player == local) {
+        fill_local_gear(*out);
+        return daAlink_getAlinkActorClass() != nullptr;
+    }
+    return puppet_hook_get_gear(player, out);
+}
+
+extern "C" MOD_EXPORT uint8_t coop_local_player_id() {
+    return coop_net_connected() ? coop_net_local_id() : 0;
 }
 
 extern "C" {

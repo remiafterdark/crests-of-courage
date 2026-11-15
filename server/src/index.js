@@ -13,6 +13,40 @@ const MAX_JOINERS_WAITING = 8;
 const HOST_KEY = /^[0-9a-f]{16,64}$/;
 const MAX_MESSAGE_BYTES = 1024;
 
+const BAN_DEFAULT = "You are banned from Crests of Courage online play.";
+const BAN_ID = /^[0-9a-f]{8}$|^[0-9a-f]{16}$/;
+
+function banList(env) {
+  return String((env && env.BANS) || "")
+    .split(",")
+    .map((x) => x.trim().toLowerCase())
+    .filter((x) => BAN_ID.test(x));
+}
+
+function isBanned(env, ids) {
+  const list = banList(env);
+  if (list.length === 0) return false;
+  return ids.some((id) => id && list.includes(id));
+}
+
+function banText(env) {
+  return printable((env && env.BAN_MESSAGE) || BAN_DEFAULT, 400) || BAN_DEFAULT;
+}
+
+function refuseBanned(ctx, frames) {
+  const pair = new WebSocketPair();
+  const [client, server] = Object.values(pair);
+  ctx.acceptWebSocket(server, ["banned"]);
+  server.serializeAttachment(null);
+  for (const f of frames) send(server, f);
+  try {
+    server.close(4003, "banned");
+  } catch {
+
+  }
+  return new Response(null, { status: 101, webSocket: client });
+}
+
 const STUN_HOSTS = [
   ["stun.l.google.com", 19302],
   ["stun1.l.google.com", 19302],
@@ -171,8 +205,9 @@ export default {
 };
 
 export class Room {
-  constructor(ctx) {
+  constructor(ctx, env) {
     this.ctx = ctx;
+    this.env = env || {};
   }
 
   host(except = null) {
@@ -212,6 +247,13 @@ export class Room {
 
     const strict = url.searchParams.get("strict") === "1";
     const key = url.searchParams.get("key") || "";
+    const addr = addressTag(ip);
+    const tag = role === "host" ? await tagOf(HOST_KEY.test(key) ? key : "") : "";
+    console.log(role === "host" ? `host ${addr} ${tag || "-"} ${code}` : `join ${addr} ${code}`);
+    if (isBanned(this.env, [addr, tag])) {
+      console.log(`banned ${role} ${addr} ${tag || "-"}`);
+      return refuseBanned(this.ctx, [{ op: "error", why: banText(this.env) }]);
+    }
     if (role === "host") this.takeOver(key);
     if (role === "host" && this.host() && !strict) {
       return new Response("Room taken", { status: 409 });
@@ -253,6 +295,7 @@ export class Room {
       return fail(ws, "bad_message");
     }
     const me = ws.deserializeAttachment();
+    if (!me) return;
 
     if (me.role === "host") {
       if (msg.op === "hello") {
@@ -380,6 +423,10 @@ export class Global {
     this.env = env || {};
   }
 
+  banLine() {
+    return { op: "chat", id: 0, tag: "", name: "Crests of Courage", text: banText(this.env) };
+  }
+
   banned(info) {
     const list = String(this.env.GLOBAL_BANS || "").split(",").map((x) => x.trim()).filter(Boolean);
     return list.includes(addressTag(info.ip || ""));
@@ -393,7 +440,7 @@ export class Global {
     if (!line) return;
     info.lastChat = now;
     ws.serializeAttachment(info);
-    console.log(`chat ${addressTag(info.ip || "")} ${info.name}: ${line}`);
+    console.log(`chat ${addressTag(info.ip || "")} ${info.tag || "-"} ${info.name}: ${line}`);
     const msg = { op: "chat", id: info.id, tag: info.tag || "", name: info.name, text: line };
     this.everyone(msg);
   }
@@ -459,7 +506,8 @@ export class Global {
   }
 
   all() {
-    return this.ctx.getWebSockets("global");
+
+    return this.ctx.getWebSockets("global").filter((ws) => ws.deserializeAttachment() !== null);
   }
 
   byId(id) {
@@ -544,6 +592,11 @@ export class Global {
     if (this.all().length >= GLOBAL_MAX) {
       return new Response("Hyrule Online is full", { status: 503 });
     }
+    const ip = request.headers.get("CF-Connecting-IP") || "";
+    if (isBanned(this.env, [addressTag(ip)])) {
+      console.log(`banned global ${addressTag(ip)}`);
+      return refuseBanned(this.ctx, [this.banLine()]);
+    }
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server, ["global"]);
@@ -574,6 +627,19 @@ export class Global {
       info.lan = isPrivateIpv4(msg.lan) ? msg.lan : "";
       info.name = cleanName(printable(msg.name, 16)) || "Player";
       info.tag = await tagOf(msg.key);
+      console.log(`global ${addressTag(info.ip || "")} ${info.tag || "-"} ${info.name}`);
+      if (isBanned(this.env, [addressTag(info.ip || ""), info.tag])) {
+        console.log(`banned global ${addressTag(info.ip || "")} ${info.tag || "-"}`);
+
+        ws.serializeAttachment(null);
+        send(ws, this.banLine());
+        try {
+          ws.close(4003, "banned");
+        } catch {
+
+        }
+        return;
+      }
       this.introduce(ws, info);
       ws.serializeAttachment(info);
       send(ws, { op: "count", ...this.counts(info.area, info.v) });

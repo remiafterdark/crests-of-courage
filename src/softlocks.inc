@@ -4,6 +4,10 @@ SOFTLOCK("R-CHY9", "Midna riding before the prison scenes: nobody breaks the cha
     "norando; on 0x0C10; off 0x0540; off 0x0520",
     "clear 0x0C10", "")
 
+SOFTLOCK("prison-M009", "the prison escape (M_009) without the chain broken (M_011): chained in the cell",
+    "norando; stage R_SP107; room 0; on 0x0540; off 0x0510",
+    "set 0x0520; set 0x0510; reload", "Midna broke the chain.")
+
 SOFTLOCK("R-R5NW", "on Zelda's tower with the first warp already set: no way off the roof",
     "norando; stage R_SP107; room 3; notpoint 20; on 0x0502; nottransform 3",
     "clear 0x0502; swclear 1:30", "Walk up to Zelda again.")
@@ -42,3 +46,7 @@ SOFTLOCK("R-CRB8", "Bo's boots flag without the Iron Boots: his talk loops",
 SOFTLOCK("R-EXSQ", "randomizer: Bo stops you in his hallway forever after a partner won the sumo",
     "rando; stage R_SP01; on 0x3901; off 0x1210; tbon 0:2",
     "set 0x1210", "")
+
+SOFTLOCK("R-X85W", "senses (F_0550) in the prison before the chains came off (M_011)",
+    "norando; stage R_SP107; wolf; on 0x4308; off 0x0510",
+    "clear 0x4308; reload", "The prison scene will play again.")

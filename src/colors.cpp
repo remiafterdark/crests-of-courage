@@ -205,12 +205,36 @@ bool json_find_value(const std::string& text, const std::string& key, std::strin
     return true;
 }
 
-void read_cosmetics_colors() {
+const std::string* config_text(bool* changed) {
+    static std::string s_text;
+    static std::filesystem::file_time_type s_stamp{};
+    static bool s_have = false;
+    if (changed != nullptr) *changed = false;
+    if (!s_haveConfigPath) return nullptr;
+    std::error_code ec;
+    const auto stamp = std::filesystem::last_write_time(s_configJsonPath, ec);
+    if (ec) return nullptr;
+    if (!s_have || stamp != s_stamp) {
+        std::ifstream file(s_configJsonPath, std::ios::binary);
+        if (!file) return nullptr;
+        s_text.assign((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        s_stamp = stamp;
+        s_have = true;
+        if (changed != nullptr) *changed = true;
+    }
+    return &s_text;
+}
+
+void read_cosmetics_colors(bool force = false) {
+    bool changed = false;
+    const std::string* cfg = config_text(&changed);
+    if (cfg == nullptr) {
+        for (SlotColor& c : s_cosmetics) c = SlotColor{};
+        return;
+    }
+    if (!changed && !force) return;
     for (SlotColor& c : s_cosmetics) c = SlotColor{};
-    if (!s_haveConfigPath) return;
-    std::ifstream file(s_configJsonPath, std::ios::binary);
-    if (!file) return;
-    const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    const std::string& text = *cfg;
     std::string value;
     if (json_find_value(text, "mod.dev_twilitrealm_cosmetics.enabled", value) && value == "false") {
         return;
@@ -774,10 +798,11 @@ bool coop_config_json_value(const char* key, std::string* out) {
     if (key == nullptr || out == nullptr) return false;
     if (!s_haveConfigPath) find_config_json();
     if (!s_haveConfigPath) return false;
-    std::ifstream file(s_configJsonPath, std::ios::binary);
-    if (!file) return false;
-    const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    return json_find_value(text, key, *out);
+
+    bool changed = false;
+    const std::string* cfg = config_text(&changed);
+    if (changed) read_cosmetics_colors(true);
+    return cfg != nullptr && json_find_value(*cfg, key, *out);
 }
 
 void colors_register_vars() {
@@ -800,7 +825,7 @@ void colors_register_vars() {
 void colors_init() {
     build_self_table();
     find_config_json();
-    read_cosmetics_colors();
+    read_cosmetics_colors(true);
     if (svc_texture == nullptr) {
         coop_log::warn("coop_mod: [COLORS] texture service unavailable, colors off");
     }

@@ -251,6 +251,11 @@ const Chain kChains[] = {
 };
 #undef COOP_CHAIN
 
+bool tier_owned(uint8_t item) {
+    if (item == dItemNo_COPY_ROD_2_e) return dComIfGs_isItemFirstBit(item) != 0;
+    return checkItemGet(item, 1) != 0;
+}
+
 uint8_t progressive_step(uint8_t item) {
     if (!rando_active()) return item;
     for (const Chain& chain : kChains) {
@@ -258,9 +263,9 @@ uint8_t progressive_step(uint8_t item) {
         for (int i = 0; i < chain.count; ++i) inChain = inChain || chain.items[i] == item;
         if (!inChain) continue;
 
-        if (checkItemGet(item, 1) == 0) return item;
+        if (!tier_owned(item)) return item;
         for (int i = 0; i < chain.count; ++i) {
-            if (checkItemGet(chain.items[i], 1) == 0) return chain.items[i];
+            if (!tier_owned(chain.items[i])) return chain.items[i];
         }
         return dItemNo_NONE_e;
     }
@@ -527,7 +532,8 @@ void update_death_link() {
         s_lastLife = 0xFFFF;
         return;
     }
-    if (daAlink_getAlinkActorClass() == nullptr || dComIfGp_event_runCheck()) return;
+
+    if (daAlink_getAlinkActorClass() == nullptr) return;
     const uint16_t life = dComIfGs_getLife();
     const uint16_t was = s_lastLife;
     s_lastLife = life;
@@ -695,6 +701,7 @@ void announce_item_taken() {
     msg.home[1] = partner->home.pos.y;
     msg.home[2] = partner->home.pos.z;
     msg.itemNo = item->getItemNo();
+    msg.itemBit = static_cast<uint8_t>(itemBitNo);
     coop_net_send(kMsgItemTaken, &msg, sizeof(msg));
     coop_log::info("coop_mod: [ITEM] took item {:#x} at ({:.0f},{:.0f},{:.0f}), sent",
         static_cast<int>(msg.itemNo), msg.home[0], msg.home[1], msg.home[2]);
@@ -703,8 +710,13 @@ void announce_item_taken() {
 struct ItemTakenSearch {
     cXyz home;
     uint8_t itemNo;
+    uint8_t itemBit;
     int hidden;
 };
+
+bool one_of_one(uint8_t itemNo) {
+    return itemNo == dItemNo_UTAWA_HEART_e || itemNo == dItemNo_KAKERA_HEART_e;
+}
 
 void* hide_taken_item(void* proc, void* data) {
     auto* actor = static_cast<fopAc_ac_c*>(proc);
@@ -712,11 +724,14 @@ void* hide_taken_item(void* proc, void* data) {
     if (!is_field_item(actor)) return nullptr;
     auto* item = static_cast<daItemBase_c*>(actor);
     if (item->getItemNo() != want->itemNo) return nullptr;
+    const u32 bit = (fopAcM_GetParam(actor) >> 8) & 0xFF;
+    const bool sameOne = one_of_one(want->itemNo) && want->itemBit != 0xFF && bit == want->itemBit &&
+                         fopAcM_GetRoomNo(actor) >= 0;
 
     const f32 dx = actor->home.pos.x - want->home.x;
     const f32 dy = actor->home.pos.y - want->home.y;
     const f32 dz = actor->home.pos.z - want->home.z;
-    if (dx * dx + dy * dy + dz * dz > 80.0f * 80.0f) return nullptr;
+    if (!sameOne && dx * dx + dy * dy + dz * dz > 80.0f * 80.0f) return nullptr;
 
     fopAcM_OnStatus(actor, fopAcStts_NODRAW_e);
     item->mCcCyl.OffCoSetBit();
@@ -728,6 +743,7 @@ void apply_item_taken(const MsgItemTaken& msg) {
     ItemTakenSearch want{};
     want.home.set(msg.home[0], msg.home[1], msg.home[2]);
     want.itemNo = msg.itemNo;
+    want.itemBit = msg.itemBit;
     want.hidden = 0;
     fopAcM_Search(hide_taken_item, &want);
     coop_log::info("coop_mod: [ITEM] peer took item {:#x}, cleared {} local copies", static_cast<int>(msg.itemNo), want.hidden);
@@ -1116,6 +1132,10 @@ bool story_flag_applies_now(u16 flag) {
     if (flag == dSv_event_flag_c::M_023 && !dComIfGs_isDarkClearLV(0)) return false;
 
     if (flag == dSv_event_flag_c::M_067 && !dComIfGs_isEventBit(dSv_event_flag_c::M_009)) return false;
+
+    if (flag == dSv_event_flag_c::F_0550 && !rando_active() && !dComIfGs_isEventBit(dSv_event_flag_c::M_011)) {
+        return false;
+    }
 
     if ((flag == dSv_event_flag_c::M_071 || flag == dSv_event_flag_c::F_0250) &&
         !dComIfGs_isTransformLV(3)) {
@@ -2521,24 +2541,25 @@ std::string features_local_name() {
     return sanitize_name(cfg_string(s_vars.name, "Player"));
 }
 
-static void load_into_peer_room(const CoopPeer& who, int localRoom) {
+static void load_into_peer_room(const CoopPeer& who, int localRoom, bool ownLayer = false) {
+    const int layer = ownLayer ? -1 : who.layer;
 
     const int room = who.curRoom;
     if (room >= 0 && room < 64) {
         const cXyz at(who.x, who.y, who.z);
         dComIfGs_setRestartRoom(at, who.angleY, static_cast<s8>(room));
-        dComIfGp_setNextStage(who.stage, -1, static_cast<s8>(room), who.layer);
+        dComIfGp_setNextStage(who.stage, -1, static_cast<s8>(room), layer);
 
         dComIfGs_setRestartRoomParam(static_cast<u32>(room & 0x3F) | (0xFFu << 24));
         coop_log::info(
             "coop_mod: teleport to {} stage={} room={} pos=({:.0f}, {:.0f}, {:.0f}) layer={} (local stage={} room={})",
-            who.name, who.stage, room, who.x, who.y, who.z, who.layer,
+            who.name, who.stage, room, who.x, who.y, who.z, layer,
             dComIfGp_getStartStageName(), localRoom);
     } else {
-        dComIfGp_setNextStage(who.stage, who.point, who.startRoom, who.layer);
+        dComIfGp_setNextStage(who.stage, who.point, who.startRoom, layer);
         coop_log::info(
             "coop_mod: teleport to {} stage={} point={} room={} layer={} (local stage={} room={})",
-            who.name, who.stage, who.point, who.startRoom, who.layer,
+            who.name, who.stage, who.point, who.startRoom, layer,
             dComIfGp_getStartStageName(), localRoom);
     }
 }
@@ -2614,7 +2635,7 @@ bool features_reload_at_player(uint8_t playerId) {
     std::memcpy(s_teleport.stage, who.stage, 9);
     coop_log::info("coop_mod: [JOIN] loading into {} room {} where {} is", who.stage, who.curRoom,
         who.name);
-    load_into_peer_room(who, fopAcM_GetRoomNo(daAlink_getAlinkActorClass()));
+    load_into_peer_room(who, fopAcM_GetRoomNo(daAlink_getAlinkActorClass()), true);
     return true;
 }
 

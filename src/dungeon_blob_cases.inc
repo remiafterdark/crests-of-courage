@@ -61,17 +61,16 @@
         return 3;
     case fpcNm_Obj_KLift00_e:
         out[0] = {offsetof(daObjKLift00_c, mNewBgMtx), offsetof(daObjKLift00_c, mpLiftPlatform)};
-        out[1] = {offsetof(daObjKLift00_c, mNumChains), offsetof(daObjKLift00_c, mChainPositions)};
-        out[2] = {offsetof(daObjKLift00_c, mNumChainModels), offsetof(daObjKLift00_c, mChainMdlObjs)};
-        out[3] = {offsetof(daObjKLift00_c, mStopSwingingFrames), offsetof(daObjKLift00_c, mStopSwingingFrames) + sizeof(daObjKLift00_c::mStopSwingingFrames)};
-        return 4;
+        out[1] = {offsetof(daObjKLift00_c, mStopSwingingFrames), offsetof(daObjKLift00_c, mStopSwingingFrames) + sizeof(daObjKLift00_c::mStopSwingingFrames)};
+        return 2;
     case fpcNm_Obj_Swpropeller_e:
         out[0] = {offsetof(daObjSwPr_c, mRotateSpeed), offsetof(daObjSwPr_c, mKaitenJntID)};
         out[1] = {offsetof(daObjSwPr_c, mSwDelayTimer), offsetof(daObjSwPr_c, mModelType) + sizeof(daObjSwPr_c::mModelType)};
         return 2;
     case fpcNm_Obj_Lv7PropY_e:
-        out[0] = {offsetof(daPropY_c, mMode), offsetof(daPropY_c, field_0x5c4) + sizeof(daPropY_c::field_0x5c4)};
-        return 1;
+        out[0] = {offsetof(daPropY_c, mMode), offsetof(daPropY_c, mType)};
+        out[1] = {offsetof(daPropY_c, mTurnType), offsetof(daPropY_c, field_0x5c4) + sizeof(daPropY_c::field_0x5c4)};
+        return 2;
     case fpcNm_Obj_Prop_e:
         out[0] = {offsetof(daObjProp_c, mArg), offsetof(daObjProp_c, mArg) + sizeof(daObjProp_c::mArg)};
         return 1;
@@ -80,13 +79,13 @@
         return 1;
     case fpcNm_Obj_Lv4Gear_e:
         out[0] = {offsetof(daObjLv4Gear_c, mTarget), offsetof(daObjLv4Gear_c, mSwActorID)};
-        out[1] = {offsetof(daObjLv4Gear_c, mCount), offsetof(daObjLv4Gear_c, mType) + sizeof(daObjLv4Gear_c::mType)};
+        out[1] = {offsetof(daObjLv4Gear_c, mCount), offsetof(daObjLv4Gear_c, mType)};
         return 2;
     case fpcNm_Obj_MagLift_e:
         out[0] = {offsetof(daMagLift_c, field_0x5ac), offsetof(daMagLift_c, is_switch) + sizeof(daMagLift_c::is_switch)};
         return 1;
     case fpcNm_Obj_MagLiftRot_e:
-        out[0] = {offsetof(daMagLiftRot_c, mType), offsetof(daMagLiftRot_c, mShakeYAmp)};
+        out[0] = {offsetof(daMagLiftRot_c, mTimer), offsetof(daMagLiftRot_c, mShakeYAmp)};
         out[1] = {offsetof(daMagLiftRot_c, mShakeDecay), offsetof(daMagLiftRot_c, field_0x630) + sizeof(daMagLiftRot_c::field_0x630)};
         return 2;
     case fpcNm_Obj_MagneArm_e:
@@ -97,9 +96,10 @@
         out[4] = {offsetof(daObjMarm_c, field_0xA28), offsetof(daObjMarm_c, mShadowKey)};
         return 5;
     case fpcNm_Obj_Lv7Bridge_e:
-        out[0] = {offsetof(daObjLv7Brg_c, field_0xa78), offsetof(daObjLv7Brg_c, mpBrokenModel)};
-        out[1] = {offsetof(daObjLv7Brg_c, field_0xa94), offsetof(daObjLv7Brg_c, field_0xa98) + sizeof(daObjLv7Brg_c::field_0xa98)};
-        return 2;
+        out[0] = {offsetof(daObjLv7Brg_c, field_0xa78), offsetof(daObjLv7Brg_c, mType)};
+        out[1] = {offsetof(daObjLv7Brg_c, mMode), offsetof(daObjLv7Brg_c, mpBrokenModel)};
+        out[2] = {offsetof(daObjLv7Brg_c, field_0xa94), offsetof(daObjLv7Brg_c, field_0xa98) + sizeof(daObjLv7Brg_c::field_0xa98)};
+        return 3;
     case fpcNm_Obj_Lv4Bridge_e:
         out[0] = {offsetof(daObjLv4Brg_c, field_0x5bc), offsetof(daObjLv4Brg_c, field_0x5c4) + sizeof(daObjLv4Brg_c::field_0x5c4)};
         return 1;
@@ -111,8 +111,9 @@
         return 1;
     case fpcNm_Obj_Lv4PRwall_e:
         out[0] = {offsetof(daObjLv4PRwall_c, mBgMtx2), offsetof(daObjLv4PRwall_c, mpModel)};
-        out[1] = {offsetof(daObjLv4PRwall_c, field_0x60c), offsetof(daObjLv4PRwall_c, field_0x629) + sizeof(daObjLv4PRwall_c::field_0x629)};
-        return 2;
+        out[1] = {offsetof(daObjLv4PRwall_c, field_0x60c), offsetof(daObjLv4PRwall_c, mType)};
+        out[2] = {offsetof(daObjLv4PRwall_c, field_0x618), offsetof(daObjLv4PRwall_c, field_0x629) + sizeof(daObjLv4PRwall_c::field_0x629)};
+        return 3;
     case fpcNm_Obj_Lv4SlideWall_e:
         out[0] = {offsetof(daSldWall_c, mMode), offsetof(daSldWall_c, field_0x5b0) + sizeof(daSldWall_c::field_0x5b0)};
         return 1;
@@ -123,7 +124,7 @@
         return 3;
     case fpcNm_Obj_MvStair_e:
         out[0] = {offsetof(daObjStair_c, mParticleLeftPos), offsetof(daObjStair_c, mSoundPos)};
-        out[1] = {offsetof(daObjStair_c, mType), offsetof(daObjStair_c, mEventId)};
+        out[1] = {offsetof(daObjStair_c, mAction), offsetof(daObjStair_c, mEventId)};
         out[2] = {offsetof(daObjStair_c, mMoveAccel), offsetof(daObjStair_c, mResType)};
         return 3;
     case fpcNm_Obj_SZbridge_e:
@@ -131,8 +132,9 @@
         out[1] = {offsetof(daObjSZbridge_c, mWaterY), offsetof(daObjSZbridge_c, field_0x620) + sizeof(daObjSZbridge_c::field_0x620)};
         return 2;
     case fpcNm_Obj_Lv3Water_e:
-        out[0] = {offsetof(daLv3Water_c, mMode), offsetof(daLv3Water_c, mEmitterIDs)};
-        return 1;
+        out[0] = {offsetof(daLv3Water_c, mMode), offsetof(daLv3Water_c, mType)};
+        out[1] = {offsetof(daLv3Water_c, mWaterLv), offsetof(daLv3Water_c, mEmitterIDs)};
+        return 2;
     case fpcNm_Obj_Lv3Water2_e:
         out[0] = {offsetof(daLv3Water2_c, mMode), offsetof(daLv3Water2_c, mResIdx)};
         out[1] = {offsetof(daLv3Water2_c, mWaterLv), offsetof(daLv3Water2_c, mWestParticles) + sizeof(daLv3Water2_c::mWestParticles)};
@@ -141,8 +143,9 @@
         out[0] = {offsetof(daObjWPndlm_c, field_0x958), offsetof(daObjWPndlm_c, field_0x95c) + sizeof(daObjWPndlm_c::field_0x95c)};
         return 1;
     case fpcNm_Obj_Lv8KekkaiTrap_e:
-        out[0] = {offsetof(daKekaiTrap_c, mIsSwitch), offsetof(daKekaiTrap_c, mTimer) + sizeof(daKekaiTrap_c::mTimer)};
-        return 1;
+        out[0] = {offsetof(daKekaiTrap_c, mIsSwitch), offsetof(daKekaiTrap_c, mType)};
+        out[1] = {offsetof(daKekaiTrap_c, mMode), offsetof(daKekaiTrap_c, mTimer) + sizeof(daKekaiTrap_c::mTimer)};
+        return 2;
     case fpcNm_Obj_Lv8UdFloor_e:
         out[0] = {offsetof(daUdFloor_c, mMode), offsetof(daUdFloor_c, field_0x5c5) + sizeof(daUdFloor_c::field_0x5c5)};
         return 1;
@@ -153,9 +156,10 @@
         out[0] = {offsetof(daFlorBoad_c, mMode), offsetof(daFlorBoad_c, field_0x727) + sizeof(daFlorBoad_c::field_0x727)};
         return 1;
     case fpcNm_Obj_RopeBridge_e:
-        out[0] = {offsetof(daObjRBridge_c, field_0xAEC), offsetof(daObjRBridge_c, mpLineMat)};
-        out[1] = {offsetof(daObjRBridge_c, field_0xb08), offsetof(daObjRBridge_c, mSound)};
-        return 2;
+        out[0] = {offsetof(daObjRBridge_c, field_0xAEC), offsetof(daObjRBridge_c, mType)};
+        out[1] = {offsetof(daObjRBridge_c, mMode), offsetof(daObjRBridge_c, mpLineMat)};
+        out[2] = {offsetof(daObjRBridge_c, field_0xb08), offsetof(daObjRBridge_c, mSound)};
+        return 3;
     case fpcNm_Obj_FallObj_e:
         out[0] = {offsetof(daObjFallObj_c, mMtx), offsetof(daObjFallObj_c, mpModel)};
         out[1] = {offsetof(daObjFallObj_c, mAction), offsetof(daObjFallObj_c, mSoundObj)};

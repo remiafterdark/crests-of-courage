@@ -482,7 +482,7 @@ void rig_draw(Rig& rig, J3DModel* link, bool gripL, bool gripR, dKy_tevstr_c* te
 
     calc_posed(rig.model, link, rig);
     g_env_light.setLightTevColorType_MAJI(rig.model, tev);
-    mDoExt_modelEntryDL(rig.model);
+    coop_model_entry_dl(rig.model, "ganon");
 
     if (mirrored) daMirror_c::entry(rig.model);
 
@@ -714,7 +714,7 @@ void draw_in_place(J3DModel* ours, J3DModel* links, daAlink_c* alink) {
         tev = &s_swordTev;
     }
     g_env_light.setLightTevColorType_MAJI(ours, tev);
-    mDoExt_modelEntryDL(ours);
+    coop_model_entry_dl(ours, "ganon");
 }
 
 bool s_on = false;
