@@ -1,0 +1,21 @@
+# ninja log v7
+29	560	8169281419997906	coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-mkdir	7091494635615100
+29	560	8169281419997906	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-mkdir	7091494635615100
+561	10660	8169281520338818	coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-download	73466736244745e7
+561	10660	8169281520338818	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-download	73466736244745e7
+10660	12243	8169281521857375	coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-update	966f77a190adcd22
+10660	12243	8169281521857375	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-update	966f77a190adcd22
+12243	12896	8169281543841050	coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-patch	872c5fa57a2c3497
+12243	12896	8169281543841050	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-patch	872c5fa57a2c3497
+12897	13115	8169281546182404	coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-configure	eca4c3f86605ef55
+12897	13115	8169281546182404	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-configure	eca4c3f86605ef55
+13115	13382	8169281548696325	coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-build	6c61e44504484bb1
+13115	13382	8169281548696325	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-build	6c61e44504484bb1
+13382	13667	8169281551576156	coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-install	44e8a16fddf08af
+13382	13667	8169281551576156	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-install	44e8a16fddf08af
+13667	14036	8169281554827381	coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-test	ff51f6ecd1482644
+13667	14036	8169281554827381	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-test	ff51f6ecd1482644
+14036	14659	8169281560939938	CMakeFiles/coop_opus-populate-complete	bbb89e194c911a64
+14036	14659	8169281560939938	coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-done	bbb89e194c911a64
+14036	14659	8169281560939938	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/CMakeFiles/coop_opus-populate-complete	bbb89e194c911a64
+14036	14659	8169281560939938	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-done	bbb89e194c911a64

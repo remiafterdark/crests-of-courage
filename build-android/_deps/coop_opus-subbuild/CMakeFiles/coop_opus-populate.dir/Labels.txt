@@ -1,0 +1,14 @@
+# Target labels
+ coop_opus-populate
+# Source files and their labels
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/CMakeFiles/coop_opus-populate
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/CMakeFiles/coop_opus-populate.rule
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/CMakeFiles/coop_opus-populate-complete.rule
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-build.rule
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-configure.rule
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-download.rule
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-install.rule
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-mkdir.rule
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-patch.rule
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-test.rule
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/coop_opus-populate-prefix/src/coop_opus-populate-stamp/coop_opus-populate-update.rule

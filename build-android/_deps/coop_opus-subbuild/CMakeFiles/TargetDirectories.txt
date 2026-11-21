@@ -1,0 +1,3 @@
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/CMakeFiles/coop_opus-populate.dir
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/CMakeFiles/edit_cache.dir
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-subbuild/CMakeFiles/rebuild_cache.dir

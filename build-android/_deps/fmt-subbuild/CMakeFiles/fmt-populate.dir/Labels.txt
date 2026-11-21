@@ -1,0 +1,14 @@
+# Target labels
+ fmt-populate
+# Source files and their labels
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/CMakeFiles/fmt-populate
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/CMakeFiles/fmt-populate.rule
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/CMakeFiles/fmt-populate-complete.rule
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-build.rule
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-configure.rule
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-download.rule
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-install.rule
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-mkdir.rule
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-patch.rule
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-test.rule
+C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-update.rule

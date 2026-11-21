@@ -1,0 +1,9 @@
+{
+  "id": "dev.joeyaw.coop_mod_vr",
+  "name": "Crests of Courage VR",
+  "version": "1.10.1",
+  "author": "remiafterdark (VR fork by JoeyAW)",
+  "description": "Online true co-op for Twilight Princess, for the Dusklight VR port: other players see your VR head and hands. Plays only with other Crests of Courage VR players.",
+  "icon": "res/icon.png",
+  "banner": "res/banner.png"
+}

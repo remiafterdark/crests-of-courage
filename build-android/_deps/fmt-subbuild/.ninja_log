@@ -1,0 +1,21 @@
+# ninja log v7
+49	393	8169281925977121	fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-mkdir	84d30b27712dfdaf
+49	393	8169281925977121	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-mkdir	84d30b27712dfdaf
+394	2246	8169281944093970	fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-download	eb4404ca3cf90537
+394	2246	8169281944093970	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-download	eb4404ca3cf90537
+2246	2645	8169281947823388	fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-update	9240cfd46e475436
+2246	2645	8169281947823388	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-update	9240cfd46e475436
+2661	3038	8169281951831325	fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-patch	7f1c5839b9851899
+2661	3038	8169281951831325	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-patch	7f1c5839b9851899
+3038	3654	8169281957959173	fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-configure	a5fd1235248f9681
+3038	3654	8169281957959173	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-configure	a5fd1235248f9681
+3654	3936	8169281961403243	fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-build	322c9d8325ead47e
+3654	3936	8169281961403243	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-build	322c9d8325ead47e
+3936	4253	8169281964412737	fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-install	ae6f4ae309232ef3
+3936	4253	8169281964412737	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-install	ae6f4ae309232ef3
+4253	4564	8169281967353460	fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-test	e02c67b2d7619e4d
+4253	4564	8169281967353460	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-test	e02c67b2d7619e4d
+4564	4943	8169281971137579	CMakeFiles/fmt-populate-complete	cfd1403ef8ceae7a
+4564	4943	8169281971137579	fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-done	cfd1403ef8ceae7a
+4564	4943	8169281971137579	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/CMakeFiles/fmt-populate-complete	cfd1403ef8ceae7a
+4564	4943	8169281971137579	C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-subbuild/fmt-populate-prefix/src/fmt-populate-stamp/fmt-populate-done	cfd1403ef8ceae7a

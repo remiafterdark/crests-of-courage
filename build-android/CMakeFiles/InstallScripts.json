@@ -1,0 +1,10 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/Users/joeyw/crests-of-courage-vr/build-android/cmake_install.cmake",
+		"C:/Users/joeyw/crests-of-courage-vr/build-android/dusk-sdk/cmake_install.cmake",
+		"C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/coop_opus-build/cmake_install.cmake",
+		"C:/Users/joeyw/crests-of-courage-vr/build-android/_deps/fmt-build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
