@@ -50,7 +50,7 @@ def default_models_dir():
     if not appdata:
         return ''
     return os.path.join(appdata, 'TwilitRealm', 'Dusklight', 'mod_data',
-                        'dev.remiafterdark.coop_mod', 'models')
+                        'dev.joeyaw.coop_mod_vr', 'models')
 
 
 def model_files(models_dir):

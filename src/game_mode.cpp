@@ -17,7 +17,7 @@ IMPORT_OPTIONAL_SERVICE(SaveService, svc_save);
 
 namespace {
 
-const char* const kGameModeId = "dev.remiafterdark.coop_mod.coop";
+const char* const kGameModeId = "dev.joeyaw.coop_mod_vr.coop";
 
 const char* const kSaveName = "crests-of-courage";
 

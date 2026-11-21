@@ -1533,8 +1533,13 @@ void on_hello(const uint8_t* payload, size_t size, uint8_t from) {
         coop_log::info("coop_mod: refusing '{}': version {} vs local {}",
             peer_slot(from).name, coop_version_text(msg.version), COOP_MOD_VERSION);
 
-        if (msg.version > kCoopWireVersion) {
-            toast("Update Crests of Courage",
+        if (!coop_wire_is_vr_fork(msg.version)) {
+            toast("Not Crests of Courage VR",
+                peer_slot(from).name + " is on " + coop_version_text(msg.version) +
+                    ". Everyone needs Crests of Courage VR to play together.",
+                12000);
+        } else if (msg.version > kCoopWireVersion) {
+            toast("Update Crests of Courage VR",
                 peer_slot(from).name + " is on " + coop_version_text(msg.version) + ", you're on " +
                     COOP_MOD_VERSION,
                 12000);

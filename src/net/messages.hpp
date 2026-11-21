@@ -20,11 +20,28 @@ constexpr uint16_t coop_version_number(const char* v) {
     }
     return static_cast<uint16_t>(parts[0] * 10000 + parts[1] * 100 + parts[2]);
 }
-const uint16_t kCoopWireVersion = coop_version_number(COOP_MOD_VERSION);
-static_assert(kCoopWireVersion > 1000, "mod.json's version has to be a.b.c");
+// Crests of Courage VR is its own network: its wire versions are offset into a range the
+// original mod never uses (it would need version 5.0.0), so the two refuse each other at the
+// hello, and the room server keeps their rooms and global lobbies apart (it matches on this
+// number). Changing the snapshot layout (PlayerSnapshot::vr) needs that anyway.
+const uint16_t kCoopVrWireOffset = 50000;
+const uint16_t kCoopWireVersion =
+    static_cast<uint16_t>(coop_version_number(COOP_MOD_VERSION) + kCoopVrWireOffset);
+static_assert(coop_version_number(COOP_MOD_VERSION) > 1000, "mod.json's version has to be a.b.c");
+static_assert(coop_version_number(COOP_MOD_VERSION) < 65535 - kCoopVrWireOffset,
+    "mod.json's version doesn't fit the VR wire range");
+
+inline bool coop_wire_is_vr_fork(uint16_t wire) {
+    return wire >= kCoopVrWireOffset;
+}
 
 inline std::string coop_version_text(uint16_t wire) {
-    if (wire < 1000) return "an older one";
+    if (!coop_wire_is_vr_fork(wire)) {
+        if (wire < 1000) return "an older one";
+        return "the regular (non-VR) Crests of Courage " + std::to_string(wire / 10000) + "." +
+               std::to_string(wire / 100 % 100) + "." + std::to_string(wire % 100);
+    }
+    wire = static_cast<uint16_t>(wire - kCoopVrWireOffset);
     return std::to_string(wire / 10000) + "." + std::to_string(wire / 100 % 100) + "." +
            std::to_string(wire % 100);
 }

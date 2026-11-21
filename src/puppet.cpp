@@ -5,6 +5,7 @@
 #include "mods/svc/hook.hpp"
 #include "mods/svc/log.hpp"
 #include "print.hpp"
+#include "vr_pose.hpp"
 
 #include "JSystem/J3DGraphAnimator/J3DJoint.h"
 #include "JSystem/J3DGraphLoader/J3DAnmLoader.h"
@@ -384,6 +385,8 @@ struct Puppet {
     s16 magneRot[9] = {};
     s16 headRot[3] = {};
     s16 wolfNeck[2] = {};
+    // Crests of Courage VR: their headset and tracked hands (vr_pose.cpp).
+    VrPuppetPose vr;
     J3DModel* chainLinks[kChainLinkPool] = {};
     int chainLinksUsed = 0;
     J3DModel* rodSegModels[kRodSegments] = {};
@@ -891,6 +894,7 @@ void release_puppet() {
         for (int a = 0; a < 3; ++a) pup().footAngles[i][a] = 0;
     }
     pup().bodyRotX = pup().bodyRotY = pup().bodyRotZ = 0;
+    vr_pose_reset(pup().vr);
     pup().swordId = kPuppetSwordNone;
     pup().swordTries = 0;
     pup().sheathId = kPuppetSheathNone;
@@ -1552,6 +1556,8 @@ int puppet_body_aim_callback(J3DJoint* joint, int param1) {
         s16 turn[3];
         int axis[3];
         if (jointNo == kHeadJoint) {
+            // A VR player's head follows their headset instead (vr_pose.cpp, after the calc).
+            if (vr_pose_active(pup().vr, s_puppetFrame, kVrPoseHead)) return 1;
             turn[0] = pup().headRot[0];
             turn[1] = static_cast<s16>(-pup().headRot[1]);
             turn[2] = pup().headRot[2];
@@ -4195,6 +4201,7 @@ void puppet_hook_on_network_snapshot(uint8_t playerId, float x, float y, float z
     for (int i = 0; i < 9; ++i) pup().magneRot[i] = equipment.magneRot[i];
     for (int i = 0; i < 3; ++i) pup().headRot[i] = equipment.headRot[i];
     for (int i = 0; i < 2; ++i) pup().wolfNeck[i] = equipment.wolfNeck[i];
+    vr_pose_receive(pup().vr, equipment.vr, s_puppetFrame);
     pup().hatHeard = true;
     pup().bodyRotX = equipment.bodyRotX;
     pup().bodyRotY = equipment.bodyRotY;
@@ -5107,6 +5114,11 @@ void render_puppet_body(J3DModel* model, const cXyz& pos, const csXyz& angle,
     mDoMtx_stack_c::ZXYrotM(angle.x, angle.y, angle.z);
     model->setBaseScale(cXyz(1.0f, 1.0f, 1.0f));
     model->setBaseTRMtx(mDoMtx_stack_c::get());
+    // VR players: head and arms posed inside calc(), before frame interpolation records the
+    // joints (vr_pose.cpp). Not on magnet surfaces, where the body isn't upright. Stays installed
+    // until the end of this function: coop_model_update_dl() below (mDoExt_modelUpdateDL) calcs
+    // the model AGAIN before drawing it, which would otherwise rebuild the plain animated pose.
+    VrPoseCalcScope vrPose(model, pup().vr, angle.y, s_puppetFrame, wolf || onMagnet);
     model->calc();
 
     if (alink != nullptr) {

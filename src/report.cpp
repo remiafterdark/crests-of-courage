@@ -44,7 +44,10 @@ extern const UiService* svc_ui;
 
 namespace {
 
-const char* const kReportUrl = "https://crests-rooms.crestsofcourage.workers.dev/report";
+// Crests of Courage VR: reports stay local. The original mod's report endpoint is for the
+// original mod's bugs, so the fork never posts to it (post() refuses with an empty URL), and
+// the Report Bug tab only says where the log is. Set a URL here once the fork has its own.
+const char* const kReportUrl = "";
 
 std::mutex s_logMutex;
 std::deque<std::string> s_lines;
@@ -355,7 +358,7 @@ std::string code_from(const HttpResult* r) {
 }
 
 bool post(const std::string& body, HttpCompleteFn done) {
-    if (svc_http == nullptr) return false;
+    if (svc_http == nullptr || kReportUrl[0] == '\0') return false;
     static const HttpHeader kHeaders[] = {{"Content-Type", "application/json"}};
     HttpRequestDesc desc = HTTP_REQUEST_DESC_INIT;
     desc.method = HTTP_METHOD_POST;
@@ -615,6 +618,20 @@ void report_on_message(const uint8_t* payload, size_t size, uint8_t from) {
 void report_build_tab(UiElementHandle left, UiElementHandle right) {
     s_statusElem = 0;
     s_statusShown.clear();
+    if (kReportUrl[0] == '\0') {
+        flush_to_disk();
+        const auto dir = log_dir().u8string();
+        svc_ui->pane_add_section(mod_ctx, left, "Report a bug");
+        svc_ui->pane_add_text(mod_ctx, left,
+            ("Crests of Courage VR doesn't send bug reports anywhere. Please don't report its "
+             "bugs to the original Crests of Courage - report them to the VR fork instead.\n\n"
+             "The co-op log (coop-log.txt, and coop-log-1.txt for the run before) is in:\n" +
+                std::string(dir.begin(), dir.end()))
+                .c_str(),
+            nullptr);
+        (void)right;
+        return;
+    }
     svc_ui->pane_add_section(mod_ctx, left, "Report a bug");
 
     UiControlDesc text = UI_CONTROL_DESC_INIT;
@@ -706,6 +723,7 @@ void report_register_vars() {
 }
 
 void crash_report_update() {
+    if (kReportUrl[0] == '\0') return;
     if (!s_crashPending || ++s_crashTicks < 300) return;
     if (s_crashSeenVar != 0) {
         char seen[256] = {};
@@ -725,6 +743,7 @@ void crash_report_update() {
 
 void report_hint_update() {
     crash_report_update();
+    if (kReportUrl[0] == '\0') return;
     if (!s_hintArmed || s_hintVar == 0 || cfg_bool(s_hintVar, false)) return;
     if (++s_hintTicks < 120) return;
     coop_notify_c(kNotifyOther, "Found a bug?", "Report bugs in CO-OP > Report Bug");

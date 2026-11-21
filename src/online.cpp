@@ -437,6 +437,9 @@ std::string error_text(const std::string& why, const std::string& detail) {
     if (why == "version") {
         const int theirs = std::atoi(detail.c_str());
         const std::string host = coop_version_text(static_cast<uint16_t>(theirs));
+        if (!coop_wire_is_vr_fork(static_cast<uint16_t>(theirs))) {
+            return "Host is on " + host + ". You both need Crests of Courage VR.";
+        }
         if (theirs > kCoopWireVersion) {
             return "Host is on " + host + ", you're on " COOP_MOD_VERSION ". Update to join.";
         }
@@ -499,8 +502,11 @@ void on_server_message(const std::string& text) {
         const std::string version = coop_version_text(static_cast<uint16_t>(theirs));
         coop_log::info("coop_mod: [ONLINE] joiner on {} refused (local {})", version,
             COOP_MOD_VERSION);
-        if (theirs > kCoopWireVersion) {
-            coop_notify_c(kNotifyOther, "Update Crests of Courage",
+        if (!coop_wire_is_vr_fork(static_cast<uint16_t>(theirs))) {
+            coop_notify_c(kNotifyOther, "Not Crests of Courage VR",
+                ("Someone joined on " + version + ". They need Crests of Courage VR").c_str());
+        } else if (theirs > kCoopWireVersion) {
+            coop_notify_c(kNotifyOther, "Update Crests of Courage VR",
                 ("Someone joined on " + version + ", you're on " COOP_MOD_VERSION).c_str());
         } else {
             coop_notify_c(kNotifyOther, "Different mod version",

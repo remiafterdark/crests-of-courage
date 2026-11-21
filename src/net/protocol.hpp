@@ -163,6 +163,26 @@ struct PlayerGear {
     uint8_t itemY;
 };
 
+// Crests of Courage VR: where a VR player's head and tracked hands are, so others can see
+// them (vr_pose.cpp). Rotations are unit quaternions (x, y, z, w) * kVrQuatScale and positions
+// are in units * kVrPosScale, all in the sender's Link frame: rotated by -shape_angle.y about
+// +Y, so the receiver can put them back on the puppet's own facing. Hands are relative to the
+// head (eye) point, which the receiver takes from the puppet's own head joint.
+enum VrPoseSnapshotFlags : uint8_t {
+    kVrPoseHead = 1 << 0,
+    kVrPoseLeftHand = 1 << 1,
+    kVrPoseRightHand = 1 << 2,
+};
+const float kVrQuatScale = 32767.0f;
+const float kVrPosScale = 64.0f;
+struct VrPoseSnapshot {
+    uint8_t flags;
+    uint8_t pad;
+    int16_t headQuat[4];
+    int16_t handPos[2][3];
+    int16_t handQuat[2][4];
+};
+
 struct PlayerSnapshot {
     uint32_t seq;
 
@@ -236,6 +256,8 @@ struct PlayerSnapshot {
     int16_t tevTint;
     uint8_t tevTintOn;
     PlayerGear gear;
+
+    VrPoseSnapshot vr;
 };
 const float kMagneRotFixed = 8192.0f;
 
@@ -343,8 +365,9 @@ static_assert(sizeof(PlayerSnapshot) ==
             16 + 16 + (kPuppetAttachSlots * 61) + 6 + 1 + 1 + 1 + 2 +
             (kPuppetChainPts * 3 * 4) + 1 + 12 + 24 + 2 + 1 + 2 + 12 + 1 + 4 + 4 +
             4   + 1   + 18   + 18   + 6   + 4   +
-            2   + 1   + 14  ,
+            2   + 1   + 14  + 38  ,
     "PlayerSnapshot must stay tightly packed");
+static_assert(sizeof(VrPoseSnapshot) == 2 + 8 + 12 + 16, "VrPoseSnapshot must stay tightly packed");
 
 static_assert(sizeof(MidnaSnapshot) != sizeof(PlayerSnapshot),
     "MidnaSnapshot and PlayerSnapshot must differ in size - handle_udp_event dispatches on it");

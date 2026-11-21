@@ -3,6 +3,7 @@
 #include "mods/svc/hook.hpp"
 #include "mods/svc/log.hpp"
 #include "print.hpp"
+#include "vr_pose.hpp"
 #include "mods/svc/net.hpp"
 #include "mods/svc/websocket.hpp"
 #include "mods/svc/ui.h"
@@ -2310,6 +2311,10 @@ void send_local_snapshot() {
             snapshot.wolfNeck[1] = alink->field_0x30b0;
         }
     }
+
+    // Crests of Courage VR: our headset and tracked hands, when the game is the VR port, and
+    // the body facing the headset the way the VR port draws it.
+    vr_pose_capture(alink, snapshot.vr, &snapshot.angleY);
 
     snapshot.tevTint = 0;
     snapshot.tevTintOn = 0;

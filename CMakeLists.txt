@@ -107,6 +107,7 @@ add_mod(coop_mod
              src/chat_keys.cpp
              src/voice.cpp
              src/voice_io.cpp
+             src/vr_pose.cpp
     MOD_JSON mod.json
 )
 

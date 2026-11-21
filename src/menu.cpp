@@ -727,7 +727,7 @@ std::string global_players_card_rml() {
     const bool on = global_active();
     return "<div class=\"hot-card\"><div class=\"hot-card-top\"><div class=\"hot-card-title\">Players Online</div>"
            "<div class=\"hot-card-value\"><img class=\"hot-community-icon\" "
-           "src=\"mod://dev.remiafterdark.coop_mod/res/crowd.png\" /><div class=\"hot-card-value-text\">" +
+           "src=\"mod://dev.joeyaw.coop_mod_vr/res/crowd.png\" /><div class=\"hot-card-value-text\">" +
            std::to_string(global_total()) + "</div></div></div><div class=\"hot-card-sub\">" +
            (on ? "Playing Hyrule Online right now." : "Join to see who's playing.") + "</div></div>";
 }
